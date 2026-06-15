@@ -1,9 +1,9 @@
 """
 title: DeepSeek Reasoning Effort Selector
 author: pi-agent
-description: Lets users choose between "high" and "max" reasoning effort when chatting with DeepSeek models. Injects reasoning_effort and thinking parameters into the request body before it reaches the DeepSeek API. Toggleable via a chip in the chat input bar; clicking the chip opens a modal to select the effort level.
+description: Toggleable filter that lets users select "high" or "max" reasoning effort for DeepSeek models. Shows a chip in the chat input bar; click to open the effort selector.
 required_open_webui_version: 0.9.0
-version: 1.0.0
+version: 1.0.6
 """
 
 from pydantic import BaseModel, Field
@@ -15,7 +15,7 @@ class Filter:
     class Valves(BaseModel):
         priority: int = Field(
             default=1,
-            description="Execution order. Should run after DeepSeek Thinking Default Off (priority 0).",
+            description="Filter execution order. Run after Thinking Default Off (priority 0).",
         )
         default_effort: Literal["high", "max"] = Field(
             default="high",
@@ -24,8 +24,8 @@ class Filter:
                 "input": {
                     "type": "select",
                     "options": [
-                        {"value": "high", "label": "High — default, faster responses"},
-                        {"value": "max", "label": "Max  — deepest reasoning, slower"},
+                        {"value": "high", "label": "high"},
+                        {"value": "max", "label": "max"},
                     ],
                 }
             },
@@ -33,9 +33,8 @@ class Filter:
         model_pattern: str = Field(
             default="deepseek",
             description=(
-                "Case-insensitive substring to match against the model name. "
-                "Only requests to models whose name contains this pattern will "
-                "have the parameters injected. Default: 'deepseek'."
+                "Case-insensitive model name filter. "
+                "Only matching models get reasoning params. Default: 'deepseek'."
             ),
         )
 
@@ -43,13 +42,13 @@ class Filter:
     class UserValves(BaseModel):
         reasoning_effort: Literal["high", "max"] = Field(
             default="high",
-            description="Reasoning depth for DeepSeek models in this chat.",
+            description="Reasoning depth for this chat.",
             json_schema_extra={
                 "input": {
                     "type": "select",
                     "options": [
-                        {"value": "high", "label": "High — default, faster"},
-                        {"value": "max", "label": "Max  — deepest reasoning"},
+                        {"value": "high", "label": "high"},
+                        {"value": "max", "label": "max"},
                     ],
                 }
             },
@@ -61,7 +60,7 @@ class Filter:
         # A chip appears in the chat input bar; clicking it opens the
         # UserValves modal to select the reasoning effort.
         self.toggle = True
-        self.icon = "🧠"
+        self.icon = "https://icons.getbootstrap.com/assets/icons/lightbulb.svg"
 
     # Inlet: modify the request body BEFORE it reaches the LLM API
     async def inlet(
@@ -102,13 +101,15 @@ class Filter:
 
         # Show a brief status notification in the chat UI
         if __event_emitter__:
-            await __event_emitter__({
-                "type": "status",
-                "data": {
-                    "description": f"🧠 DeepSeek reasoning: {effort.upper()}",
-                    "done": True,
-                    "hidden": False,
-                },
-            })
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"🤔 reasoning effort ({effort})",
+                        "done": True,
+                        "hidden": False,
+                    },
+                }
+            )
 
         return body
