@@ -54,19 +54,12 @@ class Filter:
                 }
             },
         )
-        enable_thinking: bool = Field(
-            default=True,
-            description=(
-                "Enable thinking mode (required for reasoning_effort to take effect). "
-                "Turn off to use the non-reasoning variant of the model."
-            ),
-        )
 
     def __init__(self):
         self.valves = self.Valves()
         # Make the filter toggleable so users can enable/disable it per chat.
         # A chip appears in the chat input bar; clicking it opens the
-        # UserValves modal (effort + thinking toggle).
+        # UserValves modal to select the reasoning effort.
         self.toggle = True
         self.icon = "🧠"
 
@@ -85,13 +78,11 @@ class Filter:
 
         # Resolve reasoning effort
         effort: str = self.valves.default_effort
-        enable_thinking: bool = True
 
         if __user__ and __user__.get("valves"):
             uv = __user__["valves"]
             # Prefer the user's per-chat choice when available
             effort = getattr(uv, "reasoning_effort", effort)
-            enable_thinking = getattr(uv, "enable_thinking", True)
 
         # Strip any pre-existing values (e.g. from Open WebUI or other
         # filters) so this filter's values always take precedence.
@@ -100,20 +91,18 @@ class Filter:
         if isinstance(extra_body, dict):
             extra_body.pop("thinking", None)
 
-        # Inject the resolved values fresh
+        # Inject the resolved values fresh.
+        # Thinking mode is always enabled when this filter is active.
         body["reasoning_effort"] = effort
         body["extra_body"] = extra_body
-        body["extra_body"]["thinking"] = {
-            "type": "enabled" if enable_thinking else "disabled"
-        }
+        body["extra_body"]["thinking"] = {"type": "enabled"}
 
         # Show a brief status notification in the chat UI
         if __event_emitter__:
-            mode = f"{effort.upper()}" if enable_thinking else "off"
             await __event_emitter__({
                 "type": "status",
                 "data": {
-                    "description": f"🧠 DeepSeek reasoning: {mode}",
+                    "description": f"🧠 DeepSeek reasoning: {effort.upper()}",
                     "done": True,
                     "hidden": False,
                 },
