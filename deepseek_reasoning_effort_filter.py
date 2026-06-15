@@ -11,7 +11,7 @@ from typing import Literal, Optional
 
 
 class Filter:
-    # ── Admin Valves (configured by admins in Functions management) ──────────
+    # Admin Valves (configured by admins in Functions management)
     class Valves(BaseModel):
         priority: int = Field(
             default=0,
@@ -38,9 +38,8 @@ class Filter:
                 "have the parameters injected. Default: 'deepseek'."
             ),
         )
-        pass
 
-    # ── User Valves (per-chat configurable by any user) ──────────────────────
+    # User Valves (per-chat configurable by any user)
     class UserValves(BaseModel):
         reasoning_effort: Literal["high", "max"] = Field(
             default="high",
@@ -62,7 +61,6 @@ class Filter:
                 "Turn off to use the non-reasoning variant of the model."
             ),
         )
-        pass
 
     def __init__(self):
         self.valves = self.Valves()
@@ -72,7 +70,7 @@ class Filter:
         self.toggle = True
         self.icon = "🧠"
 
-    # ── Inlet: modify the request body BEFORE it reaches the LLM API ─────────
+    # Inlet: modify the request body BEFORE it reaches the LLM API
     async def inlet(
         self,
         body: dict,
@@ -85,7 +83,7 @@ class Filter:
         if self.valves.model_pattern.lower() not in model.lower():
             return body
 
-        # ── Resolve reasoning effort ─────────────────────────────────────
+        # Resolve reasoning effort
         effort: str = self.valves.default_effort
         enable_thinking: bool = True
 
@@ -95,9 +93,17 @@ class Filter:
             effort = getattr(uv, "reasoning_effort", effort)
             enable_thinking = getattr(uv, "enable_thinking", True)
 
-        # ── Inject DeepSeek-specific parameters into the request body ────
+        # Strip any pre-existing values (e.g. from Open WebUI or other
+        # filters) so this filter's values always take precedence.
+        body.pop("reasoning_effort", None)
+        extra_body: dict = body.get("extra_body", {})
+        if isinstance(extra_body, dict):
+            extra_body.pop("thinking", None)
+
+        # Inject the resolved values fresh
         body["reasoning_effort"] = effort
-        body.setdefault("extra_body", {})["thinking"] = {
+        body["extra_body"] = extra_body
+        body["extra_body"]["thinking"] = {
             "type": "enabled" if enable_thinking else "disabled"
         }
 
