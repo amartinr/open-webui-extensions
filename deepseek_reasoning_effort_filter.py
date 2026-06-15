@@ -14,8 +14,8 @@ class Filter:
     # Admin Valves (configured by admins in Functions management)
     class Valves(BaseModel):
         priority: int = Field(
-            default=0,
-            description="Execution order of this filter. Lower values run first.",
+            default=1,
+            description="Execution order. Should run after DeepSeek Thinking Default Off (priority 0).",
         )
         default_effort: Literal["high", "max"] = Field(
             default="high",
@@ -84,15 +84,18 @@ class Filter:
             # Prefer the user's per-chat choice when available
             effort = getattr(uv, "reasoning_effort", effort)
 
-        # Strip any pre-existing values (e.g. from Open WebUI or other
-        # filters) so this filter's values always take precedence.
+        # Strip any pre-existing values (e.g. from DeepSeek Thinking Default
+        # Off filter, workspace params, or Open WebUI) so this filter's values
+        # always take precedence.  Follow the same pattern as Filter 0:
+        # reasoning_effort goes at top level, thinking goes inside extra_body.
         body.pop("reasoning_effort", None)
         extra_body: dict = body.get("extra_body", {})
         if isinstance(extra_body, dict):
             extra_body.pop("thinking", None)
+        else:
+            extra_body = {}
 
         # Inject the resolved values fresh.
-        # Thinking mode is always enabled when this filter is active.
         body["reasoning_effort"] = effort
         body["extra_body"] = extra_body
         body["extra_body"]["thinking"] = {"type": "enabled"}
