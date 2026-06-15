@@ -43,15 +43,6 @@ class Filter:
         reasoning_effort: Literal["high", "max"] = Field(
             default="high",
             description="Reasoning depth for this chat.",
-            json_schema_extra={
-                "input": {
-                    "type": "select",
-                    "options": [
-                        {"value": "high", "label": "high"},
-                        {"value": "max", "label": "max"},
-                    ],
-                }
-            },
         )
 
     def __init__(self):
@@ -105,7 +96,7 @@ class Filter:
                 {
                     "type": "status",
                     "data": {
-                        "description": f"🤔 reasoning effort ({effort})",
+                        "description": f"🤔 Reasoning effort ({effort})",
                         "done": True,
                         "hidden": False,
                     },
