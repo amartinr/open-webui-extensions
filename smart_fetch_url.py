@@ -3,11 +3,14 @@ title: Smart Fetch URL
 author: A. Martin
 author_url: https://github.com/abel-martin
 git_url: https://github.com/abel-martin/smart-fetch-url
-description: Fetch a URL with browser-grade TLS fingerprinting and extract clean readable content. Uses curl_cffi to impersonate real browsers at the TLS/HTTP2 level (JA3/JA4 match). Returns markdown with rich metadata (author, publish date, schema.org data). Better noise removal and anti-bot bypass than a plain HTTP fetch. Does NOT execute JavaScript — use a browser tool for JS-heavy SPAs.
+description: Fetch a URL with browser-grade TLS fingerprinting and extract clean readable content.
 required_open_webui_version: 0.4.0
 requirements: curl_cffi, trafilatura, selectolax
-version: 0.2.0
-license: MIT
+version: 0.4.1
+licence: MIT
+
+Based on pi-smart-fetch (MIT) by Thinkscape
+Copyright (c) 2026 Thinkscape
 """
 
 import asyncio
