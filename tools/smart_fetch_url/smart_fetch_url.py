@@ -3,14 +3,11 @@ title: Smart Fetch URL
 author: A. Martin
 author_url: https://github.com/abel-martin
 git_url: https://github.com/abel-martin/smart-fetch-url
-description: Fetch a URL with browser-grade TLS fingerprinting and extract clean readable content.
-required_open_webui_version: 0.4.0
-requirements: curl_cffi, trafilatura, selectolax
-version: 0.4.1
+description: "Always preferred over 'fetch_url'. Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Use by default."
+required_open_webui_version: 0.9.0
+requirements: curl_cffi, trafilatura, selectolax, mini-racer
+version: 0.4.2
 licence: MIT
-
-Based on pi-smart-fetch (MIT) by Thinkscape
-Copyright (c) 2026 Thinkscape
 """
 
 import asyncio
@@ -130,6 +127,10 @@ class Tools:
             False,
             description="Emit detailed status events during fetch",
         )
+        enable_js: bool = Field(
+            False,
+            description="Extract JS-embedded data from pages using V8 (e.g., __INITIAL_STATE__, __NEXT_DATA__)",
+        )
 
     class UserValves(BaseModel):
         """Per-user overrides for fetch settings. Configured from the chat session."""
@@ -153,6 +154,10 @@ class Tools:
         verbose: Optional[bool] = Field(
             None,
             description="Emit detailed status events during fetch (overrides admin setting)",
+        )
+        enable_js: Optional[bool] = Field(
+            None,
+            description="Override: extract JS-embedded data from pages using V8",
         )
 
     def __init__(self):
@@ -212,6 +217,7 @@ class Tools:
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
         timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
+        enable_js = (uv.enable_js if uv and uv.enable_js is not None else None) or self.valves.enable_js
 
         # Validate
         if not url or not url.strip():
@@ -256,6 +262,7 @@ class Tools:
                 format=format,
                 remove_images=remove_images,
                 include_replies=include_replies,
+                enable_js=enable_js,
             )
 
             # Step 4: Alternate content fallback for thin/no content
@@ -275,6 +282,7 @@ class Tools:
                     headers=headers,
                     format=format,
                     remove_images=remove_images,
+                    enable_js=enable_js,
                 )
                 alternate_urls = alternates_used or []
 
@@ -523,12 +531,15 @@ class Tools:
         format: str,
         remove_images: bool = False,
         include_replies: bool = True,
+        enable_js: bool = False,
     ) -> dict:
         """
         Extract clean content from raw HTML.
 
         Uses trafilatura for primary extraction (similar to Defuddle/Readability).
         Falls back to basic extraction if trafilatura is not available or fails.
+        When enable_js is True, also attempts to extract structured data embedded
+        in JavaScript variables (e.g., window.__INITIAL_STATE__) using V8.
         """
         content = None
         metadata = {}
@@ -592,6 +603,17 @@ class Tools:
                 or ""
             )
 
+        # Step: Extract JS-embedded data if enabled
+        js_content = ""
+        if enable_js and format != "raw":
+            js_content = self._extract_js_from_html(raw_html)
+
+        if js_content:
+            if content:
+                content = content + "\n\n---\n\n### JS-embedded data\n\n" + js_content
+            else:
+                content = "### JS-embedded data\n\n" + js_content
+
         word_count = len(content.split()) if content else 0
 
         return {
@@ -650,6 +672,75 @@ class Tools:
         return text
 
     # ──────────────────────────────────────────────
+    #  Internal: JS-embedded data extraction
+    # ──────────────────────────────────────────────
+
+    def _extract_js_from_html(self, html: str) -> str:
+        """
+        Scan HTML for JavaScript-embedded structured data and extract it using V8.
+
+        Looks for common patterns like:
+          - window.__INITIAL_STATE__ = {...}
+          - window.__PRELOADED_STATE__ = {...}
+          - var DATA = {...}
+          - self.__next_f = ...  (Next.js RSC payload)
+
+        Uses mini-racer (embedded V8) to safely evaluate the JS expression
+        and return the result as formatted JSON.
+
+        Returns an empty string if nothing is found or extraction fails.
+        """
+        # Patterns to search: JS variable assignments with object/array literals
+        patterns = [
+            # window.__INITIAL_STATE__ / __PRELOADED_STATE__
+            r'window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]+?\});',
+            r'window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]+?\});',
+            r'window\.__INITIAL_STATE__\s*=\s*(\[[\s\S]+?\]);',
+            # window.__DATA__ (common in some frameworks)
+            r'window\.__DATA__\s*=\s*(\{[\s\S]+?\});',
+            # self.__next_f.push (Next.js RSC)
+            r'self\.__next_f\s*=\s*\[([\s\S]*?)\];',
+        ]
+
+        matched_code = None
+        for pattern in patterns:
+            match = re.search(pattern, html)
+            if match:
+                # The captured group is the JS expression, not valid JSON
+                js_expr = match.group(1).strip()
+                # If it's an array expression, wrap it in parens for valid JS
+                if js_expr.startswith("["):
+                    js_expr = "(" + js_expr + ")"
+                matched_code = f"JSON.stringify({js_expr}, null, 2)"
+                break
+
+        if not matched_code:
+            return ""
+
+        # Lazy import and evaluate with mini-racer
+        try:
+            from py_mini_racer import mini_racer
+
+            with mini_racer() as ctx:
+                # Safety: timeboxed at 5 seconds, hard memory limit at 50 MB
+                ctx.set_hard_memory_limit(50 * 1024 * 1024)
+                result = ctx.eval(matched_code, timeout_sec=5)
+                if result and isinstance(result, str):
+                    # Pretty-print the JSON
+                    try:
+                        parsed = json.loads(result)
+                        return json.dumps(parsed, indent=2, ensure_ascii=False)[:10000]
+                    except json.JSONDecodeError:
+                        return result[:10000]
+                return ""
+        except ImportError:
+            logger.warning("mini-racer not available, skipping JS extraction")
+            return ""
+        except Exception as e:
+            logger.debug(f"JS extraction failed: {e}")
+            return ""
+
+    # ──────────────────────────────────────────────
     #  Internal: Alternate content fallback
     # ──────────────────────────────────────────────
 
@@ -664,6 +755,7 @@ class Tools:
         headers: Optional[dict],
         format: str,
         remove_images: bool,
+        enable_js: bool = False,
     ) -> tuple[dict, list[str]]:
         """
         When the extracted content is too thin, look for <link rel="alternate">
@@ -719,6 +811,7 @@ class Tools:
                         url=alt_final,
                         format=format,
                         remove_images=remove_images,
+                        enable_js=enable_js,
                     )
                     if alt_extracted.get("word_count", 0) > 30:
                         alternates_used.append(alt_final)
