@@ -2,25 +2,25 @@
 
 An Open WebUI tool for fetching URLs with browser-grade TLS fingerprinting and clean content extraction.
 
-Inspired by [pi-smart-fetch](https://pi.dev/packages/pi-smart-fetch), a web fetching extension for [pi.dev](https://pi.dev).
+A Python port of [pi-smart-fetch](https://pi.dev/packages/pi-smart-fetch) by [Thinkscape](https://github.com/Thinkscape/agent-smart-fetch), adapted for Open WebUI.
 
 ## Features
 
-- **TLS fingerprinting** — impersonates real browsers (Chrome, Firefox, Safari, Edge) via `curl_cffi`
-- **Defuddle-style extraction** — clean readable content via `trafilatura`
-- **Rich metadata** — title, author, site, language, published date
-- **Alternate content fallback** — follows `<link rel="alternate">` when extraction yields thin content
-- **Batch fetch** — multiple URLs with bounded concurrency
-- **Multiple output formats** — markdown, html, text, json, raw
-- **UserValves** — per-user overrides for all config settings (max_chars, timeout, browser, concurrency) from the chat session
+- **TLS fingerprinting** - impersonates real browsers (Chrome, Firefox, Safari, Edge) via `curl_cffi`
+- **Defuddle-style extraction** - clean readable content via `trafilatura`
+- **Rich metadata** - title, author, site, language, published date
+- **Alternate content fallback** - follows `<link rel="alternate">` when extraction yields thin content
+- **Batch fetch** - multiple URLs with bounded concurrency
+- **Multiple output formats** - markdown, html, text, json, raw
+- **UserValves** - per-user overrides for all config settings (max_chars, timeout, browser, concurrency) from the chat session
 
 ## Requirements
 
 Installed automatically by Open WebUI on first load:
 
-- `curl_cffi` — TLS/HTTP2 fingerprinting
-- `trafilatura` — content extraction
-- `selectolax` — HTML parsing fallback
+- `curl_cffi` - TLS/HTTP2 fingerprinting
+- `trafilatura` - content extraction
+- `selectolax` - HTML parsing fallback
 
 ## Usage
 
@@ -55,4 +55,6 @@ batch_fetch_urls(urls, format?, max_chars?, browser?, os?,
 
 ## License
 
-MIT
+MIT - see [LICENSE](./LICENSE).
+
+This project is a derivative of [pi-smart-fetch](https://pi.dev/packages/pi-smart-fetch) by Thinkscape, also MIT licensed.
