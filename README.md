@@ -1,11 +1,11 @@
-# open-webui-tools
+# open-webui-extensions
 
 Colección de herramientas, funciones y experimentos para [Open WebUI](https://docs.openwebui.com/).
 
 ## Estructura
 
 ```
-open-webui-tools/
+open-webui-extensions/
 ├── tools/                        # Workspace Tools (class Tools)
 │   └── smart_fetch_url/          #    Fetch URLs con TLS fingerprinting
 ├── functions/                    # Admin Panel Functions
