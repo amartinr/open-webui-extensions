@@ -179,6 +179,7 @@ class Tools:
         include_replies: bool = True,
         proxy: Optional[str] = None,
         headers: Optional[dict] = None,
+        show_favicons: bool = True,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
     ) -> str:
@@ -203,6 +204,9 @@ class Tools:
         :param include_replies: Include reply/comment threads when site supports them
         :param proxy: Proxy URL (http://user:pass@host:port or socks5://host:port)
         :param headers: Custom HTTP headers to send
+        :param show_favicons: Emit a status event so Open Web UI displays
+                              favicons and a clickable URL list below the response
+                              (default: True)
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
         :returns: Extracted content string with metadata header
@@ -263,6 +267,9 @@ class Tools:
                     f"✅ Fetched {status_code} from {self._truncate_url(final_url)}",
                     done=True,
                 )
+                if show_favicons:
+                    visited_urls = self._collect_visited_urls(url, final_url, [])
+                    await self._emit_favicon_list(__event_emitter__, visited_urls)
                 return result
 
             # Step 3: Extract content
@@ -281,6 +288,7 @@ class Tools:
             )
 
             # Step 4: Alternate content fallback for thin/no content
+            alternate_urls = []
             if (
                 format != "json"
                 and extracted.get("word_count", 0)
@@ -291,7 +299,7 @@ class Tools:
                     "🔗 Content thin, trying alternate links...",
                     done=False,
                 )
-                extracted = await self._try_alternate_fallback(
+                extracted, alternates_used = await self._try_alternate_fallback(
                     raw_html=raw_html,
                     url=final_url,
                     browser=browser,
@@ -302,6 +310,7 @@ class Tools:
                     format=format,
                     remove_images=remove_images,
                 )
+                alternate_urls = alternates_used or []
 
             # Step 5: Truncate
             content = extracted.get("content", "")
@@ -324,6 +333,11 @@ class Tools:
                 os=os,
                 status_code=status_code,
             )
+
+            # Step 7: Emit favicon URL list event for Open WebUI's source/citation display
+            visited_urls = self._collect_visited_urls(url, final_url, alternate_urls)
+            if show_favicons:
+                await self._emit_favicon_list(__event_emitter__, visited_urls)
 
             await self._emit_status(
                 __event_emitter__,
@@ -411,6 +425,7 @@ class Tools:
                         browser=browser,
                         os=os,
                         timeout_ms=timeout_ms,
+                        show_favicons=False,  # batch handles its own favicon list
                         __event_emitter__=None,  # suppress per-item events
                     )
                     return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{result}\n\n---\n"
@@ -419,6 +434,9 @@ class Tools:
 
         tasks = [fetch_one(i, u) for i, u in enumerate(urls)]
         results = await asyncio.gather(*tasks)
+
+        # Emit a single combined favicon list for all batch URLs
+        await self._emit_favicon_list(__event_emitter__, urls)
 
         await self._emit_status(
             __event_emitter__,
@@ -708,11 +726,14 @@ class Tools:
         headers: Optional[dict],
         format: str,
         remove_images: bool,
-    ) -> dict:
+    ) -> tuple[dict, list[str]]:
         """
         When the extracted content is too thin, look for <link rel="alternate">
         entries in the HTML <head> and try fetching them.
+
+        Returns: (extracted_dict, list_of_alternate_urls_used)
         """
+        alternates_used = []
         try:
             from selectolax.parser import HTMLParser
 
@@ -738,7 +759,7 @@ class Tools:
                         candidates.append(alt_href)
 
             if not candidates:
-                return {"content": "", "word_count": 0}
+                return {"content": "", "word_count": 0}, alternates_used
 
             # Resolve relative URLs
             from urllib.parse import urljoin
@@ -762,14 +783,15 @@ class Tools:
                         remove_images=remove_images,
                     )
                     if alt_extracted.get("word_count", 0) > 30:
-                        return alt_extracted
+                        alternates_used.append(alt_final)
+                        return alt_extracted, alternates_used
                 except Exception:
                     continue
 
         except ImportError:
             pass
 
-        return {"content": "", "word_count": 0}
+        return {"content": "", "word_count": 0}, alternates_used
 
     # ──────────────────────────────────────────────
     #  Internal: Format helpers
@@ -902,6 +924,66 @@ class Tools:
         return None
 
     # ──────────────────────────────────────────────
+    #  Internal: Favicon / visited URLs helpers
+    # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _collect_visited_urls(
+        original_url: str, final_url: str, alternate_urls: list[str]
+    ) -> list[str]:
+        """Build a de-duplicated list of all URLs visited during the fetch."""
+        seen = set()
+        result = []
+        for u in (original_url, final_url, *alternate_urls):
+            if u and u not in seen:
+                seen.add(u)
+                result.append(u)
+        return result
+
+    async def _emit_favicon_list(
+        self,
+        emitter: Optional[Any],
+        urls: list[str],
+    ):
+        """
+        Emit a status event that triggers Open WebUI's source/citation display
+        with favicons from the visited URLs.
+
+        The frontend component WebSearchResults.svelte / Citations.svelte renders
+        favicons by fetching them from google's favicon service:
+          https://www.google.com/s2/favicons?sz=32&domain={url}
+        """
+        if emitter is None or not urls:
+            return
+        # Build items mimicking the search_web format that WebSearchResults expects
+        items = []
+        for u in urls:
+            items.append(
+                {
+                    "link": u,
+                    "title": u,
+                    "snippet": "",
+                }
+            )
+        try:
+            await emitter(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"Fetched {len(urls)} URL(s)",
+                        "action": "web_search",
+                        "urls": urls,
+                        "items": items,
+                        "query": "",
+                        "done": True,
+                        "hidden": False,
+                    },
+                }
+            )
+        except Exception:
+            pass  # Event emission is best-effort
+
+    # ──────────────────────────────────────────────
     #  Internal: Error formatting
     # ──────────────────────────────────────────────
 
@@ -953,4 +1035,4 @@ class Tools:
         """Truncate a long URL for display."""
         if len(url) <= max_len:
             return url
-        return url[:max_len - 3] + "..."
+        return url[: max_len - 3] + "..."
