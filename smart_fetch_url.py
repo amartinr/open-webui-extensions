@@ -153,7 +153,7 @@ class Tools:
     #  Core tool method
     # ──────────────────────────────────────────────
 
-    async def fetch_url(
+    async def smart_fetch_url(
         self,
         url: str,
         format: str = "markdown",
@@ -323,7 +323,7 @@ class Tools:
                 f"❌ {error_msg}",
                 done=True,
             )
-            logger.exception(f"fetch_url failed for {url}")
+            logger.exception(f"smart_fetch_url failed for {url}")
             return error_msg
 
     # ──────────────────────────────────────────────
@@ -384,7 +384,7 @@ class Tools:
                     done=False,
                 )
                 try:
-                    result = await self.fetch_url(
+                    result = await self.smart_fetch_url(
                         url=single_url,
                         format=format,
                         max_chars=max_chars,
