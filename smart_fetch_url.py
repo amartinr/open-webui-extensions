@@ -103,13 +103,6 @@ DEFAULT_USER_AGENTS = {
 
 
 class Tools:
-    """
-    Smart Fetch URL — browser-grade TLS fingerprinting + Defuddle-like extraction.
-
-    Uses curl_cffi for TLS/HTTP2 impersonation and trafilatura for clean content
-    extraction. Supports multiple output formats (markdown, html, text, json, raw),
-    alternate content fallback, and batch fetching.
-    """
 
     class Valves(BaseModel):
         """Configuration settings for this tool (admin-set, server-side)."""
