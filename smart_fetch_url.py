@@ -179,7 +179,7 @@ class Tools:
         :param url: URL to fetch (http/https only)
         :param format: Output format: "markdown" (default, readable), "html" (cleaned HTML),
                        "text" (plain text), "json" (structured), or "raw" (full server response)
-        :param max_chars: Maximum characters to return (default: {})
+        :param max_chars: Maximum characters to return (default: 50000)
         :param browser: Browser profile for TLS fingerprinting.
                         Examples: chrome_145, firefox_147, safari_18_0, edge_135
         :param os: OS profile hint. Options: windows, macos, linux, android, ios
@@ -190,9 +190,7 @@ class Tools:
         :param headers: Custom HTTP headers to send
         :param __event_emitter__: Internal — for UI progress updates
         :returns: Extracted content string with metadata header
-        """.format(
-            self.valves.max_chars
-        )
+        """
 
         max_chars = max_chars or self.valves.max_chars
         timeout_ms = timeout_ms or self.valves.timeout_ms
@@ -355,12 +353,10 @@ class Tools:
         :param browser: Browser profile for TLS fingerprinting
         :param os: OS profile hint
         :param timeout_ms: Request timeout per URL in milliseconds
-        :param concurrency: Max concurrent fetches (default: {})
+        :param concurrency: Max concurrent fetches (default: 8)
         :param __event_emitter__: Internal — for UI progress updates
         :returns: Labeled results for all URLs
-        """.format(
-            self.valves.batch_concurrency
-        )
+        """
 
         max_chars = max_chars or self.valves.max_chars
         timeout_ms = timeout_ms or self.valves.timeout_ms
