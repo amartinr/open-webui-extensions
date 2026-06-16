@@ -1,8 +1,8 @@
 """
 title: Smart Fetch URL
-author: Your Name
-author_url: https://github.com/yourname
-git_url: https://github.com/yourname/smart-fetch-url
+author: A. Martin
+author_url: https://github.com/abel-martin
+git_url: https://github.com/abel-martin/smart-fetch-url
 description: >
   Fetch a URL with browser-grade TLS fingerprinting and extract clean, readable content.
   Uses curl_cffi to impersonate real browsers at the TLS/HTTP2 level (JA3/JA4 match).
@@ -10,8 +10,8 @@ description: >
   Better noise removal and anti-bot bypass than a plain HTTP fetch.
   Does NOT execute JavaScript — use a browser tool for JS-heavy SPAs.
 required_open_webui_version: 0.4.0
-requirements: curl_cffi, trafilatura, httpx, lxml, selectolax
-version: 0.1.0
+requirements: curl_cffi, trafilatura, selectolax
+version: 0.2.0
 licence: MIT
 """
 
