@@ -204,7 +204,7 @@ class Tools:
         :param include_replies: Include reply/comment threads when site supports them
         :param proxy: Proxy URL (http://user:pass@host:port or socks5://host:port)
         :param headers: Custom HTTP headers to send
-        :param show_favicons: Emit a status event so Open Web UI displays
+        :param show_favicons: Emit source events so Open Web UI displays
                               favicons and a clickable URL list below the response
                               (default: True)
         :param __event_emitter__: Internal — for UI progress updates
@@ -225,20 +225,7 @@ class Tools:
         if not url.startswith(("http://", "https://")):
             return f"Error: Invalid URL protocol. Only http/https are supported: {url}"
 
-        await self._emit_status(
-            __event_emitter__,
-            f"🌐 Fetching {self._truncate_url(url)}...",
-            done=False,
-        )
-
         try:
-            # Step 1: Fetch with TLS fingerprinting
-            await self._emit_status(
-                __event_emitter__,
-                f"🔒 Connecting with {browser}...",
-                done=False,
-            )
-
             raw_html, final_url, status_code, content_type, resp_headers = (
                 await self._fetch_with_fingerprint(
                     url=url,
@@ -262,23 +249,11 @@ class Tools:
                     browser=browser,
                     os=os,
                 )
-                await self._emit_status(
-                    __event_emitter__,
-                    f"✅ Fetched {status_code} from {self._truncate_url(final_url)}",
-                    done=True,
-                )
                 if show_favicons:
-                    visited_urls = self._collect_visited_urls(url, final_url, [])
-                    await self._emit_favicon_list(__event_emitter__, visited_urls)
+                    await self._emit_sources(__event_emitter__, [final_url])
                 return result
 
             # Step 3: Extract content
-            await self._emit_status(
-                __event_emitter__,
-                "📄 Extracting content...",
-                done=False,
-            )
-
             extracted = self._extract_content(
                 raw_html=raw_html,
                 url=final_url,
@@ -294,11 +269,6 @@ class Tools:
                 and extracted.get("word_count", 0)
                 < 30  # MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK
             ):
-                await self._emit_status(
-                    __event_emitter__,
-                    "🔗 Content thin, trying alternate links...",
-                    done=False,
-                )
                 extracted, alternates_used = await self._try_alternate_fallback(
                     raw_html=raw_html,
                     url=final_url,
@@ -334,26 +304,15 @@ class Tools:
                 status_code=status_code,
             )
 
-            # Step 7: Emit favicon URL list event for Open WebUI's source/citation display
+            # Step 7: Emit source events for Open WebUI's Citations component (bottom of message)
             visited_urls = self._collect_visited_urls(url, final_url, alternate_urls)
             if show_favicons:
-                await self._emit_favicon_list(__event_emitter__, visited_urls)
-
-            await self._emit_status(
-                __event_emitter__,
-                f"✅ Extracted {extracted.get('word_count', 0)} words from {self._truncate_url(final_url)}",
-                done=True,
-            )
+                await self._emit_sources(__event_emitter__, visited_urls)
 
             return result
 
         except Exception as e:
             error_msg = self._format_error(e, url)
-            await self._emit_status(
-                __event_emitter__,
-                f"❌ {error_msg}",
-                done=True,
-            )
             logger.exception(f"smart_fetch_url failed for {url}")
             return error_msg
 
@@ -402,21 +361,10 @@ class Tools:
 
         concurrency = max(1, min(concurrency, 50))
 
-        await self._emit_status(
-            __event_emitter__,
-            f"📡 Fetching {len(urls)} URLs ({concurrency} concurrent)...",
-            done=False,
-        )
-
         semaphore = asyncio.Semaphore(concurrency)
 
         async def fetch_one(index: int, single_url: str) -> str:
             async with semaphore:
-                await self._emit_status(
-                    __event_emitter__,
-                    f"[{index + 1}/{len(urls)}] Fetching {self._truncate_url(single_url)}...",
-                    done=False,
-                )
                 try:
                     result = await self.smart_fetch_url(
                         url=single_url,
@@ -425,7 +373,7 @@ class Tools:
                         browser=browser,
                         os=os,
                         timeout_ms=timeout_ms,
-                        show_favicons=False,  # batch handles its own favicon list
+                        show_favicons=False,  # batch handles its own source list
                         __event_emitter__=None,  # suppress per-item events
                     )
                     return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{result}\n\n---\n"
@@ -435,14 +383,8 @@ class Tools:
         tasks = [fetch_one(i, u) for i, u in enumerate(urls)]
         results = await asyncio.gather(*tasks)
 
-        # Emit a single combined favicon list for all batch URLs
-        await self._emit_favicon_list(__event_emitter__, urls)
-
-        await self._emit_status(
-            __event_emitter__,
-            f"✅ Fetched {len(urls)} URLs",
-            done=True,
-        )
+        # Emit a single combined source list for all batch URLs
+        await self._emit_sources(__event_emitter__, urls)
 
         return "".join(results)
 
@@ -924,7 +866,7 @@ class Tools:
         return None
 
     # ──────────────────────────────────────────────
-    #  Internal: Favicon / visited URLs helpers
+    #  Internal: Sources / visited URLs helpers
     # ──────────────────────────────────────────────
 
     @staticmethod
@@ -940,46 +882,31 @@ class Tools:
                 result.append(u)
         return result
 
-    async def _emit_favicon_list(
+    async def _emit_sources(
         self,
         emitter: Optional[Any],
         urls: list[str],
     ):
         """
-        Emit a status event that triggers Open WebUI's source/citation display
-        with favicons from the visited URLs.
+        Emit source events that Open WebUI appends to message.sources.
 
-        The frontend component WebSearchResults.svelte / Citations.svelte renders
-        favicons by fetching them from google's favicon service:
-          https://www.google.com/s2/favicons?sz=32&domain={url}
+        The frontend Citations.svelte renders these at the bottom of the message
+        with favicons (fetched from google's favicon service).
         """
         if emitter is None or not urls:
             return
-        # Build items mimicking the search_web format that WebSearchResults expects
-        items = []
-        for u in urls:
-            items.append(
-                {
-                    "link": u,
-                    "title": u,
-                    "snippet": "",
-                }
-            )
         try:
-            await emitter(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"Fetched {len(urls)} URL(s)",
-                        "action": "web_search",
-                        "urls": urls,
-                        "items": items,
-                        "query": "",
-                        "done": True,
-                        "hidden": False,
-                    },
-                }
-            )
+            for url in urls:
+                await emitter(
+                    {
+                        "type": "source",
+                        "data": {
+                            "source": {"name": url, "id": url},
+                            "document": [""],
+                            "metadata": [{"source": url, "name": url, "url": url}],
+                        },
+                    }
+                )
         except Exception:
             pass  # Event emission is best-effort
 
@@ -1003,36 +930,4 @@ class Tools:
             return f"TLS/SSL error: Could not establish secure connection to {url}"
         return f"Request failed: {msg[:200]}"
 
-    # ──────────────────────────────────────────────
-    #  Internal: Event emitter helper
-    # ──────────────────────────────────────────────
 
-    async def _emit_status(
-        self,
-        emitter: Optional[Any],
-        description: str,
-        done: bool = False,
-    ):
-        """Emit a status event if emitter is available."""
-        if emitter is None:
-            return
-        try:
-            await emitter(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": description,
-                        "done": done,
-                        "hidden": False,
-                    },
-                }
-            )
-        except Exception:
-            pass  # Event emission is best-effort
-
-    @staticmethod
-    def _truncate_url(url: str, max_len: int = 60) -> str:
-        """Truncate a long URL for display."""
-        if len(url) <= max_len:
-            return url
-        return url[: max_len - 3] + "..."
