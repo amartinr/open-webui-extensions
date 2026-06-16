@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -130,10 +129,6 @@ class Tools:
         batch_concurrency: int = Field(
             DEFAULT_BATCH_CONCURRENCY,
             description="Default concurrency for batch_fetch_urls",
-        )
-        temp_dir: str = Field(
-            "",
-            description="Temp directory for downloads (empty = system default)",
         )
         verbose: bool = Field(
             False,
