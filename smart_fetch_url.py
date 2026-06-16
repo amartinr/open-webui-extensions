@@ -136,9 +136,28 @@ class Tools:
         )
 
     class UserValves(BaseModel):
-        """Per-user overrides."""
+        """Per-user overrides for fetch settings. Configured from the chat session."""
 
-        pass
+        max_chars: Optional[int] = Field(
+            None,
+            description="Maximum characters to return (overrides admin setting)",
+        )
+        timeout_ms: Optional[int] = Field(
+            None,
+            description="Request timeout in milliseconds (overrides admin setting)",
+        )
+        default_browser: Optional[str] = Field(
+            None,
+            description="Browser fingerprint profile (overrides admin setting)",
+        )
+        batch_concurrency: Optional[int] = Field(
+            None,
+            description="Concurrency for batch fetches (overrides admin setting)",
+        )
+        verbose: Optional[bool] = Field(
+            None,
+            description="Emit detailed status events during fetch (overrides admin setting)",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -153,7 +172,7 @@ class Tools:
         url: str,
         format: str = "markdown",
         max_chars: Optional[int] = None,
-        browser: str = DEFAULT_BROWSER,
+        browser: Optional[str] = None,
         os: str = "windows",
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
@@ -161,6 +180,7 @@ class Tools:
         proxy: Optional[str] = None,
         headers: Optional[dict] = None,
         __event_emitter__: Optional[Any] = None,
+        __user__: Optional[Any] = None,
     ) -> str:
         """
         Fetch a URL with browser-grade TLS fingerprinting and extract clean, readable content.
@@ -184,12 +204,14 @@ class Tools:
         :param proxy: Proxy URL (http://user:pass@host:port or socks5://host:port)
         :param headers: Custom HTTP headers to send
         :param __event_emitter__: Internal — for UI progress updates
+        :param __user__: Internal — for user-specific valve overrides
         :returns: Extracted content string with metadata header
         """
 
-        max_chars = max_chars or self.valves.max_chars
-        timeout_ms = timeout_ms or self.valves.timeout_ms
-        browser = browser or self.valves.default_browser
+        uv = self._get_user_valves(__user__)
+        max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
+        timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
+        browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
 
         # Validate
         if not url or not url.strip():
@@ -330,11 +352,12 @@ class Tools:
         urls: list[str],
         format: str = "markdown",
         max_chars: Optional[int] = None,
-        browser: str = DEFAULT_BROWSER,
+        browser: Optional[str] = None,
         os: str = "windows",
         timeout_ms: Optional[int] = None,
         concurrency: Optional[int] = None,
         __event_emitter__: Optional[Any] = None,
+        __user__: Optional[Any] = None,
     ) -> str:
         """
         Fetch multiple URLs concurrently with browser-grade TLS fingerprinting.
@@ -350,13 +373,15 @@ class Tools:
         :param timeout_ms: Request timeout per URL in milliseconds
         :param concurrency: Max concurrent fetches (default: 8)
         :param __event_emitter__: Internal — for UI progress updates
+        :param __user__: Internal — for user-specific valve overrides
         :returns: Labeled results for all URLs
         """
 
-        max_chars = max_chars or self.valves.max_chars
-        timeout_ms = timeout_ms or self.valves.timeout_ms
-        browser = browser or self.valves.default_browser
-        concurrency = concurrency or self.valves.batch_concurrency
+        uv = self._get_user_valves(__user__)
+        max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
+        timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
+        browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
+        concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
 
         if not urls:
             return "Error: No URLs provided."
@@ -859,6 +884,22 @@ class Tools:
     def _strip_html(self, html: str) -> str:
         text = re.sub(r"<[^>]+>", " ", html)
         return re.sub(r"\s+", " ", text).strip()
+
+    # ──────────────────────────────────────────────
+    #  Internal: UserValves helper
+    # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _get_user_valves(__user__: Optional[Any]) -> Optional[Any]:
+        """Extract the UserValves object from the __user__ dict if available."""
+        if __user__ is None:
+            return None
+        try:
+            if isinstance(__user__, dict):
+                return __user__.get("valves")
+        except Exception:
+            pass
+        return None
 
     # ──────────────────────────────────────────────
     #  Internal: Error formatting
