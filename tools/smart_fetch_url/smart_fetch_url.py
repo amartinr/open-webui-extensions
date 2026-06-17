@@ -8,9 +8,6 @@ required_open_webui_version: 0.4.0
 requirements: curl_cffi, trafilatura, selectolax
 version: 0.4.1
 licence: MIT
-
-Based on pi-smart-fetch (MIT) by Thinkscape
-Copyright (c) 2026 Thinkscape
 """
 
 import asyncio
@@ -528,19 +525,23 @@ class Tools:
         so the event loop stays responsive and CancelledError can be delivered.
         """
         content = None
-        metadata = {}
+        doc = None
+
+        # Guard: trafilatura expects str or bytes — normalise anything else
+        if not isinstance(raw_html, (str, bytes)):
+            logger.warning(
+                "unexpected raw_html type %s, coercing to empty string", type(raw_html).__name__
+            )
+            raw_html = str(raw_html) if raw_html is not None else ""
 
         # Try trafilatura first (best extraction quality)
         try:
             import trafilatura
-            from trafilatura.settings import use_config
+            from trafilatura.core import extract_with_metadata
 
-            config = use_config()
-            config.set("DEFAULT", "EXTRACTION_CLEANWISE", "on")
-
-            # Extract with metadata — run in thread to avoid blocking
+            # Extract with metadata in one pass — run in thread to avoid blocking
             def _do_extract():
-                extracted = trafilatura.extract(
+                return extract_with_metadata(
                     raw_html,
                     url=url,
                     output_format=format if format in ("markdown", "html", "txt") else "markdown",
@@ -548,21 +549,17 @@ class Tools:
                     include_images=not remove_images,
                     include_tables=True,
                     include_comments=include_replies,
-                    with_metadata=True,
-                    config=config,
                 )
-                meta = trafilatura.extract_metadata(raw_html, default_url=url)
-                return extracted, meta
 
-            extracted, meta = await asyncio.to_thread(_do_extract)
+            doc = await asyncio.to_thread(_do_extract)
 
-            if extracted:
-                content = extracted
-            metadata = meta or {}
+            if doc is not None and doc.text:
+                content = doc.text
+
         except ImportError:
             logger.warning("trafilatura not available, using basic extraction")
         except Exception as e:
-            logger.warning(f"trafilatura extraction failed: {e}")
+            logger.warning("trafilatura extraction failed: %s — using fallback", e)
 
         # Fallback: basic extraction
         if not content and format != "json":
@@ -572,16 +569,16 @@ class Tools:
         if not content:
             content = await asyncio.to_thread(self._strip_html, raw_html)
 
-        # Build metadata dict
+        # Build metadata dict from Document if available
         meta = {}
-        if metadata:
-            meta["title"] = getattr(metadata, "title", None) or ""
-            meta["author"] = getattr(metadata, "author", None) or ""
-            meta["site"] = getattr(metadata, "sitename", None) or ""
-            meta["language"] = getattr(metadata, "language", None) or ""
-            meta["published"] = getattr(metadata, "date", None) or ""
+        if doc is not None:
+            meta["title"] = doc.title or ""
+            meta["author"] = doc.author or ""
+            meta["site"] = doc.sitename or ""
+            meta["language"] = doc.language or ""
+            meta["published"] = doc.date or ""
         else:
-            # Try to extract from HTML
+            # Try to extract from HTML directly
             meta["title"] = self._extract_title(raw_html)
             meta["author"] = self._extract_meta(raw_html, "author")
             meta["site"] = urlparse(url).hostname or ""
