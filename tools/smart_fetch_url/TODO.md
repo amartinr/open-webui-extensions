@@ -27,15 +27,12 @@
 
 ---
 
-## 🟢 4. Pin minimum curl_cffi version
+## ✅ 4. Pin minimum curl_cffi version  [DONE]
 
-**Issue**: Older versions of `curl_cffi` (< 0.7.x) have known issues with freeing libcurl handles on errors, which is the root cause of potential leaks.
-
-**Fix**: Change the requirements string to pin `curl_cffi>=0.7.0`.
+**Fix**: Changed `requirements: curl_cffi, ...` → `curl_cffi>=0.7.0, ...` in module docstring. Forces pip to install a version with fixed libcurl handle cleanup on errors.
 
 **Files**:
-- `smart_fetch_url.py` — module docstring `requirements:`
-- `README.md` — requirements section
+- `smart_fetch_url.py` — module docstring
 
 ---
 
