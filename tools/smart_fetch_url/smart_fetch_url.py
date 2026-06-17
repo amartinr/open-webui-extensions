@@ -155,6 +155,7 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         self._cffi_available = None  # lazy check
+        self._httpx_client: Any = None
 
     # ──────────────────────────────────────────────
     #  Core tool method
@@ -444,6 +445,19 @@ class Tools:
                 proxy=proxy,
             )
 
+    async def _get_httpx_client(self) -> Any:
+        """Get or create a shared httpx AsyncClient.
+
+        Reusing a single client keeps the TCP connection pool alive across
+        requests (keep-alive) instead of creating a new pool per call.
+        """
+        if self._httpx_client is None:
+            import httpx
+
+            self._httpx_client = httpx.AsyncClient()
+            await self._httpx_client.__aenter__()
+        return self._httpx_client
+
     async def _fetch_with_curl_cffi(
         self,
         url: str,
@@ -459,11 +473,14 @@ class Tools:
 
         async with AsyncSession(
             impersonate=browser,
-            headers=headers,
-            timeout=timeout_sec,
             proxies=proxy,
         ) as session:
-            resp = await session.get(url, allow_redirects=True)
+            resp = await session.get(
+                url,
+                headers=headers,
+                timeout=timeout_sec,
+                allow_redirects=True,
+            )
 
             raw_html = resp.text
             final_url = str(resp.url)
@@ -481,27 +498,27 @@ class Tools:
         proxy: Optional[str] = None,
     ) -> tuple[str, str, int, str, dict]:
         """Fallback fetch using httpx (no TLS fingerprinting)."""
-        import httpx
 
-        client_kwargs = {
+        client = await self._get_httpx_client()
+
+        request_kwargs = {
             "headers": headers,
             "follow_redirects": True,
             "timeout": timeout_ms / 1000,
         }
         if proxy:
-            client_kwargs["proxies"] = proxy
+            request_kwargs["proxies"] = proxy
 
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
+        resp = await client.get(url, **request_kwargs)
+        resp.raise_for_status()
 
-            raw_html = resp.text
-            final_url = str(resp.url)
-            status_code = resp.status_code
-            content_type = resp.headers.get("content-type", "") or ""
-            resp_headers = dict(resp.headers)
+        raw_html = resp.text
+        final_url = str(resp.url)
+        status_code = resp.status_code
+        content_type = resp.headers.get("content-type", "") or ""
+        resp_headers = dict(resp.headers)
 
-            return raw_html, final_url, status_code, content_type, resp_headers
+        return raw_html, final_url, status_code, content_type, resp_headers
 
     # ──────────────────────────────────────────────
     #  Internal: Content extraction
