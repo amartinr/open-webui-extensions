@@ -244,7 +244,7 @@ class Tools:
                 return result
 
             # Step 3: Extract content
-            extracted = self._extract_content(
+            extracted = await self._extract_content(
                 raw_html=raw_html,
                 url=final_url,
                 format=format,
@@ -510,7 +510,7 @@ class Tools:
     #  Internal: Content extraction
     # ──────────────────────────────────────────────
 
-    def _extract_content(
+    async def _extract_content(
         self,
         raw_html: str,
         url: str,
@@ -523,6 +523,9 @@ class Tools:
 
         Uses trafilatura for primary extraction (similar to Defuddle/Readability).
         Falls back to basic extraction if trafilatura is not available or fails.
+
+        Heavy CPU-bound work (trafilatura, selectolax) is run in a thread
+        so the event loop stays responsive and CancelledError can be delivered.
         """
         content = None
         metadata = {}
@@ -535,24 +538,27 @@ class Tools:
             config = use_config()
             config.set("DEFAULT", "EXTRACTION_CLEANWISE", "on")
 
-            # Extract with metadata
-            extracted = trafilatura.extract(
-                raw_html,
-                url=url,
-                output_format=format if format in ("markdown", "html", "txt") else "markdown",
-                include_links=True,
-                include_images=not remove_images,
-                include_tables=True,
-                include_comments=include_replies,
-                with_metadata=True,
-                config=config,
-            )
+            # Extract with metadata — run in thread to avoid blocking
+            def _do_extract():
+                extracted = trafilatura.extract(
+                    raw_html,
+                    url=url,
+                    output_format=format if format in ("markdown", "html", "txt") else "markdown",
+                    include_links=True,
+                    include_images=not remove_images,
+                    include_tables=True,
+                    include_comments=include_replies,
+                    with_metadata=True,
+                    config=config,
+                )
+                meta = trafilatura.extract_metadata(raw_html, default_url=url)
+                return extracted, meta
+
+            extracted, meta = await asyncio.to_thread(_do_extract)
 
             if extracted:
                 content = extracted
-
-            # Get metadata separately
-            metadata = trafilatura.extract_metadata(raw_html, default_url=url)
+            metadata = meta or {}
         except ImportError:
             logger.warning("trafilatura not available, using basic extraction")
         except Exception as e:
@@ -560,11 +566,11 @@ class Tools:
 
         # Fallback: basic extraction
         if not content and format != "json":
-            content = self._basic_extract(raw_html, format, remove_images)
+            content = await self._basic_extract(raw_html, format, remove_images)
 
         # Fallback: just return raw text
         if not content:
-            content = self._strip_html(raw_html)
+            content = await asyncio.to_thread(self._strip_html, raw_html)
 
         # Build metadata dict
         meta = {}
@@ -598,39 +604,45 @@ class Tools:
             "word_count": word_count,
         }
 
-    def _basic_extract(self, html: str, format: str, remove_images: bool) -> str:
-        """Basic HTML extraction fallback using selectolax or regex."""
+    async def _basic_extract(self, html: str, format: str, remove_images: bool) -> str:
+        """Basic HTML extraction fallback using selectolax or regex.
+
+        Runs in a thread to avoid blocking the event loop.
+        """
         try:
             from selectolax.parser import HTMLParser
 
-            tree = HTMLParser(html)
+            def _do_extract():
+                tree = HTMLParser(html)
 
-            # Remove unwanted elements
-            for tag in ("script", "style", "nav", "header", "footer", "aside"):
-                for node in tree.css(tag):
-                    node.decompose()
+                # Remove unwanted elements
+                for tag in ("script", "style", "nav", "header", "footer", "aside"):
+                    for node in tree.css(tag):
+                        node.decompose()
 
-            if remove_images:
-                for node in tree.css("img"):
-                    node.decompose()
+                if remove_images:
+                    for node in tree.css("img"):
+                        node.decompose()
 
-            if format == "html":
-                return tree.body.html or tree.html or ""
+                if format == "html":
+                    return tree.body.html or tree.html or ""
 
-            text = tree.body.text(separator="\n") if tree.body else tree.text()
+                text = tree.body.text(separator="\n") if tree.body else tree.text()
 
-            if format == "markdown":
-                # Simple conversion: wrap paragraphs
-                lines = []
-                for line in text.split("\n"):
-                    stripped = line.strip()
-                    if stripped:
-                        lines.append(stripped)
-                    elif lines and lines[-1]:
-                        lines.append("")
-                text = "\n".join(lines)
+                if format == "markdown":
+                    # Simple conversion: wrap paragraphs
+                    lines = []
+                    for line in text.split("\n"):
+                        stripped = line.strip()
+                        if stripped:
+                            lines.append(stripped)
+                        elif lines and lines[-1]:
+                            lines.append("")
+                    text = "\n".join(lines)
 
-            return text.strip()
+                return text.strip()
+
+            return await asyncio.to_thread(_do_extract)
 
         except ImportError:
             pass
@@ -669,8 +681,11 @@ class Tools:
         try:
             from selectolax.parser import HTMLParser
 
-            tree = HTMLParser(raw_html)
-            alternates = tree.css('link[rel="alternate"]')
+            def _find_alternates():
+                tree = HTMLParser(raw_html)
+                return tree.css('link[rel="alternate"]')
+
+            alternates = await asyncio.to_thread(_find_alternates)
 
             candidates = []
             for link in alternates:
@@ -708,7 +723,7 @@ class Tools:
                         headers=headers,
                         format=format,
                     )
-                    alt_extracted = self._extract_content(
+                    alt_extracted = await self._extract_content(
                         raw_html=alt_raw,
                         url=alt_final,
                         format=format,
