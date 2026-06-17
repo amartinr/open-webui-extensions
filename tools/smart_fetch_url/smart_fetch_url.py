@@ -214,7 +214,7 @@ class Tools:
             return f"Error: Invalid URL protocol. Only http/https are supported: {url}"
 
         try:
-            raw_html, final_url, status_code, content_type, resp_headers = (
+            (raw_html, final_url, status_code, content_type, resp_headers, raw_bytes) = (
                 await self._fetch_with_fingerprint(
                     url=url,
                     browser=browser,
@@ -226,7 +226,71 @@ class Tools:
                 )
             )
 
-            # Step 2: Handle raw format early — return the full server response
+            # Step 2: Route by Content-Type
+            #
+            # 2a — extractable documents (PDF, DOCX, …).  Download bytes
+            #      and extract text with a format-specific parser.
+            # 2b — true binary (images, video, fonts, …).  Show metadata
+            #      only — binary data in the LLM context is harmful.
+            # 2c — text / HTML / JSON / unknown.  Continue to the
+            #      normal trafilatura / raw pipeline below.
+
+            if self._is_extractable_document(content_type):
+                extracted = await self._extract_document_content(
+                    url=final_url,
+                    content_type=content_type,
+                    raw_bytes=raw_bytes,
+                )
+                raw_bytes = None  # release early — GC hint for large docs
+
+                content = extracted.get("content", "")
+                if max_chars and len(content) > max_chars:
+                    content = content[:max_chars]
+
+                result = self._format_output(
+                    url=url,
+                    final_url=final_url,
+                    title=extracted.get("title", ""),
+                    author=extracted.get("author", ""),
+                    site=urlparse(final_url).hostname or "",
+                    language=extracted.get("language", ""),
+                    published=extracted.get("published", ""),
+                    content=content,
+                    format=format,
+                    word_count=extracted.get("word_count", 0),
+                    browser=browser,
+                    os=os,
+                    status_code=status_code,
+                )
+                if show_favicons:
+                    await self._emit_sources(__event_emitter__, [final_url])
+                return result
+
+            if not self._is_text_content(content_type):
+                result = self._format_output(
+                    url=url,
+                    final_url=final_url,
+                    title="",
+                    author="",
+                    site=urlparse(final_url).hostname or "",
+                    language="",
+                    published="",
+                    content=f"[Non-text content ({content_type}). Content not displayed to avoid context pollution.]",
+                    format=format,
+                    word_count=0,
+                    browser=browser,
+                    os=os,
+                    status_code=status_code,
+                )
+                if show_favicons:
+                    await self._emit_sources(__event_emitter__, [final_url])
+                return result
+
+            # Text path: raw bytes no longer needed — drop the reference
+            # so the GC can reclaim the body before extraction runs.
+            raw_bytes = None
+
+            # Step 3: Handle raw format early — return the full server response
             if format == "raw":
                 result = self._build_raw_response(
                     url=url,
@@ -241,7 +305,7 @@ class Tools:
                     await self._emit_sources(__event_emitter__, [final_url])
                 return result
 
-            # Step 3: Extract content
+            # Step 4: Extract content
             extracted = await self._extract_content(
                 raw_html=raw_html,
                 url=final_url,
@@ -250,7 +314,7 @@ class Tools:
                 include_replies=include_replies,
             )
 
-            # Step 4: Alternate content fallback for thin/no content
+            # Step 5: Alternate content fallback for thin/no content
             alternate_urls = []
             if (
                 format != "json"
@@ -270,12 +334,12 @@ class Tools:
                 )
                 alternate_urls = alternates_used or []
 
-            # Step 5: Truncate
+            # Step 6: Truncate
             content = extracted.get("content", "")
             if max_chars and len(content) > max_chars:
                 content = content[:max_chars]
 
-            # Step 6: Build result
+            # Step 7: Build result
             result = self._format_output(
                 url=url,
                 final_url=final_url,
@@ -292,7 +356,7 @@ class Tools:
                 status_code=status_code,
             )
 
-            # Step 7: Emit source events for Open WebUI's Citations component (bottom of message)
+            # Step 8: Emit source events for Open WebUI's Citations component (bottom of message)
             visited_urls = self._collect_visited_urls(url, final_url, alternate_urls)
             if show_favicons:
                 await self._emit_sources(__event_emitter__, visited_urls)
@@ -389,11 +453,15 @@ class Tools:
         proxy: Optional[str] = None,
         headers: Optional[dict] = None,
         format: str = "markdown",
-    ) -> tuple[str, str, int, str, dict]:
+    ) -> tuple[str, str, int, str, dict, Optional[bytes]]:
         """
         Perform the actual HTTP request with TLS fingerprinting.
 
-        Returns: (raw_html, final_url, status_code, content_type, response_headers)
+        Returns: (raw_html, final_url, status_code, content_type,
+                  response_headers, raw_bytes)
+
+        raw_bytes is the undecoded response body — needed for binary
+        document extraction (PDF, DOCX, etc.).
         """
         resolved_browser = BROWSER_PROFILES.get(browser, browser)
 
@@ -482,13 +550,26 @@ class Tools:
                 allow_redirects=True,
             )
 
-            raw_html = resp.text
-            final_url = str(resp.url)
-            status_code = resp.status_code
             content_type = resp.headers.get("content-type", "") or ""
             resp_headers = dict(resp.headers)
+            final_url = str(resp.url)
+            status_code = resp.status_code
 
-            return raw_html, final_url, status_code, content_type, resp_headers
+            # Always grab raw bytes (needed for document extraction).
+            raw_bytes: Optional[bytes] = resp.content
+
+            # Only decode to text when the Content-Type warrants it.
+            # For PDFs / images / other binary, ``resp.text`` produces
+            # garbage that doubles memory for zero value.
+            ct_mime = content_type.split(";", 1)[0].strip().lower()
+            if ct_mime.startswith("text/") or ct_mime in Tools._TEXT_LIKE_APPLICATION_TYPES:
+                raw_html = resp.text
+            elif ct_mime in Tools._EXTRACTABLE_DOCUMENT_TYPES:
+                raw_html = ""
+            else:
+                raw_html = ""  # true binary (image, video, …)
+
+            return raw_html, final_url, status_code, content_type, resp_headers, raw_bytes
 
     async def _fetch_with_httpx(
         self,
@@ -512,13 +593,24 @@ class Tools:
         resp = await client.get(url, **request_kwargs)
         resp.raise_for_status()
 
-        raw_html = resp.text
-        final_url = str(resp.url)
-        status_code = resp.status_code
         content_type = resp.headers.get("content-type", "") or ""
         resp_headers = dict(resp.headers)
+        final_url = str(resp.url)
+        status_code = resp.status_code
 
-        return raw_html, final_url, status_code, content_type, resp_headers
+        # Always grab raw bytes (needed for document extraction).
+        raw_bytes: Optional[bytes] = resp.content
+
+        # Only decode to text when the Content-Type warrants it.
+        ct_mime = content_type.split(";", 1)[0].strip().lower()
+        if ct_mime.startswith("text/") or ct_mime in Tools._TEXT_LIKE_APPLICATION_TYPES:
+            raw_html = resp.text
+        elif ct_mime in Tools._EXTRACTABLE_DOCUMENT_TYPES:
+            raw_html = ""
+        else:
+            raw_html = ""  # true binary (image, video, …)
+
+        return raw_html, final_url, status_code, content_type, resp_headers, raw_bytes
 
     # ──────────────────────────────────────────────
     #  Internal: Content extraction
@@ -731,7 +823,7 @@ class Tools:
             for alt_url in candidates[:1]:
                 resolved = urljoin(url, alt_url)
                 try:
-                    alt_raw, alt_final, _, _, _ = await self._fetch_with_fingerprint(
+                    alt_raw, alt_final, _, _, _, _ = await self._fetch_with_fingerprint(
                         url=resolved,
                         browser=browser,
                         os=os,
@@ -756,6 +848,253 @@ class Tools:
             pass
 
         return {"content": "", "word_count": 0}, alternates_used
+
+    # ──────────────────────────────────────────────
+    #  Internal: Content-type guard
+    # ──────────────────────────────────────────────
+
+    # Application types that carry human-readable text.
+    _TEXT_LIKE_APPLICATION_TYPES: frozenset = frozenset({
+        "application/json",
+        "application/ld+json",
+        "application/xml",
+        "application/xhtml+xml",
+        "application/rss+xml",
+        "application/atom+xml",
+        "application/javascript",
+        "application/ecmascript",
+    })
+
+    @staticmethod
+    def _is_text_content(content_type: str) -> bool:
+        """Return True when *content_type* indicates human-readable text.
+
+        Empty/missing content-type is treated as text (optimistic fallback).
+        """
+        ct = (content_type or "").strip()
+        if not ct:
+            return True
+
+        # Strip parameters (e.g. ``text/html; charset=utf-8``)
+        mime = ct.split(";", 1)[0].strip().lower()
+
+        if mime.startswith("text/"):
+            return True
+
+        return mime in Tools._TEXT_LIKE_APPLICATION_TYPES
+
+    # ── document extraction ──────────────────────
+
+    # Content-types whose body can be parsed into text.
+    _EXTRACTABLE_DOCUMENT_TYPES: frozenset = frozenset({
+        # PDF
+        "application/pdf",
+        # Microsoft Office (modern)
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        # Microsoft Office (legacy)
+        "application/msword",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-powerpoint",
+        # OpenDocument
+        "application/vnd.oasis.opendocument.text",
+        "application/vnd.oasis.opendocument.spreadsheet",
+        "application/vnd.oasis.opendocument.presentation",
+        # Other text-carrying formats
+        "application/epub+zip",
+        "application/rtf",
+        "text/rtf",
+    })
+
+    @staticmethod
+    def _is_extractable_document(content_type: str) -> bool:
+        """Return True when *content_type* is a document format whose text
+        we know how to extract (PDF, DOCX, etc.)."""
+        ct = (content_type or "").strip()
+        if not ct:
+            return False
+        mime = ct.split(";", 1)[0].strip().lower()
+        return mime in Tools._EXTRACTABLE_DOCUMENT_TYPES
+
+    async def _extract_document_content(
+        self,
+        url: str,
+        content_type: str,
+        raw_bytes: Optional[bytes],
+    ) -> dict:
+        """Extract text from a binary document body (PDF, DOCX, …).
+
+        Returns a dict compatible with ``_extract_content``:
+        ``{content, title, author, language, published, word_count}``.
+        """
+        empty = {
+            "content": "",
+            "title": "",
+            "author": "",
+            "language": "",
+            "published": "",
+            "word_count": 0,
+        }
+
+        if raw_bytes is None:
+            empty["content"] = (
+                f"[Document ({content_type}) could not be extracted: "
+                "no response body available. Try fetching again.]"
+            )
+            return empty
+
+        mime = content_type.split(";", 1)[0].strip().lower()
+
+        try:
+            if mime == "application/pdf":
+                return await self._extract_pdf(url, raw_bytes)
+
+            if mime in (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ):
+                return await self._extract_docx(url, raw_bytes)
+
+            # Formats we recognise but don't have a dedicated parser for yet.
+            # Return a helpful message rather than binary garbage.
+            fmt_name = {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel (.xlsx)",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint (.pptx)",
+                "application/msword": "Word (.doc)",
+                "application/vnd.ms-excel": "Excel (.xls)",
+                "application/vnd.ms-powerpoint": "PowerPoint (.ppt)",
+                "application/vnd.oasis.opendocument.text": "OpenDocument Text (.odt)",
+                "application/vnd.oasis.opendocument.spreadsheet": "OpenDocument Spreadsheet (.ods)",
+                "application/vnd.oasis.opendocument.presentation": "OpenDocument Presentation (.odp)",
+                "application/epub+zip": "EPUB",
+                "application/rtf": "Rich Text Format",
+                "text/rtf": "Rich Text Format",
+            }.get(mime, mime)
+
+            empty["content"] = (
+                f"[Document format detected: {fmt_name}. "
+                f"Text extraction for this format is not yet supported by smart_fetch_url. "
+                f"Consider uploading the file directly to Open WebUI's knowledge base for full extraction.]"
+            )
+            return empty
+
+        except Exception as e:
+            logger.warning(f"Document extraction failed for {url} ({content_type}): {e}")
+            empty["content"] = (
+                f"[Document ({content_type}) text extraction failed: {e}]"
+            )
+            return empty
+
+    async def _extract_pdf(self, url: str, raw_bytes: bytes) -> dict:
+        """Extract text and metadata from a PDF using pypdf."""
+        import io
+
+        from pypdf import PdfReader
+
+        def _do_extract():
+            reader = PdfReader(io.BytesIO(raw_bytes))
+
+            # Metadata
+            meta = reader.metadata or {}
+            title = str(meta.get("/Title", "") or "").strip()
+            author = str(meta.get("/Author", "") or "").strip()
+
+            # Content
+            parts: list[str] = []
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text()
+                if text:
+                    parts.append(text.strip())
+
+            content = "\n\n".join(parts)
+            return {
+                "content": content,
+                "title": title,
+                "author": author,
+                "language": "",
+                "published": "",
+                "word_count": len(content.split()) if content else 0,
+            }
+
+        return await asyncio.to_thread(_do_extract)
+
+    async def _extract_docx(self, url: str, raw_bytes: bytes) -> dict:
+        """Extract text from a modern Word document (.docx).
+
+        A .docx file is a ZIP archive of XML files.  We extract the
+        document body from ``word/document.xml`` without pulling in
+        ``python-docx`` as an extra dependency.
+        """
+        import io
+        import xml.etree.ElementTree as ET
+        import zipfile
+
+        def _do_extract():
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                names = set(zf.namelist())
+
+                if "word/document.xml" not in names:
+                    return {
+                        "content": "",
+                        "title": "",
+                        "author": "",
+                        "language": "",
+                        "published": "",
+                        "word_count": 0,
+                    }
+
+                doc_xml = zf.read("word/document.xml")
+
+                # Metadata (best-effort, same zip session — no double-open)
+                title = ""
+                author = ""
+                if "docProps/core.xml" in names:
+                    try:
+                        core_xml = zf.read("docProps/core.xml")
+                        core_ns = {
+                            "dc": "http://purl.org/dc/elements/1.1/",
+                            "cp": "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+                            "dcterms": "http://purl.org/dc/terms/",
+                        }
+                        core_root = ET.fromstring(core_xml)
+                        title_el = core_root.find("dc:title", core_ns) or core_root.find("dcterms:title", core_ns)
+                        if title_el is not None and title_el.text:
+                            title = title_el.text.strip()
+                        author_el = core_root.find("dc:creator", core_ns)
+                        if author_el is not None and author_el.text:
+                            author = author_el.text.strip()
+                    except Exception:
+                        pass
+
+            # Namespace map for OOXML (outside the with-block — xml is already in memory)
+            ns = {
+                "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+            }
+
+            root = ET.fromstring(doc_xml)
+
+            # Extract all paragraph texts
+            paragraphs: list[str] = []
+            for p in root.iter("{%s}p" % ns["w"]):
+                texts: list[str] = []
+                for t in p.iter("{%s}t" % ns["w"]):
+                    if t.text:
+                        texts.append(t.text)
+                if texts:
+                    paragraphs.append("".join(texts))
+
+            content = "\n\n".join(paragraphs)
+
+            return {
+                "content": content,
+                "title": title,
+                "author": author,
+                "language": "",
+                "published": "",
+                "word_count": len(content.split()) if content else 0,
+            }
+
+        return await asyncio.to_thread(_do_extract)
 
     # ──────────────────────────────────────────────
     #  Internal: Format helpers
