@@ -184,7 +184,7 @@ class Tools:
 
         :param url: URL to fetch (http/https only)
         :param format: Output format: "markdown" (default, readable), "html" (cleaned HTML),
-                       "text" (plain text), "json" (structured), or "raw" (full server response)
+                       "txt" (plain text), "json" (structured), or "raw" (full server response)
         :param max_chars: Maximum characters to return (default: 50000)
         :param browser: Browser profile for TLS fingerprinting.
                         Examples: chrome_145, firefox_147, safari_18_0, edge_135
@@ -329,7 +329,7 @@ class Tools:
         per URL with success/failure indicators.
 
         :param urls: Array of URLs to fetch (http/https only, 1-50 items)
-        :param format: Output format: "markdown", "html", "text", "json", or "raw"
+        :param format: Output format: "markdown", "html", "txt", "json", or "raw"
         :param max_chars: Maximum characters per URL
         :param browser: Browser profile for TLS fingerprinting
         :param os: OS profile hint
@@ -536,15 +536,10 @@ class Tools:
             config.set("DEFAULT", "EXTRACTION_CLEANWISE", "on")
 
             # Extract with metadata
-            # Map user-facing format names to trafilatura's expected values
-            trafilatura_output_format = "txt" if format == "text" else format
-            if trafilatura_output_format not in ("markdown", "html", "txt"):
-                trafilatura_output_format = "markdown"
-
             extracted = trafilatura.extract(
                 raw_html,
                 url=url,
-                output_format=trafilatura_output_format,
+                output_format=format if format in ("markdown", "html", "txt") else "markdown",
                 include_links=True,
                 include_images=not remove_images,
                 include_tables=True,
@@ -691,7 +686,7 @@ class Tools:
                 elif format == "raw" or format == "html":
                     if alt_type in ("text/html", "application/xhtml+xml"):
                         candidates.append(alt_href)
-                elif format in ("markdown", "text"):
+                elif format in ("markdown", "txt"):
                     if alt_type in ("text/markdown", "text/plain"):
                         candidates.append(alt_href)
 
