@@ -536,10 +536,15 @@ class Tools:
             config.set("DEFAULT", "EXTRACTION_CLEANWISE", "on")
 
             # Extract with metadata
+            # Map user-facing format names to trafilatura's expected values
+            trafilatura_output_format = "txt" if format == "text" else format
+            if trafilatura_output_format not in ("markdown", "html", "txt"):
+                trafilatura_output_format = "markdown"
+
             extracted = trafilatura.extract(
                 raw_html,
                 url=url,
-                output_format=format if format in ("markdown", "html", "text") else "markdown",
+                output_format=trafilatura_output_format,
                 include_links=True,
                 include_images=not remove_images,
                 include_tables=True,
