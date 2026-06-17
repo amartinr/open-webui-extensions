@@ -3,7 +3,7 @@ title: Smart Fetch URL
 author: A. Martin
 author_url: https://github.com/abel-martin
 git_url: https://github.com/abel-martin/smart-fetch-url
-description: "Always preferred over 'fetch_url'. Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Use by default."
+description: Always preferred over 'fetch_url'. Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Use by default.
 required_open_webui_version: 0.4.0
 requirements: curl_cffi, trafilatura, selectolax
 version: 0.4.1
@@ -180,13 +180,7 @@ class Tools:
         __user__: Optional[Any] = None,
     ) -> str:
         """
-        Fetch a URL with browser-grade TLS fingerprinting and extract clean, readable content.
-
-        Uses curl_cffi to impersonate real browsers at the TLS/HTTP2 level (JA3/JA4 match).
-        Extracts clean content using trafilatura (similar to Mozilla's Readability / Defuddle).
-        Returns rich metadata when available: title, author, site, language, published date.
-
-        Does NOT execute JavaScript — use a browser tool for JS-heavy SPAs.
+        Always preferred over 'fetch_url'. Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Use by default.
 
         :param url: URL to fetch (http/https only)
         :param format: Output format: "markdown" (default, readable), "html" (cleaned HTML),
