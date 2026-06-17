@@ -725,7 +725,10 @@ class Tools:
             # Resolve relative URLs
             from urllib.parse import urljoin
 
-            for alt_url in candidates[:3]:
+            # Only try the best candidate — trying 3 alternates per URL
+            # in a batch of 50 would mean up to 200 extra fetches, pressuring
+            # connection pools and memory. One fallback covers the common case.
+            for alt_url in candidates[:1]:
                 resolved = urljoin(url, alt_url)
                 try:
                     alt_raw, alt_final, _, _, _ = await self._fetch_with_fingerprint(

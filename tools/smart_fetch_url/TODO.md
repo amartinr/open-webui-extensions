@@ -18,14 +18,12 @@
 
 ---
 
-## 🟡 3. Limit alternate fallback cascade
+## ✅ 3. Limit alternate fallback cascade  [DONE]
 
-**Issue**: The alternate fallback loop tries up to 3 `<link rel="alternate">` refetches. When combined with batch (50 URLs × up to 4 fetches each = 200 fetches), the memory and connection pressure multiplies dramatically.
-
-**Fix**: Reduce the maximum number of alternate attempts from 3 to 1, or add a per-call global limit on alternate refetches.
+**Fix**: Reduced alternate attempts from 3 → 1 (`candidates[:3]` → `candidates[:1]`). One fallback covers the common case without multiplying batch pressure. Added comment explaining why.
 
 **Files**:
-- `smart_fetch_url.py` — `_try_alternate_fallback` (the `candidates[:3]` slice)
+- `smart_fetch_url.py` — `_try_alternate_fallback` line 728
 
 ---
 
