@@ -552,7 +552,7 @@ class Tools:
                 content = extracted
 
             # Get metadata separately
-            metadata = trafilatura.extract_metadata(raw_html, url=url)
+            metadata = trafilatura.extract_metadata(raw_html, default_url=url)
         except ImportError:
             logger.warning("trafilatura not available, using basic extraction")
         except Exception as e:
