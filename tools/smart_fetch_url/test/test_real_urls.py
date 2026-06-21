@@ -25,7 +25,7 @@ from smart_fetch_url import Tools
 # ═══════════════════════════════════════════════
 
 # Redlib instance (lightweight Reddit frontend, no JS)
-REDLIB_URL = "http://redlib.private/r/Python/"
+REDLIB_URL = "http://redlib.private/r/LocalLLaMa/"
 
 # Article URLs to try (first one that responds 200 wins)
 ARTICLE_URLS = [
