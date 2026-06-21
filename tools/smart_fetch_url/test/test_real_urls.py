@@ -4,11 +4,11 @@ Phase 3 — Real-URL validation tests.
 Requires network access. Tests are individually skippable.
 Tests actual fetch + extraction against real websites.
 
-Test cases from design doc:
-  T1: Feed/forum (e.g., HN)     → word_count ≥ 1000 (if "feed") or reasonable
-  T2: Blog article with og:type → "article" category, same quality as before
-  T3: Documentation page (MDN)  → "unknown" → trafilatura, no regression
-  T4: Article with many <article> comments → "article", body not comment spam
+Test cases:
+  T1: Feed listing (Redlib/Reddit frontend) → "feed", word_count ≥ 1000
+  T2: Blog article with og:type             → "article", word_count ≥ 200
+  T3: Documentation page (MDN)              → "unknown" → trafilatura, no regression
+  T4: HN comment thread                     → content present, not just first comment
 """
 
 import asyncio
@@ -21,12 +21,37 @@ from smart_fetch_url import Tools
 
 
 # ═══════════════════════════════════════════════
-#  Test helpers
+#  Configuration — override these for your env
 # ═══════════════════════════════════════════════
+
+# Redlib instance (lightweight Reddit frontend, no JS)
+REDLIB_URL = "http://redlib.private/r/Python/"
+
+# Article URLs to try (first one that responds 200 wins)
+ARTICLE_URLS = [
+    "https://tonsky.me/blog/thermocline/",
+    "https://www.marco.org/2025/01/08/a-decade-later",
+]
+
+# Documentation URLs
+DOCS_URLS = [
+    "https://developer.mozilla.org/en-US/docs/Web/HTML/Element/article",
+    "https://docs.python.org/3/library/asyncio.html",
+    "https://en.wikipedia.org/wiki/Web_scraping",
+]
+
+# Comment thread URLs
+COMMENT_URLS = [
+    "https://news.ycombinator.com/item?id=42000000",
+]
 
 TIMEOUT_MS = 15_000
 BROWSER = "chrome_145"
 
+
+# ═══════════════════════════════════════════════
+#  Test helpers
+# ═══════════════════════════════════════════════
 
 def check(name: str, result: bool) -> bool:
     status = "✅" if result else "❌"
@@ -69,17 +94,17 @@ async def fetch_and_extract(url: str, tools: Tools) -> dict:
 #  Test cases
 # ═══════════════════════════════════════════════
 
-async def test_t1_hacker_news():
+async def test_t1_feed_listing():
     """
-    T1: Hacker News frontpage — feed-like aggregator.
-    Expected category: "feed" (or "unknown" if heuristics don't detect table layout).
-    Success: word_count ≥ 500 (all visible stories).
+    T1: Feed listing page (Redlib/Reddit frontend).
+    Expected category: "feed".
+    Success: word_count >= 1000 (all visible posts), .post elements detected.
     """
-    print("\n▶ T1: Hacker News")
+    print(f"\n▶ T1: Feed listing ({REDLIB_URL})")
     tools = Tools()
 
     try:
-        result = await fetch_and_extract("https://news.ycombinator.com", tools)
+        result = await fetch_and_extract(REDLIB_URL, tools)
     except Exception as e:
         print(f"  ❌ Fetch failed: {e}")
         return False
@@ -91,8 +116,9 @@ async def test_t1_hacker_news():
 
     ok = True
     ok &= check(f"status 200 ({result['status_code']})", result['status_code'] == 200)
-    ok &= check(f"word_count ({result['word_count']}) >= 500", result['word_count'] >= 500)
-    ok &= check("title contains 'Hacker News'", "Hacker News" in result['title'])
+    ok &= check(f"category is 'feed' ({result['category']})", result['category'] == "feed")
+    ok &= check(f"word_count ({result['word_count']}) >= 1000", result['word_count'] >= 1000)
+    ok &= check("title not empty", len(result['title']) > 0)
 
     return ok
 
@@ -101,18 +127,12 @@ async def test_t2_blog_article():
     """
     T2: Blog article with og:type=article.
     Expected category: "article".
-    Success: word_count ≥ 200, article metadata present.
+    Success: word_count >= 200, article metadata present.
     """
-    print("\n▶ T2: Blog article with og:type")
+    print(f"\n▶ T2: Blog article with og:type")
     tools = Tools()
 
-    # Use a known article with og:type
-    urls_to_try = [
-        "https://www.marco.org/2025/01/08/a-decade-later",
-        "https://tonsky.me/blog/thermocline/",
-    ]
-
-    for url in urls_to_try:
+    for url in ARTICLE_URLS:
         try:
             result = await fetch_and_extract(url, tools)
         except Exception as e:
@@ -144,13 +164,7 @@ async def test_t3_documentation():
     print("\n▶ T3: Documentation page")
     tools = Tools()
 
-    urls_to_try = [
-        "https://developer.mozilla.org/en-US/docs/Web/HTML/Element/article",
-        "https://docs.python.org/3/library/asyncio.html",
-        "https://en.wikipedia.org/wiki/Web_scraping",
-    ]
-
-    for url in urls_to_try:
+    for url in DOCS_URLS:
         try:
             result = await fetch_and_extract(url, tools)
         except Exception as e:
@@ -168,8 +182,6 @@ async def test_t3_documentation():
         ok &= check(f"word_count ({result['word_count']}) >= 100", result['word_count'] >= 100)
         ok &= check("title not empty", len(result['title']) > 0)
 
-        # Note: category might be "article" for Wikipedia (it has og:type=article)
-        # That's OK — the important thing is content quality, not the label
         if result['category'] != "article":
             print(f"    ℹ️  Category is '{result['category']}' (expected 'unknown')")
 
@@ -181,19 +193,14 @@ async def test_t3_documentation():
 
 async def test_t4_article_with_comments():
     """
-    T4: Article page with <article> comment tags.
-    Expected category: "article".
-    Success: article body, not comment spam.
+    T4: HN comment thread — many comments, should still work.
+    Expected category: "unknown" (HN uses table layout).
+    Success: content present, word_count > 0.
     """
-    print("\n▶ T4: Article with comments (resilience)")
+    print("\n▶ T4: HN comment thread (resilience)")
     tools = Tools()
 
-    # A blog post likely to have many comments
-    urls_to_try = [
-        "https://news.ycombinator.com/item?id=42000000",  # HN comment thread
-    ]
-
-    for url in urls_to_try:
+    for url in COMMENT_URLS:
         try:
             result = await fetch_and_extract(url, tools)
         except Exception as e:
@@ -226,9 +233,11 @@ async def main():
     print("Phase 3 — Real-URL validation tests")
     print("⚠️  Requires network access")
     print("=" * 60)
+    print(f"\nConfiguration:")
+    print(f"  REDLIB_URL = {REDLIB_URL}")
 
     tests = [
-        ("T1: Hacker News feed", test_t1_hacker_news()),
+        ("T1: Feed listing", test_t1_feed_listing()),
         ("T2: Blog article", test_t2_blog_article()),
         ("T3: Documentation page", test_t3_documentation()),
         ("T4: Article with comments", test_t4_article_with_comments()),
