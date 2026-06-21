@@ -21,13 +21,13 @@ and often unnecessary for simple queries.  Until now there was no way to make
 
 ```
 Request → Filter 0 (Thinking Default Off)
-            → strips any pre-existing thinking from extra_body
-            → sets extra_body.thinking = {"type": "disabled"}
+            → strips any pre-existing thinking
+            → sets thinking = {"type": "disabled"}
         → Filter 1 (Reasoning Effort Selector) → ONLY if chip active:
-            → strips any pre-existing reasoning_effort from top level
-            → strips any pre-existing thinking from extra_body
-            → sets reasoning_effort at top level
-            → sets extra_body.thinking = {"type": "enabled"}
+            → strips any pre-existing reasoning_effort
+            → strips any pre-existing thinking
+            → sets thinking = {"type": "enabled"}
+            → sets reasoning_effort
         → LLM API
 ```
 
@@ -49,10 +49,8 @@ effort.
 ### Injection Logic
 
 1. **Strips `reasoning_effort`** from top level (removes any workspace default).
-2. **Strips `thinking`** from `extra_body` (removes whatever Filter 0 injected).
-3. **Injects `thinking`** inside `extra_body` — DeepSeek expects it there when
-   using the OpenAI-compatible format (the OpenAI Python SDK passes non-standard
-   params via `extra_body`).
+2. **Strips `thinking`** from top level (removes whatever Filter 0 injected).
+3. **Injects `thinking`** at top level — it's a standard DeepSeek API parameter.
 4. **Injects `reasoning_effort`** at top level — it's a standard OpenAI Chat
    Completions parameter.
 5. **Effort** resolved in this order:
@@ -102,20 +100,20 @@ defines no `UserValves` class. It simply does its job silently on every request.
 3. Attach Filter 1 (**Reasoning Effort Selector**) to the specific DeepSeek
    model(s) you want, or make it global too (users will see the chip only
    when they select a model it's attached to).
-4. **Do NOT set** `reasoning_effort`, `thinking`, or `extra_body` in the
-   model's workspace advanced options — the filters handle these.
+4. **Do NOT set** `reasoning_effort` or `thinking` in the model's workspace
+   advanced options — the filters handle these.
 
 ## Design Notes
 
 - **Override, don't merge.** Both filters strip pre-existing values before
-  injecting their own. Filter 1 removes `thinking` from `extra_body` that
-  Filter 0 may have set, then injects its own values.
+  injecting their own. Filter 1 removes `thinking` that Filter 0 may have
+  set, then injects its own values.
 - **Toggleable reasoning.** Filter 1 is the only user-facing control.
   Enabling it overrides Filter 0's default-off and enables thinking + effort.
-- **`thinking` goes in `extra_body`**, not at top level, because the DeepSeek
-  API follows the OpenAI SDK convention where non-standard parameters are
-  passed via `extra_body`. See [DeepSeek reasoning docs](https://api-docs.deepseek.com/guides/reasoning).
-- **`reasoning_effort` goes at top level** — it is a standard Chat Completions
-  parameter in the OpenAI API spec.
+- **Both `thinking` and `reasoning_effort` go at top level** of the request
+  body. At the DeepSeek API level, `thinking` is a top-level parameter —
+  `extra_body` is only a convention of the OpenAI Python SDK and does not
+  apply when calling DeepSeek directly. See
+  [DeepSeek thinking mode docs](https://api-docs.deepseek.com/guides/thinking_mode).
 - **Open WebUI 0.9.0+ required.** Uses `UserValves` + `self.toggle` API
   introduced in 0.9.0.

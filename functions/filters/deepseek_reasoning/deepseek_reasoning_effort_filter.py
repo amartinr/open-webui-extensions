@@ -76,19 +76,14 @@ class Filter:
 
         # Strip any pre-existing values (e.g. from DeepSeek Thinking Default
         # Off filter, workspace params, or Open WebUI) so this filter's values
-        # always take precedence.  Follow the same pattern as Filter 0:
-        # reasoning_effort goes at top level, thinking goes inside extra_body.
+        # always take precedence.  At the DeepSeek API level, "thinking" is a
+        # top-level parameter, not nested inside extra_body.
         body.pop("reasoning_effort", None)
-        extra_body: dict = body.get("extra_body", {})
-        if isinstance(extra_body, dict):
-            extra_body.pop("thinking", None)
-        else:
-            extra_body = {}
+        body.pop("thinking", None)
 
         # Inject the resolved values fresh.
         body["reasoning_effort"] = effort
-        body["extra_body"] = extra_body
-        body["extra_body"]["thinking"] = {"type": "enabled"}
+        body["thinking"] = {"type": "enabled"}
 
         # Show a brief status notification in the chat UI
         if __event_emitter__:

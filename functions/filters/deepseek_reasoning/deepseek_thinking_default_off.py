@@ -47,17 +47,11 @@ class Filter:
         if self.valves.model_pattern.lower() not in model.lower():
             return body
 
-        # Strip any pre-existing "thinking" from extra_body so this
-        # filter's value always takes precedence.
-        extra_body: dict = body.get("extra_body", {})
-        if isinstance(extra_body, dict):
-            extra_body.pop("thinking", None)
-        else:
-            extra_body = {}
-
-        # Inject thinking: disabled inside extra_body.
-        body["extra_body"] = extra_body
-        body["extra_body"]["thinking"] = {"type": "disabled"}
+        # Strip any pre-existing "thinking" so this filter's value always
+        # takes precedence.  At the DeepSeek API level, "thinking" is a
+        # top-level parameter, not nested inside extra_body.
+        body.pop("thinking", None)
+        body["thinking"] = {"type": "disabled"}
 
         # Do NOT set reasoning_effort — that is handled by the
         # toggleable Reasoning Effort Selector filter (if enabled).
