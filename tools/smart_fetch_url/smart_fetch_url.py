@@ -643,6 +643,30 @@ class Tools:
             )
             raw_html = str(raw_html) if raw_html is not None else ""
 
+        # ── Detect content type for routing ─────────────────
+        content_category = await self._detect_content_type(raw_html)
+        logger.info("Content type detected: %s for %s", content_category, url)
+
+        if content_category == "feed":
+            # Feed/forum/listing: use selectolax for full content.
+            # Trafilatura would only extract the first post.
+            content = await self._basic_extract(raw_html, format, remove_images)
+            word_count = len(content.split()) if content else 0
+            return {
+                "content": content or "",
+                "title": self._extract_title(raw_html),
+                "author": self._extract_meta(raw_html, "author"),
+                "site": urlparse(url).hostname or "",
+                "language": self._extract_language(raw_html),
+                "published": (
+                    self._extract_meta(raw_html, "article:published_time")
+                    or self._extract_meta(raw_html, "date")
+                    or ""
+                ),
+                "word_count": word_count,
+            }
+
+        # ── Article / Unknown path: existing trafilatura logic ───
         # Try trafilatura first (best extraction quality)
         try:
             import trafilatura
@@ -710,6 +734,135 @@ class Tools:
             "word_count": word_count,
         }
 
+    # ── Content-type detection constants ────────────────────────
+    # Weights: points contributed when a signal is triggered
+    _DT_WEIGHT_FEED_HIGH = 2
+    _DT_WEIGHT_FEED_LOW = 1
+    _DT_WEIGHT_ARTICLE_OG_TYPE = 3
+    _DT_WEIGHT_ARTICLE_META = 1
+    _DT_WEIGHT_ARTICLE_SCHEMA = 2
+    _DT_WEIGHT_ARTICLE_SINGLE = 2
+
+    # Thresholds: minimum counts to activate each signal
+    _DT_S1_HIGH_THRESHOLD = 5  # post-like elements for +2
+    _DT_S1_LOW_THRESHOLD = 3   # post-like elements for +1
+    _DT_S2_THRESHOLD = 3       # <article> tags
+    _DT_S5_THRESHOLD = 2       # pagination links
+    _DT_S6_REPEAT_COUNT = 3    # occurrences of same ID base to consider "repeated"
+    _DT_S6_HIGH_THRESHOLD = 2  # repeated bases for +2
+    _DT_S6_LOW_THRESHOLD = 1   # repeated bases for +1
+    _DT_S10_ARTICLE_EQ = 1     # exactly N <article> tags
+    _DT_S10_POST_LE = 2        # at most N post-like elements
+
+    # Decision thresholds
+    _DT_FEED_MIN_SCORE = 4
+    _DT_ARTICLE_MIN_SCORE = 3
+
+    # Blacklist: ID bases that are common single-use containers, not feed items
+    _DT_ID_BASE_BLACKLIST: frozenset = frozenset({
+        "header", "footer", "nav", "sidebar", "main", "content",
+        "wrapper", "container", "section", "page", "article",
+        "body", "root", "app", "site", "menu", "modal",
+    })
+
+    @staticmethod
+    def _detect_content_type_sync(raw_html: str) -> str:
+        """Synchronous detection logic (runs in a thread)."""
+        from selectolax.parser import HTMLParser
+
+        tree = HTMLParser(raw_html)
+
+        feed_score = 0
+        article_score = 0
+
+        # ── Feed signals ──────────────────────────────────────────────────────────
+
+        # S1: Multiple post-like elements (.post, .entry, .item, .thread, .topic)
+        post_elements = len(tree.css(
+            ".post, .entry, .item, .thread, .topic"
+        ))
+        if post_elements >= Tools._DT_S1_HIGH_THRESHOLD:
+            feed_score += Tools._DT_WEIGHT_FEED_HIGH
+        elif post_elements >= Tools._DT_S1_LOW_THRESHOLD:
+            feed_score += Tools._DT_WEIGHT_FEED_LOW
+
+        # S2: Multiple <article> tags
+        article_tags = len(tree.css("article"))
+        if article_tags >= Tools._DT_S2_THRESHOLD:
+            feed_score += Tools._DT_WEIGHT_FEED_LOW
+
+        # S3: Explicit feed container (#posts, #feed, .feed, #threads, etc.)
+        feed_containers = len(tree.css(
+            "#posts, #feed, .feed, #threads, "
+            ".listing, .thread-list, .post-list"
+        ))
+        if feed_containers >= 1:
+            feed_score += Tools._DT_WEIGHT_FEED_HIGH
+
+        # S4: Dual pagination (rel="next" AND rel="prev")
+        has_next = bool(tree.css('link[rel="next"], a[rel="next"]'))
+        has_prev = bool(tree.css('link[rel="prev"], a[rel="prev"]'))
+        if has_next and has_prev:
+            feed_score += Tools._DT_WEIGHT_FEED_HIGH
+
+        # S5: Pagination URL params in <a href> (?page=, ?after=, ?offset=)
+        page_links = len(tree.css(
+            'a[href*="?page="], a[href*="&page="], '
+            'a[href*="?after="], a[href*="&after="], '
+            'a[href*="?offset="], a[href*="&offset="]'
+        ))
+        if page_links >= Tools._DT_S5_THRESHOLD:
+            feed_score += Tools._DT_WEIGHT_FEED_LOW
+
+        # S6: Repeated ID base patterns (e.g. comment-1, comment-2, comment-3)
+        id_counts: dict[str, int] = {}
+        for el in tree.css("[id]"):
+            raw_id = el.attributes.get("id", "")
+            if not raw_id:
+                continue
+            base = re.sub(r"\d+$", "", raw_id).rstrip("- _")
+            if base and base.lower() not in Tools._DT_ID_BASE_BLACKLIST:
+                id_counts[base] = id_counts.get(base, 0) + 1
+        repeated = sum(1 for c in id_counts.values() if c >= Tools._DT_S6_REPEAT_COUNT)
+        if repeated >= Tools._DT_S6_HIGH_THRESHOLD:
+            feed_score += Tools._DT_WEIGHT_FEED_HIGH
+        elif repeated >= Tools._DT_S6_LOW_THRESHOLD:
+            feed_score += Tools._DT_WEIGHT_FEED_LOW
+
+        # ── Article signals ───────────────────────────────────────────────────────
+
+        # S7: Open Graph og:type="article"
+        for meta in tree.css('meta[property="og:type"]'):
+            if (meta.attributes.get("content") or "").lower() == "article":
+                article_score += Tools._DT_WEIGHT_ARTICLE_OG_TYPE
+                break
+
+        # S8: Open Graph article:* meta tags (article:published_time, etc.)
+        article_meta_count = len(tree.css('meta[property^="article:"]'))
+        if article_meta_count >= 1:
+            article_score += Tools._DT_WEIGHT_ARTICLE_META
+
+        # S9: Schema.org Article type
+        for el in tree.css("[itemtype]"):
+            it = (el.attributes.get("itemtype") or "").lower()
+            if "schema.org/article" in it:
+                article_score += Tools._DT_WEIGHT_ARTICLE_SCHEMA
+                break
+
+        # S10: Exactly one <article> AND few post-like elements
+        if (
+            article_tags == Tools._DT_S10_ARTICLE_EQ
+            and post_elements <= Tools._DT_S10_POST_LE
+        ):
+            article_score += Tools._DT_WEIGHT_ARTICLE_SINGLE
+
+        # ── Decision ──────────────────────────────────────────────────────────────
+        if feed_score >= Tools._DT_FEED_MIN_SCORE and feed_score >= article_score:
+            return "feed"
+        if article_score >= Tools._DT_ARTICLE_MIN_SCORE and article_score >= feed_score:
+            return "article"
+        return "unknown"
+
     async def _detect_content_type(self, raw_html: str) -> str:
         """
         Classify a page as 'feed', 'article', or 'unknown'.
@@ -722,108 +875,8 @@ class Tools:
             "article" -> page is a single article - use trafilatura
             "unknown" -> no clear signals - defer to default trafilatura behavior
         """
-
-        def _detect():
-            from selectolax.parser import HTMLParser
-
-            tree = HTMLParser(raw_html)
-
-            feed_score = 0
-            article_score = 0
-
-            # --- Feed signals ---------------------------------------------------
-
-            # S1: Multiple post-like elements (.post, .entry, .item, .thread, .topic)
-            post_elements = len(tree.css(
-                ".post, .entry, .item, .thread, .topic"
-            ))
-            if post_elements >= 5:
-                feed_score += 2
-            elif post_elements >= 3:
-                feed_score += 1
-
-            # S2: Multiple <article> tags (>= 3)
-            article_tags = len(tree.css("article"))
-            if article_tags >= 3:
-                feed_score += 1
-
-            # S3: Explicit feed container (#posts, #feed, .feed, #threads, etc.)
-            feed_containers = len(tree.css(
-                "#posts, #feed, .feed, #threads, "
-                ".listing, .thread-list, .post-list"
-            ))
-            if feed_containers >= 1:
-                feed_score += 2
-
-            # S4: Dual pagination (rel="next" AND rel="prev")
-            has_next = bool(tree.css('link[rel="next"], a[rel="next"]'))
-            has_prev = bool(tree.css('link[rel="prev"], a[rel="prev"]'))
-            if has_next and has_prev:
-                feed_score += 2
-
-            # S5: Pagination URL params in <a href> (?page=, ?after=, ?offset=)
-            page_links = len(tree.css(
-                'a[href*="?page="], a[href*="&page="], '
-                'a[href*="?after="], a[href*="&after="], '
-                'a[href*="?offset="], a[href*="&offset="]'
-            ))
-            if page_links >= 2:
-                feed_score += 1
-
-            # S6: Repeated ID base patterns (e.g. comment-1, comment-2, comment-3)
-            #     with a blacklist of common single-use IDs.
-            id_counts = {}
-            ID_BASE_BLACKLIST = frozenset({
-                "header", "footer", "nav", "sidebar", "main", "content",
-                "wrapper", "container", "section", "page", "article",
-                "body", "root", "app", "site", "menu", "modal",
-            })
-            for el in tree.css("[id]"):
-                raw_id = el.attributes.get("id", "")
-                if not raw_id:
-                    continue
-                base = re.sub(r"\d+$", "", raw_id).rstrip("- _")
-                if base and base.lower() not in ID_BASE_BLACKLIST:
-                    id_counts[base] = id_counts.get(base, 0) + 1
-            repeated = sum(1 for c in id_counts.values() if c >= 3)
-            if repeated >= 2:
-                feed_score += 2
-            elif repeated >= 1:
-                feed_score += 1
-
-            # --- Article signals ------------------------------------------------
-
-            # S7: Open Graph og:type="article"
-            for meta in tree.css('meta[property="og:type"]'):
-                if (meta.attributes.get("content") or "").lower() == "article":
-                    article_score += 3
-                    break
-
-            # S8: Open Graph article:* meta tags (article:published_time, etc.)
-            article_meta_count = len(tree.css('meta[property^="article:"]'))
-            if article_meta_count >= 1:
-                article_score += 1
-
-            # S9: Schema.org Article type
-            for el in tree.css("[itemtype]"):
-                it = (el.attributes.get("itemtype") or "").lower()
-                if "schema.org/article" in it:
-                    article_score += 2
-                    break
-
-            # S10: Exactly one <article> AND <= 2 post-like elements
-            if article_tags == 1 and post_elements <= 2:
-                article_score += 2
-
-            # --- Decision -------------------------------------------------------
-            if feed_score >= 4 and feed_score >= article_score:
-                return "feed"
-            if article_score >= 3 and article_score >= feed_score:
-                return "article"
-            return "unknown"
-
         try:
-            return await asyncio.to_thread(_detect)
+            return await asyncio.to_thread(Tools._detect_content_type_sync, raw_html)
         except Exception:
             logger.warning(
                 "Content type detection failed, falling back to 'unknown'"
