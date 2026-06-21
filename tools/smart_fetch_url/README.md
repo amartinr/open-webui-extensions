@@ -7,7 +7,8 @@ A Python port of [pi-smart-fetch](https://pi.dev/packages/pi-smart-fetch) by [Th
 ## Features
 
 - **TLS fingerprinting** - impersonates real browsers (Chrome, Firefox, Safari, Edge) via `curl_cffi`
-- **Defuddle-style extraction** - clean readable content via `trafilatura`
+- **Content-type detection** - classifies content as article, feed (RSS/Atom), or listing (forums, link aggregators) and uses the right extractor for each
+- **Smart Content-Type routing** - handles binary files, extractable documents (PDF, DOCX), and text/HTML with different code paths
 - **Rich metadata** - title, author, site, language, published date
 - **Alternate content fallback** - follows `<link rel="alternate">` when extraction yields thin content
 - **Batch fetch** - multiple URLs with bounded concurrency
