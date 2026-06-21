@@ -1,6 +1,6 @@
-# Revised Proposal: Content-Type Detection Heuristic for `smart_fetch_url`
+# Content-Type Detection Heuristic for `smart_fetch_url`
 
-Blueprint-ready implementation plan — v2.0
+Design, implementation plan, and verification for routing feed/forum/listing pages through selectolax instead of trafilatura.
 
 ---
 
@@ -17,7 +17,9 @@ Trafilatura's own docs acknowledge this: *"geared towards article pages, blog po
 
 ---
 
-## 2. Current Flow
+## 2. Current vs Proposed Flow
+
+### Current flow
 
 ```
 Fetch → raw_html
@@ -33,9 +35,7 @@ Fetch → raw_html
                                  └─ word_count >= 30  →  Use result (1 post only)
 ```
 
----
-
-## 3. Proposed Flow
+### Proposed flow
 
 ```
 Fetch → raw_html
@@ -60,13 +60,60 @@ Fetch → raw_html
 
 ---
 
-## 4. New Method: `_detect_content_type()`
+## 3. Method Specification: `_detect_content_type()`
 
-### 4.1 Position in the class
+### 3.1 Signature and position
 
-Add this as an instance method on `class Tools`, placed between `_extract_content` and `_basic_extract` (or anywhere logically grouped with the other extraction helpers).
+Add this as an instance method on `class Tools`, placed between `_extract_content` and `_basic_extract` (no callers until Phase 2).
 
-### 4.2 Signature and structure
+```python
+async def _detect_content_type(self, raw_html: str) -> str:
+    """
+    Classify a page as 'feed', 'article', or 'unknown'.
+
+    Uses selectolax to parse and a heuristic scoring system.
+    Runs in a thread to avoid blocking the event loop.
+
+    Returns:
+        "feed"    → page is a feed/forum/listing — use selectolax full extraction
+        "article" → page is a single article — use trafilatura
+        "unknown" → no clear signals — defer to default trafilatura behavior
+    """
+```
+
+### 3.2 Scoring signals
+
+**Feed signals (S1–S6):**
+
+| # | Signal | Weight |
+|---|--------|--------|
+| S1 | `.post/.entry/.item/.thread/.topic` elements ≥5 / ≥3 | +2 / +1 |
+| S2 | `<article>` tags ≥3 | +1 |
+| S3 | Feed container (`#posts`, `.feed`, `#threads`, `.listing`, etc.) | +2 |
+| S4 | Dual pagination (`rel="next"` + `rel="prev"`) | +2 |
+| S5 | `?page=`/`?after=`/`?offset=` in ≥2 `<a href>` | +1 |
+| S6 | ≥2 repeated ID bases / ≥1 repeated base (filtered through a blacklist) | +2 / +1 |
+
+**Article signals (S7–S10):**
+
+| # | Signal | Weight |
+|---|--------|--------|
+| S7 | `og:type="article"` | +3 |
+| S8 | Any `<meta property="article:*">` | +1 |
+| S9 | Schema.org `itemtype="...Article"` | +2 |
+| S10 | Exactly 1 `<article>` + ≤2 post-like elements | +2 |
+
+### 3.3 Decision logic
+
+```python
+if feed_score >= 4 and feed_score >= article_score:
+    return "feed"
+if article_score >= 3 and article_score >= feed_score:
+    return "article"
+return "unknown"
+```
+
+### 3.4 Full method code
 
 ```python
 async def _detect_content_type(self, raw_html: str) -> str:
@@ -188,68 +235,21 @@ async def _detect_content_type(self, raw_html: str) -> str:
         return "unknown"
 ```
 
-### 4.3 Scoring table summary
+### 3.5 Interaction with `_try_alternate_fallback()`
 
-| # | Signal | Weight |
-|---|---|---|
-| S1 | `.post/.entry/.item/.thread/.topic` elements >= 5 / >= 3 | +2 / +1 |
-| S2 | `<article>` tags >= 3 | +1 |
-| S3 | Feed container (`#posts`, `.feed`, `#threads`, etc.) | +2 |
-| S4 | Dual pagination (`rel="next"` + `rel="prev"`) | +2 |
-| S5 | `?page=`/`?after=`/`?offset=` in >= 2 `<a href>` | +1 |
-| S6 | >= 2 repeated ID bases / >= 1 repeated base | +2 / +1 |
-| S7 | `og:type="article"` | +3 |
-| S8 | Any `article:*` meta tag | +1 |
-| S9 | Schema.org `itemtype="...Article"` | +2 |
-| S10 | 1 `<article>` + <= 2 post-like elements | +2 |
-
-**Decision logic:**
-- If `feed_score >= 4` AND `feed_score >= article_score` → `"feed"`
-- If `article_score >= 3` AND `article_score >= feed_score` → `"article"`
-- Otherwise → `"unknown"`
+The alternate fallback is gated by `word_count < 30` in `smart_fetch_url()`. For the feed path, `_basic_extract()` returns hundreds or thousands of words, so `word_count >= 30` by default and the fallback never triggers. No changes needed to `_try_alternate_fallback()`.
 
 ---
 
-## 5. Modification of `_extract_content()`
+## 4. Modification: `_extract_content()`
 
-### 5.1 Exact hook location
+### 4.1 Hook location
 
-The hook goes **after** the `raw_html` type normalisation guard and **before** the `try: import trafilatura` block. Current structure of `_extract_content()` (lines 643-718 in `smart_fetch_url.py` v0.4.6):
+After the `raw_html` type normalisation guard, before the `try: import trafilatura` block.
 
-```
-L643:   content = None
-L644:   doc = None
-L646:   # Guard: normalise raw_html to str/bytes
-L652:   # Try trafilatura first
-L653:   try:
-L660:       def _do_extract(): ...
-L665:       doc = await asyncio.to_thread(_do_extract)
-L672:   except ImportError: ...
-L674:   except Exception: ...
-L677:   # Fallback: basic extraction
-L680:   # Fallback: strip_html
-L683:   # Build metadata dict
-L718:   # Return dict
-```
-
-The content-type detection goes between **L651** (end of guard) and **L652** (start of trafilatura try block).
-
-### 5.2 Modified method
-
-Replace the body of `_extract_content()` (lines 643-718) with:
+### 4.2 Code to add
 
 ```python
-        content = None
-        doc = None
-
-        # Guard: trafilatura expects str or bytes — normalise anything else
-        if not isinstance(raw_html, (str, bytes)):
-            logger.warning(
-                "unexpected raw_html type %s, coercing to empty string",
-                type(raw_html).__name__,
-            )
-            raw_html = str(raw_html) if raw_html is not None else ""
-
         # ── NEW: Detect content type for routing ─────────────────
         content_category = await self._detect_content_type(raw_html)
         logger.info("Content type detected: %s for %s", content_category, url)
@@ -274,112 +274,63 @@ Replace the body of `_extract_content()` (lines 643-718) with:
             }
 
         # ── Article / Unknown path: existing trafilatura logic ───
-        try:
-            import trafilatura
-            from trafilatura.core import extract_with_metadata
-
-            def _do_extract():
-                return extract_with_metadata(
-                    raw_html,
-                    url=url,
-                    output_format=format if format in ("markdown", "html", "txt") else "markdown",
-                    include_links=True,
-                    include_images=not remove_images,
-                    include_tables=True,
-                    include_comments=include_replies,
-                )
-
-            doc = await asyncio.to_thread(_do_extract)
-
-            if doc is not None and doc.text:
-                content = doc.text
-
-        except ImportError:
-            logger.warning("trafilatura not available, using basic extraction")
-        except Exception as e:
-            logger.warning("trafilatura extraction failed: %s — using fallback", e)
-
-        # Fallback: basic extraction
-        if not content and format != "json":
-            content = await self._basic_extract(raw_html, format, remove_images)
-
-        # Fallback: just return raw text
-        if not content:
-            content = await asyncio.to_thread(self._strip_html, raw_html)
-
-        # Build metadata dict from Document if available
-        meta = {}
-        if doc is not None:
-            meta["title"] = doc.title or ""
-            meta["author"] = doc.author or ""
-            meta["site"] = doc.sitename or ""
-            meta["language"] = doc.language or ""
-            meta["published"] = doc.date or ""
-        else:
-            meta["title"] = self._extract_title(raw_html)
-            meta["author"] = self._extract_meta(raw_html, "author")
-            meta["site"] = urlparse(url).hostname or ""
-            meta["language"] = self._extract_language(raw_html)
-            meta["published"] = (
-                self._extract_meta(raw_html, "article:published_time")
-                or self._extract_meta(raw_html, "date")
-                or ""
-            )
-
-        word_count = len(content.split()) if content else 0
-
-        return {
-            "content": content or "",
-            "title": meta.get("title", ""),
-            "author": meta.get("author", ""),
-            "site": meta.get("site", ""),
-            "language": meta.get("language", ""),
-            "published": meta.get("published", ""),
-            "word_count": word_count,
-        }
 ```
 
-### 5.3 Interaction with `_try_alternate_fallback()`
+### 4.3 What remains untouched
 
-No changes needed. The alternate fallback is gated by `word_count < 30` in `smart_fetch_url()` (line ~333). For the feed path, `_basic_extract()` returns hundreds or thousands of words, so `word_count >= 30` by default and the fallback never triggers. This is implicit and correct.
-
----
-
-## 6. No changes outside these two methods
-
-- **`smart_fetch_url()`** (main entry point, line ~200): unchanged. Still calls `_extract_content()` as before.
-- **`_basic_extract()`** (line ~720): unchanged. Still returns `str`.
-- **`_try_alternate_fallback()`** (line ~814): unchanged. Still gated by `word_count < 30`.
-- **Metadata helpers** (`_extract_title`, `_extract_meta`, `_extract_language`, lines ~1185-1212): unchanged — used by the feed path.
-- **Valves, UserValves**: unchanged.
-- **Output formats**: unchanged — `_format_output()` works the same regardless of which extractor was used.
-- **Dependencies**: no new ones — `selectolax` is already listed in `requirements`.
+- `smart_fetch_url()` — unchanged. Still calls `_extract_content()` as before.
+- `_basic_extract()` — unchanged. Still returns `str`.
+- `_try_alternate_fallback()` — unchanged. Still gated by `word_count < 30`.
+- Metadata helpers (`_extract_title`, `_extract_meta`, `_extract_language`) — unchanged.
+- Valves, UserValves — unchanged.
+- Output formats — unchanged. `_format_output()` works the same regardless of extractor.
+- Dependencies — no new ones. `selectolax` is already listed in `requirements`.
 
 ---
 
-## 7. Test cases with quantitative criteria
+## 5. Implementation Phases
 
-| URL | Expected | Key signals | Success criteria |
-|-----|----------|-------------|------------------|
-| `https://old.reddit.com/r/all` | `"feed"` | Multiple `.entry`, `.thing`, dual pagination | word_count >= 1000 (all visible entries) |
-| `https://news.ycombinator.com/` | `"feed"` | Multiple `tr.athing`, repeated numeric IDs | word_count >= 2000 (all stories on front page) |
-| Blog article with `og:type="article"` | `"article"` | `og:type="article"`, 1 `<article>` tag | Same extraction quality as current trafilatura |
-| Documentation page (e.g., MDN, ReadTheDocs) | `"unknown"` → trafilatura | No clear feed or article signals | No regression vs. current behavior |
-| Blog article with many `<article>` comments | `"article"` | 1 `<article>` + `og:type` overrides comment count | Article body extracted, not comment spam |
+### Phase 1 — Scaffolding: Add `_detect_content_type()`
+
+**Task**: Insert the new method as dead code (no caller yet) between `_extract_content` and `_basic_extract`.
+
+**Verification**:
+- Module imports without errors
+- `Tools()._detect_content_type("<html>...</html>")` returns `"unknown"` for trivial HTML
+- `Tools()._detect_content_type("<html>...")` returns `"feed"` for HTML with ≥5 `.post` elements
+- `Tools()._detect_content_type(...)` returns `"article"` for HTML with `og:type="article"` and 1 `<article>` tag
+
+**Risk**: None — no caller, no behavioral change.
+
+### Phase 2 — Integration: Hook into `_extract_content()`
+
+**Task**: Add the content-type detection call and early return for `"feed"` after the `raw_html` type guard.
+
+**Verification**:
+- **Article** with `og:type="article"` → still extracted by trafilatura → same output as before
+- **Feed** (e.g., Reddit, HN) → all visible content returned, not just the first post
+- **Unknown** (e.g., MDN docs) → trafilatura, same as before
+- **JSON format** feed → still works (early return returns dict, `_format_output` handles JSON)
+- `format == "raw"` is unaffected (never reaches `_extract_content`)
+
+**Risk**: Low. The early return is isolated; `"unknown"` and `"article"` fall through to identical existing logic.
+
+### Phase 3 — Validation: Test with real URLs
+
+**Test cases**:
+
+| URL type | Expected category | Success criterion |
+|----------|-------------------|-------------------|
+| Feed/forum (e.g., old Reddit, HN) | `"feed"` | word_count ≥ 1000 (all visible entries) |
+| Blog article with `og:type="article"` | `"article"` | Same extraction quality as before |
+| Documentation page (MDN, ReadTheDocs) | `"unknown"` → trafilatura | No regression |
+| Article with many `<article>` comments | `"article"` | Article body, not comment spam |
+
+**Tuning**: If false positives/negatives appear, only adjust weights inside `_detect_content_type()`. Never touch `_extract_content()` or other methods.
 
 ---
 
-## 8. Implementation order
-
-1. **Add `_detect_content_type()`** as a new instance method on `class Tools`, between `_extract_content` and `_basic_extract`.
-2. **Modify `_extract_content()`** inserting the content-type detection hook and early return for `"feed"`.
-3. **Test** each case from section 7 manually.
-4. **Tune weights** if false positives/negatives appear in real-world usage.
-5. **Consider removing or lowering S1** (`.post` class) if WordPress blogs with comment `.post` elements cause too many false positives.
-
----
-
-## 9. What NOT to do
+## 6. What NOT to do
 
 - ❌ Do **not** add new dependencies — `selectolax` is already available.
 - ❌ Do **not** change `_basic_extract()` — it remains a `str`-returning helper.
@@ -387,26 +338,25 @@ No changes needed. The alternate fallback is gated by `word_count < 30` in `smar
 - ❌ Do **not** pass `include_replies` to the feed path — in feeds, all content IS the content.
 - ❌ Do **not** place the hook before the `raw_html` type normalisation guard.
 - ❌ Do **not** use `re` on the main thread for detection — wrap in `asyncio.to_thread()`.
-- ❌ Do **not** call `_basic_extract()` twice (once for detection, once for extraction) on the feed path — detection uses its own lightweight parse.
+- ❌ Do **not** call `_basic_extract()` twice — detection uses its own lightweight parse.
 
 ---
 
-## 10. Reference lines in current codebase (`smart_fetch_url.py` v0.4.6)
+## 7. Rollback Plan
 
-| Component | Lines |
-|---|---|
-| `_extract_content()` body (to replace) | 643-718 |
-| `_basic_extract()` (unchanged) | 720-810 |
-| `_try_alternate_fallback()` (unchanged) | 814-885 |
-| `_extract_title()` | 1185-1189 |
-| `_extract_meta()` | 1191-1201 |
-| `_extract_language()` | 1203-1207 |
-| `_strip_html()` | 1209-1212 |
-| Word count gate in `smart_fetch_url()` | ~333 |
+Each phase is a single atomic edit:
+
+| Phase | Rollback action |
+|-------|-----------------|
+| 1 | Remove `_detect_content_type()` method |
+| 2 | Remove the hook + early return from `_extract_content()` |
+| 3 | Revert weight changes in `_detect_content_type()` |
+
+No cascading dependencies — Phase 2 does not depend on Phase 1 beyond the method existing (rollback of Phase 1 while keeping Phase 2 would cause a runtime `AttributeError`, easily caught).
 
 ---
 
-## 11. Advantages
+## 8. Advantages
 
 | Aspect | Improvement |
 |--------|-------------|
@@ -416,7 +366,7 @@ No changes needed. The alternate fallback is gated by `word_count < 30` in `smar
 | **No new dependencies** | Selectolax already listed in requirements |
 | **Lightweight detection** | ~5ms parse vs ~200-500ms Trafilatura extraction |
 
-## 12. Risks & Mitigations
+## 9. Risks & Mitigations
 
 | Risk | Mitigation |
 |------|------------|
