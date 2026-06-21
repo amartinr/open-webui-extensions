@@ -710,6 +710,126 @@ class Tools:
             "word_count": word_count,
         }
 
+    async def _detect_content_type(self, raw_html: str) -> str:
+        """
+        Classify a page as 'feed', 'article', or 'unknown'.
+
+        Uses selectolax to parse and a heuristic scoring system.
+        Runs in a thread to avoid blocking the event loop.
+
+        Returns:
+            "feed"    -> page is a feed/forum/listing - use selectolax full extraction
+            "article" -> page is a single article - use trafilatura
+            "unknown" -> no clear signals - defer to default trafilatura behavior
+        """
+
+        def _detect():
+            from selectolax.parser import HTMLParser
+
+            tree = HTMLParser(raw_html)
+
+            feed_score = 0
+            article_score = 0
+
+            # --- Feed signals ---------------------------------------------------
+
+            # S1: Multiple post-like elements (.post, .entry, .item, .thread, .topic)
+            post_elements = len(tree.css(
+                ".post, .entry, .item, .thread, .topic"
+            ))
+            if post_elements >= 5:
+                feed_score += 2
+            elif post_elements >= 3:
+                feed_score += 1
+
+            # S2: Multiple <article> tags (>= 3)
+            article_tags = len(tree.css("article"))
+            if article_tags >= 3:
+                feed_score += 1
+
+            # S3: Explicit feed container (#posts, #feed, .feed, #threads, etc.)
+            feed_containers = len(tree.css(
+                "#posts, #feed, .feed, #threads, "
+                ".listing, .thread-list, .post-list"
+            ))
+            if feed_containers >= 1:
+                feed_score += 2
+
+            # S4: Dual pagination (rel="next" AND rel="prev")
+            has_next = bool(tree.css('link[rel="next"], a[rel="next"]'))
+            has_prev = bool(tree.css('link[rel="prev"], a[rel="prev"]'))
+            if has_next and has_prev:
+                feed_score += 2
+
+            # S5: Pagination URL params in <a href> (?page=, ?after=, ?offset=)
+            page_links = len(tree.css(
+                'a[href*="?page="], a[href*="&page="], '
+                'a[href*="?after="], a[href*="&after="], '
+                'a[href*="?offset="], a[href*="&offset="]'
+            ))
+            if page_links >= 2:
+                feed_score += 1
+
+            # S6: Repeated ID base patterns (e.g. comment-1, comment-2, comment-3)
+            #     with a blacklist of common single-use IDs.
+            id_counts = {}
+            ID_BASE_BLACKLIST = frozenset({
+                "header", "footer", "nav", "sidebar", "main", "content",
+                "wrapper", "container", "section", "page", "article",
+                "body", "root", "app", "site", "menu", "modal",
+            })
+            for el in tree.css("[id]"):
+                raw_id = el.attributes.get("id", "")
+                if not raw_id:
+                    continue
+                base = re.sub(r"\d+$", "", raw_id).rstrip("- _")
+                if base and base.lower() not in ID_BASE_BLACKLIST:
+                    id_counts[base] = id_counts.get(base, 0) + 1
+            repeated = sum(1 for c in id_counts.values() if c >= 3)
+            if repeated >= 2:
+                feed_score += 2
+            elif repeated >= 1:
+                feed_score += 1
+
+            # --- Article signals ------------------------------------------------
+
+            # S7: Open Graph og:type="article"
+            for meta in tree.css('meta[property="og:type"]'):
+                if (meta.attributes.get("content") or "").lower() == "article":
+                    article_score += 3
+                    break
+
+            # S8: Open Graph article:* meta tags (article:published_time, etc.)
+            article_meta_count = len(tree.css('meta[property^="article:"]'))
+            if article_meta_count >= 1:
+                article_score += 1
+
+            # S9: Schema.org Article type
+            for el in tree.css("[itemtype]"):
+                it = (el.attributes.get("itemtype") or "").lower()
+                if "schema.org/article" in it:
+                    article_score += 2
+                    break
+
+            # S10: Exactly one <article> AND <= 2 post-like elements
+            if article_tags == 1 and post_elements <= 2:
+                article_score += 2
+
+            # --- Decision -------------------------------------------------------
+            if feed_score >= 4 and feed_score >= article_score:
+                return "feed"
+            if article_score >= 3 and article_score >= feed_score:
+                return "article"
+            return "unknown"
+
+        try:
+            return await asyncio.to_thread(_detect)
+        except Exception:
+            logger.warning(
+                "Content type detection failed, falling back to 'unknown'"
+            )
+            return "unknown"
+
     async def _basic_extract(self, html: str, format: str, remove_images: bool) -> str:
         """Basic HTML extraction fallback using selectolax or regex.
 
