@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Always preferred over 'fetch_url'. Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Use by default.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.4.6
+version: 0.5.0
 licence: MIT
 """
 
