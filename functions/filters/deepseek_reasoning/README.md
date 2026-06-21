@@ -33,7 +33,7 @@ Request → Filter 0 (Thinking Default Off)
 
 | User action | Filter 0 runs? | Filter 1 runs? | Result |
 |---|---|---|---|
-| No chip activated | ✅ Always | ❌ No | Thinking OFF (rápido, barato) |
+| No chip activated | ✅ Always | ❌ No | Thinking OFF (fast, cheap) |
 | Chip activated, effort = "high" | ✅ Always | ✅ Yes | Thinking ON + effort HIGH |
 | Chip activated, effort = "max" | ✅ Always | ✅ Yes | Thinking ON + effort MAX |
 
