@@ -155,7 +155,6 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         self._cffi_available = None  # lazy check
-        self._httpx_client: Any = None
 
     # ──────────────────────────────────────────────
     #  Core tool method
@@ -513,19 +512,6 @@ class Tools:
                 proxy=proxy,
             )
 
-    async def _get_httpx_client(self) -> Any:
-        """Get or create a shared httpx AsyncClient.
-
-        Reusing a single client keeps the TCP connection pool alive across
-        requests (keep-alive) instead of creating a new pool per call.
-        """
-        if self._httpx_client is None:
-            import httpx
-
-            self._httpx_client = httpx.AsyncClient()
-            await self._httpx_client.__aenter__()
-        return self._httpx_client
-
     async def _fetch_with_curl_cffi(
         self,
         url: str,
@@ -580,7 +566,7 @@ class Tools:
     ) -> tuple[str, str, int, str, dict]:
         """Fallback fetch using httpx (no TLS fingerprinting)."""
 
-        client = await self._get_httpx_client()
+        import httpx
 
         request_kwargs = {
             "headers": headers,
@@ -590,27 +576,28 @@ class Tools:
         if proxy:
             request_kwargs["proxies"] = proxy
 
-        resp = await client.get(url, **request_kwargs)
-        resp.raise_for_status()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, **request_kwargs)
+            resp.raise_for_status()
 
-        content_type = resp.headers.get("content-type", "") or ""
-        resp_headers = dict(resp.headers)
-        final_url = str(resp.url)
-        status_code = resp.status_code
+            content_type = resp.headers.get("content-type", "") or ""
+            resp_headers = dict(resp.headers)
+            final_url = str(resp.url)
+            status_code = resp.status_code
 
-        # Always grab raw bytes (needed for document extraction).
-        raw_bytes: Optional[bytes] = resp.content
+            # Always grab raw bytes (needed for document extraction).
+            raw_bytes: Optional[bytes] = resp.content
 
-        # Only decode to text when the Content-Type warrants it.
-        ct_mime = content_type.split(";", 1)[0].strip().lower()
-        if ct_mime.startswith("text/") or ct_mime in Tools._TEXT_LIKE_APPLICATION_TYPES:
-            raw_html = resp.text
-        elif ct_mime in Tools._EXTRACTABLE_DOCUMENT_TYPES:
-            raw_html = ""
-        else:
-            raw_html = ""  # true binary (image, video, …)
+            # Only decode to text when the Content-Type warrants it.
+            ct_mime = content_type.split(";", 1)[0].strip().lower()
+            if ct_mime.startswith("text/") or ct_mime in Tools._TEXT_LIKE_APPLICATION_TYPES:
+                raw_html = resp.text
+            elif ct_mime in Tools._EXTRACTABLE_DOCUMENT_TYPES:
+                raw_html = ""
+            else:
+                raw_html = ""  # true binary (image, video, …)
 
-        return raw_html, final_url, status_code, content_type, resp_headers, raw_bytes
+            return raw_html, final_url, status_code, content_type, resp_headers, raw_bytes
 
     # ──────────────────────────────────────────────
     #  Internal: Content extraction
