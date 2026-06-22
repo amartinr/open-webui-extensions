@@ -19,6 +19,91 @@ Base: review feedback on fitness for the Open WebUI harness.
 
 ---
 
+## P0·UX — User-facing issues in the harness
+
+- [ ] **UI freezes during fetch — no progress feedback**
+  Open WebUI pauses token streaming while a tool runs.  The user sees a
+  frozen screen for the entire fetch + extraction time.  Currently the
+  tool only emits `"source"` events at the very end.
+
+  Consequences:
+  - Single slow URL (~15s timeout): user thinks the chat is broken
+  - Batch of 50 URLs: 30–90s of silence, no indication of progress
+  - `batch_fetch_urls` explicitly passes `__event_emitter__=None`,
+    so per-item progress is suppressed entirely
+
+  **Technical constraints (from Open WebUI docs):**
+
+  1. **Must use `"type": "status"`** — this is the only real-time
+     feedback type that works in **Native Mode** (the only supported
+     mode).  Types like `"message"`, `"chat:message:delta"` and
+     `"replace"` are **BROKEN** in Native Mode — they get overwritten
+     by native completion snapshots.
+
+  2. **Payload format** (works identically in Default and Native modes):
+     ```python
+     {
+         "type": "status",
+         "data": {
+             "description": "Human-readable text",
+             "done": False,   # False = shimmer animation
+             "hidden": False,  # True = saved to history, not shown
+         }
+     }
+     ```
+
+  3. **Always emit a final `done: True`** — without it the shimmer
+     animation stays forever, making the tool look stuck even after
+     completion.
+
+  4. **`"source"` / `"citation"` events work in both modes** — the
+     tool already uses these correctly for the citations list.
+
+  **Implementation plan:**
+
+  | Milestone | Description | done |
+  |---|---|:---:|
+  | Resolving | `"🔍 Resolving {url}"` | `False` |
+  | Fetching  | `"🌐 Fetching {url}…"` | `False` |
+  | Extracting | `"📄 Extracting content…"` | `False` |
+  | Done      | `"✅ Done — {word_count} words"` | `True` |
+
+  For batch mode, emit per-item progress:
+  ```python
+  await __event_emitter__(
+      "type": "status",
+      "data": {"description": f"[{i+1}/{n}] ✅ {url}", "done": False},
+  )
+  # … and a final one when all URLs complete:
+  await __event_emitter__(
+      "type": "status",
+      "data": {"description": f"✅ Fetched {n} URLs", "done": True},
+  )
+  ```
+
+  **Key change for batch**: stop passing `__event_emitter__=None` to
+  individual `smart_fetch_url` calls.  Instead, pass it through so
+  each sub-fetch emits its own status events.
+
+- [ ] **`asyncio.to_thread()` leaves zombie threads on cancellation**
+  Every CPU-bound operation (trafilatura, selectolax, pypdf, …) runs
+  via `asyncio.to_thread()`.  If the user cancels generation, the asyncio
+  task is cancelled but the thread keeps running to completion.
+
+  Consequences:
+  - CPU/memory wasted on work nobody needs
+  - Thread-pool slots occupied, potentially starving legitimate requests
+  - Worst case: rapid cancel → re‑fetch cycle causes thread pile-up
+
+  Solutions:
+  - Wrap `to_thread` calls with a shield or timeout
+  - Use a custom thread pool with `cancel_futures=True` on `shutdown()`
+    (but `to_thread` doesn't expose the underlying `ThreadPoolExecutor`)
+  - Detect cancellation via `asyncio.current_task().cancelling()` and
+    skip heavy work when possible
+
+---
+
 ## P1 — Code clarity / maintainability
 
 - [ ] **Rename parameter `os` to `os_profile`**
@@ -36,13 +121,6 @@ Base: review feedback on fitness for the Open WebUI harness.
   - Thread a pre-parsed `HTMLParser` tree through the pipeline
   - Cache the tree on `self` (careful with re-entrancy)
   - Accept the overhead (it's small, but inelegant)
-
-- [ ] **Logging visibility in Open WebUI**
-  `logger.info/warning` calls are invisible to the end user because
-  Open WebUI doesn't surface tool logs.  Consider:
-  - Emitting `__event_emitter__({"type": "status", …})` for milestones
-    (fetching, parsing, extracting, done)
-  - Or removing noisy internal logs that nobody sees
 
 ---
 
@@ -67,11 +145,6 @@ Base: review feedback on fitness for the Open WebUI harness.
 ---
 
 ## P3 — Nice-to-have
-
-- [ ] **Emit progress events during fetch**
-  Use `__event_emitter__` with `{"type": "status", "data": …}` so
-  the UI shows live progress (e.g. "Fetching…", "Extracting…",
-  "Done") instead of a silent wait.
 
 - [ ] **Graceful message for unsupported document formats**
   Currently `.xlsx`, `.pptx`, `.odt`, EPUB, RTF, legacy `.doc` show a
