@@ -93,27 +93,6 @@ callable.
 **Known limitation**: `cancel_futures=True` only cancels futures not yet
 started; already-running threads are not killed. Mitigated by the 30s timeout.
 
-### ❌ Change 6 — CancelledError in async fetch methods
-
-Change 5 protects CPU-bound thread operations. But the async fetch methods
-themselves have no explicit `CancelledError` handling:
-
-| Location | Problem | Status |
-|----------|---------|--------|
-| `_fetch_with_curl_cffi()` | `await session.get()` can receive `CancelledError` with no explicit cleanup | ❌ Pending |
-| `_fetch_with_httpx()` | `await client.get()` can receive `CancelledError` with no explicit cleanup | ❌ Pending |
-| `smart_fetch_url()` | `except Exception` does not catch `CancelledError` (it is a `BaseException`), no logging or cleanup before re-raise | ❌ Pending |
-| Defensive global timeout | No `asyncio.wait_for()` wrapping the whole fetch in case Stop does not propagate correctly | ❌ Pending |
-
-**Proposed fix**:
-- Add `except asyncio.CancelledError` in `_fetch_with_curl_cffi` and `_fetch_with_httpx`
-  for logging and re-raise
-- Add `except asyncio.CancelledError` in `smart_fetch_url()` before the `except Exception`
-- Optional: wrap the main block with `asyncio.wait_for(timeout=30)`
-  as a defence when Stop does not propagate correctly
-
----
-
 ### ✅ Decided: fallback from curl_cffi to httpx
 
 `_fetch_with_fingerprint()` now only falls back to httpx on `ImportError`.
@@ -148,6 +127,25 @@ When the fallback triggers:
 ---
 
 ## P2 — Production hardening
+
+- [ ] **CancelledError handling in async fetch methods**
+  Change 5 (thread pool) already handles cancellation for CPU-bound work.
+  But the async fetch methods themselves have no explicit `CancelledError`
+  handling when the user presses Stop during a network request:
+
+  | Location | Problem |
+  |----------|---------|
+  | `_fetch_with_curl_cffi()` | `await session.get()` can receive `CancelledError` with no explicit cleanup |
+  | `_fetch_with_httpx()` | `await client.get()` can receive `CancelledError` with no explicit cleanup |
+  | `smart_fetch_url()` | `except Exception` does not catch `CancelledError` (it is a `BaseException`) |
+  | Defensive global timeout | No `asyncio.wait_for()` wrapping the whole fetch in case Stop does not propagate |
+
+  **Proposed fix**:
+  - Add `except asyncio.CancelledError` in `_fetch_with_curl_cffi` and `_fetch_with_httpx`
+    for logging and re-raise
+  - Add `except asyncio.CancelledError` in `smart_fetch_url()` before the `except Exception`
+  - Optional: wrap the main block with `asyncio.wait_for(timeout=30)`
+    as a defence when Stop does not propagate correctly
 
 - [ ] **Rate limiting for batch fetches**
   `batch_fetch_urls()` respects concurrency via `asyncio.Semaphore`,
