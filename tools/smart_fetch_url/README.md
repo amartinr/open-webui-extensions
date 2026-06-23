@@ -31,7 +31,7 @@ Import into Open WebUI at **Workspace → Tools → +** and attach to a model.
 
 ```
 smart_fetch_url(url, format?, max_chars?, browser?, os_profile?, timeout_ms?,
-                remove_images?, include_replies?, proxy?, headers?)
+                remove_images?, include_replies?, proxy?, headers?, show_favicons?)
 ```
 
 Configuration values are resolved with the following precedence:
@@ -41,7 +41,7 @@ Configuration values are resolved with the following precedence:
 
 ```
 batch_fetch_urls(urls, format?, max_chars?, browser?, os_profile?,
-                 timeout_ms?, concurrency?)
+                 timeout_ms?, concurrency?, remove_images?, include_replies?, headers?)
 ```
 
 ### UserValves (per-user, configurable from chat)
