@@ -5,234 +5,88 @@ Base: review feedback on fitness for the Open WebUI harness.
 
 ---
 
-## P0 — Bugs / resource leaks
+## P0 — Bugs / resource leaks ✅
 
-- [x] **Close `_httpx_client` properly**
-  Removed the shared cached client (`_get_httpx_client()`) and switched
-  `_fetch_with_httpx()` to use `async with httpx.AsyncClient()` per
-  request.  Since httpx is only a fallback path, the overhead of creating
-  a client per call is negligible.
+- [x] **Close `_httpx_client` properly** — `_fetch_with_httpx()` uses
+  `async with httpx.AsyncClient()` per request.
+- [x] **`pypdf` not needed in requirements** — transitive dependency of
+  Open WebUI itself.
 
-- [x] **`pypdf` not needed in requirements** — it is already a transitive
-  dependency of Open WebUI itself (used for document processing/RAG),
-  so it is always available at runtime.
+## P0·UX — User-facing issues in the harness ✅
 
----
+Status events via `__event_emitter__` giving real-time progress feedback.
+All 5 changes implemented:
 
-## P0·UX — User-facing issues in the harness
+### ✅ Change 1 — Helper `_emit_status()`
 
-- [x] **UI freezes during fetch — no progress feedback**
-  Open WebUI pauses token streaming while a tool runs.  The user sees a
-  frozen screen for the entire fetch + extraction time.  Currently the
-  tool only emits `"source"` events at the very end.
+**Location**: `Tools._emit_status()` (next to `_emit_sources`)
 
-  Consequences:
-  - Single slow URL (~15s timeout): user thinks the chat is broken
-  - Batch of 50 URLs: 30–90s of silence, no indication of progress
-  - `batch_fetch_urls` explicitly passes `__event_emitter__=None`,
-    so per-item progress is suppressed entirely
+Centralises the status event payload:
+```python
+async def _emit_status(self, emitter, description, done=False):
+    if emitter is None:
+        return
+    try:
+        await emitter({
+            "type": "status",
+            "data": {"description": description, "done": done},
+        })
+    except Exception:
+        pass  # best-effort
+```
 
-  **Technical constraints (from Open WebUI docs):**
+### ✅ Change 2 — Status events in `smart_fetch_url()`
 
-  1. **Must use `"type": "status"`** — this is the only real-time
-     feedback type that works in **Native Mode** (the only supported
-     mode).  Types like `"message"`, `"chat:message:delta"` and
-     `"replace"` are **BROKEN** in Native Mode — they get overwritten
-     by native completion snapshots.
+| # | Point | Event | `done` |
+|---|-------|-------|--------|
+| A | Entering `try` in `smart_fetch_url()` | `"🌐 {url}"` | `False` |
+| B | Each success return (extractable doc, binary, raw, normal) | `"✅ {url}"` | `True` |
+| C | `except` in `smart_fetch_url()` | `"❌ {url}"` | `True` |
 
-  2. **Payload format** (works identically in Default and Native modes):
-     ```python
-     {
-         "type": "status",
-         "data": {
-             "description": "Human-readable text",
-             "done": False,   # False = shimmer animation
-             "hidden": False,  # True = saved to history, not shown
-         }
-     }
-     ```
+**Verbose** (`Tools.Valves.verbose` / `UserValves.verbose`):
+- `verbose=True` adds `({word_count}w, {elapsed:.1f}s)` to success events when extraction occurred (Option 4 — Combined)
+- Early validation returns (empty URL, bad protocol) are outside the `try` and have no `__event_emitter__` — correct.
 
-  3. **Always emit a final `done: True`** — without it the shimmer
-     animation stays forever, making the tool look stuck even after
-     completion.
+### ✅ Change 3 — Status events in `batch_fetch_urls()`
 
-  4. **`"source"` / `"citation"` events work in both modes** — the
-     tool already uses these correctly for the citations list.
+Batch manages its own events; sub-calls pass `__event_emitter__=None`.
 
-  **Implementation plan** — 5 changes, in implementation order:
+| # | Point | Event | `done` |
+|---|-------|-------|--------|
+| A | Before `asyncio.gather` | `"[0/{n}] Fetching {n} URLs…"` | `False` |
+| B | Inside `fetch_one()` per completed URL | `"[{i+1}/{n}] ✅ {url}"` / `❌ {url}` | `False` |
+| C | After `asyncio.gather` | `"✅ Fetched {n} URLs"` | `True` |
 
-  ---
-  ### ✅ Change 1 — Helper `_emit_status()`
+### ✅ Change 4 — `done=True` coverage verified
 
-  **File**: `smart_fetch_url.py`
-  **Insert**: next to `_emit_sources` (~l. 1406), before or after
+Audit of all `return` paths in `smart_fetch_url()`:
+- URL vacía / protocolo inválido → fuera del `try`, sin `__event_emitter__` ✅ aceptable
+- Documento extraíble, binario no texto, raw format, éxito normal, excepción → todos emiten `done=True` (Change 2)
 
-  Centralise the status event payload format into a single helper:
+### ✅ Change 5 — Zombie threads: wrapper `_run_in_thread()`
 
-  ```python
-  async def _emit_status(self, emitter, description, done=False):
-      if emitter is None:
-          return
-      try:
-          await emitter({
-              "type": "status",
-              "data": {"description": description, "done": done},
-          })
-      except Exception:
-          pass  # best-effort
-  ```
+**Location**: `Tools._get_thread_pool()`, `Tools._run_in_thread()`, `Tools.__del__()`
 
-  **Verification**: `Tools()._emit_status(None, "test")` does not raise.
-  **Risk**: None — new method, no callers.
+Replaces 7 `asyncio.to_thread()` calls with a wrapper backed by a dedicated
+`ThreadPoolExecutor(4 workers)` with `cancel_futures=True` on shutdown.
+Includes a 30s safety timeout. Handles `CancelledError` and `TimeoutError`
+by cancelling the future before re-raising.
 
-  ---
-  ### ✅ Change 2 — Status events in `smart_fetch_url()`
+Callsites replaced (by method):
+1. `_extract_content()` — trafilatura `_do_extract`
+2. `_extract_content()` — `self._strip_html(raw_html)` fallback
+3. `_detect_content_type()` — `Tools._detect_content_type_sync(raw_html)`
+4. `_basic_extract()` — selectolax `_do_extract`
+5. `_try_alternate_fallback()` — `_find_alternates`
+6. `_extract_pdf()` — pypdf `_do_extract`
+7. `_extract_docx()` — docx XML `_do_extract`
 
-  **File**: `smart_fetch_url.py`
-  **Insertion points**: between l. 207 and l. 367 (try body)
+Calls with positional args (`self._strip_html`, `Tools._detect_content_type_sync`)
+use `lambda` to capture arguments, since `_run_in_thread` accepts a single
+callable.
 
-  **Base events** (always, regardless of verbose):
-
-  | # | Point | Event | `done` |
-  |---|-------|-------|--------|
-  | A | l. 215 (entering try, after validation) | `"🌐 {url}"` | `False` |
-  | B | All success returns (~l. 244, 260, 272, 362) | `"✅ {url}"` | `True` |
-  | C | l. 367 (`except`) | `"❌ {url}"` | `True` |
-
-  **Additional info gated by Valve `verbose`**:
-
-  | Option | `verbose=False` (default) | `verbose=True` | Extra info | Use case |
-  |--------|--------------------------|----------------|------------|----------|
-  | **1 — Word count** | `"✅ {url}"` | `"✅ {url} ({word_count}w)"` | Number of extracted words | LLM knows how much content it received |
-  | **2 — Content type** | `"✅ {url}"` | `"✅ {url} [{type}]"` | `article` / `feed` / `PDF` / `raw` | Debug routing internals |
-  | **3 — Timing** | `"✅ {url}"` | `"✅ {url} ({elapsed:.1f}s)"` | Total elapsed seconds | Diagnose slowness |
-  | **4 — Combined** | `"✅ {url}"` | `"✅ {url} ({word_count}w, {elapsed:.1f}s)"` | Words + time | Power users |
-
-  **Chosen**: Option 4 — Combined (word count + timing).
-  `[ ] 1 — Word count` `[ ] 2 — Content type` `[ ] 3 — Timing` `[x] 4 — Combined`
-
-  Early validation returns (empty URL / bad protocol, l. 211-214) are outside
-  the `try` block and do not emit events — correct, since the operation never
-  started.
-
-  **Risk**: Low. Each insertion is 1 line. Forgetting a `done=True` is
-  visually detectable (perpetual shimmer).
-
-  ---
-  ### ✅ Change 3 — Status events in `batch_fetch_urls()`
-
-  **File**: `smart_fetch_url.py`
-  **Lines affected**: l. 417-460 (`fetch_one` + return)
-
-  Design: batch manages its own events; sub-calls to `smart_fetch_url` do
-  NOT emit events (still pass `__event_emitter__=None` as today).
-
-  | # | Point | Event | `done` |
-  |---|-------|-------|--------|
-  | A | Before the gather | `"[0/{n}] Fetching {n} URLs…"` | `False` |
-  | B | Per completed URL (inside `fetch_one`) | `"[{i+1}/{n}] ✅ {single_url}"` | `False` |
-  | C | After the gather | `"✅ Fetched {n} URLs"` | `True` |
-
-  **Risk**: Low. Same pattern — only the emitter changes.
-
-  ---
-  ### ✅ Change 4 — `done=True` coverage in all return paths
-
-  **File**: `smart_fetch_url.py`
-
-  Audit that **all** exit points emit `done=True` when `__event_emitter__`
-  is available. Includes:
-
-  | Line | Condition | Status today |
-  |------|-----------|-------------|
-  | l. 211 | Empty URL | ❌ bare string return |
-  | l. 214 | Invalid protocol | ❌ bare string return |
-  | l. 244 | Extractable document | ❌ only `_emit_sources` |
-  | l. 260 | Binary non-text | ❌ only `_emit_sources` |
-  | l. 272 | Raw format | ❌ only `_emit_sources` |
-  | l. 362 | Normal success | ❌ only `_emit_sources` |
-  | l. 367 | General exception | ❌ return error msg |
-
-  Validation returns (l. 211, 214) are outside the `try` — they don't have
-  access to `__event_emitter__`. Acceptable since the operation never started.
-
-  For the rest, Change 2 already covers B/C/D/G/H. This is a cross-check.
-
-  **Risk**: Very low — checklist only.
-
-  ---
-  ### ✅ Change 5 — Zombie threads: wrapper `_run_in_thread()`
-
-  **File**: `smart_fetch_url.py`
-  **Lines affected**: 7 `asyncio.to_thread` callsites
-
-  **Problem**: `asyncio.to_thread()` does not expose the underlying
-  `ThreadPoolExecutor`, so we cannot set `cancel_futures=True`. If the user
-  cancels generation, the asyncio task is cancelled but the thread runs to
-  completion.
-
-  **Proposed solution**: Replace `asyncio.to_thread(func)` with a wrapper
-  backed by a dedicated `ThreadPoolExecutor` with `cancel_futures=True`
-  on shutdown, plus a safety timeout.
-
-  **Code**:
-
-  ```python
-  import concurrent.futures
-
-  class Tools:
-      _thread_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
-
-      def _get_thread_pool(self):
-          if self._thread_pool is None:
-              self._thread_pool = concurrent.futures.ThreadPoolExecutor(
-                  max_workers=4, thread_name_prefix="smart_fetch"
-              )
-          return self._thread_pool
-
-      async def _run_in_thread(self, func, timeout=30.0):
-          loop = asyncio.get_running_loop()
-          pool = self._get_thread_pool()
-          fut = loop.run_in_executor(pool, func)
-          try:
-              return await asyncio.wait_for(fut, timeout=timeout)
-          except asyncio.CancelledError:
-              fut.cancel()
-              raise
-          except asyncio.TimeoutError:
-              fut.cancel()
-              raise
-
-      def __del__(self):
-          if self._thread_pool is not None:
-              self._thread_pool.shutdown(wait=False, cancel_futures=True)
-  ```
-
-  **Callsites to replace**:
-
-  | # | Current line | Current code | Replace with |
-  |---|-------------|--------------|--------------|
-  | 1 | l. 674 | `await asyncio.to_thread(_do_extract)` | `await self._run_in_thread(_do_extract)` |
-  | 2 | l. 690 | `await asyncio.to_thread(self._strip_html, raw_html)` | `await self._run_in_thread(lambda: self._strip_html(raw_html))` |
-  | 3 | l. 866 | `await asyncio.to_thread(Tools._detect_content_type_sync, raw_html)` | `await self._run_in_thread(lambda: Tools._detect_content_type_sync(raw_html))` |
-  | 4 | l. 911 | `await asyncio.to_thread(_do_extract)` | `await self._run_in_thread(_do_extract)` |
-  | 5 | l. 954 | `await asyncio.to_thread(_find_alternates)` | `await self._run_in_thread(_find_alternates)` |
-  | 6 | l. 1179 | `return await asyncio.to_thread(_do_extract)` | `return await self._run_in_thread(_do_extract)` |
-  | 7 | l. 1257 | `return await asyncio.to_thread(_do_extract)` | `return await self._run_in_thread(_do_extract)` |
-
-  **Note**: `asyncio.to_thread` accepts positional args (`*args`). Our
-  wrapper does not. For cases with arguments (l. 690, 866), use `lambda`
-  to capture them.
-
-  **Risk**: Medium. 7 callsites to touch, and the 30s timeout might be too
-  short for very large PDFs (though 30s is generous). Can be parametrised
-  per operation type if needed.
-
-  **Known limitation**: `concurrent.futures.ThreadPoolExecutor` with
-  `cancel_futures=True` only cancels futures **not yet started**. Once a
-  thread is already running, `cancel_futures=True` does not kill it.
-  That would require `threading.Event` signalling or `PEP 554` (not
-  accepted). Better than nothing, but not a complete solution.
+**Known limitation**: `cancel_futures=True` only cancels futures not yet
+started; already-running threads are not killed. Mitigated by the 30s timeout.
 
 ---
 
