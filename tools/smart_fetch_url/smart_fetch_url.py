@@ -195,9 +195,11 @@ class Tools:
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.CancelledError:
+            logger.warning("Threaded operation cancelled via CancelledError")
             fut.cancel()
             raise
         except asyncio.TimeoutError:
+            logger.warning("Threaded operation timed out after %.1fs", timeout)
             fut.cancel()
             raise
 
@@ -575,7 +577,16 @@ class Tools:
         await self._emit_status(__event_emitter__, f"[0/{len(urls)}] Fetching {len(urls)} URLs…", done=False)
 
         tasks = [fetch_one(i, u) for i, u in enumerate(urls)]
-        results = await asyncio.gather(*tasks)
+        try:
+            results = await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            logger.warning("batch_fetch_urls cancelled by user (Stop button)")
+            # Cancel any remaining tasks so threads don't keep running
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await self._emit_status(__event_emitter__, f"❌ Batch cancelled", done=True)
+            raise
 
         await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
 
@@ -1592,6 +1603,8 @@ class Tools:
                         },
                     }
                 )
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
         except Exception:
             pass  # Event emission is best-effort
 
@@ -1633,6 +1646,8 @@ class Tools:
                     },
                 }
             )
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
         except Exception:
             pass  # Event emission is best-effort
 
