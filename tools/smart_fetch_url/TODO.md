@@ -106,25 +106,24 @@ When the fallback triggers:
 
 ---
 
-## P1 — Code clarity / maintainability
+## P1 — Code clarity / maintainability ✅
 
-- [ ] **Rename parameter `os` to `os_profile`**
+- [x] **Rename parameter `os` to `os_profile`**
   `os` shadows the built-in module (`import os` is used at the top of
-  the file).  Python allows it, but it's confusing for readers and
-  breaks IDE refactoring.  The public method signature changes, but
-  callers typically pass it as a keyword argument, so this is a
-  backward-compatible change in practice.
-  
-  **Also**: update the docstring and the README to document the change.
+  the file).  Renamed in all method signatures, callsites, docstrings,
+  format strings, and README.  JSON output key kept as `"os"` for
+  backward compatibility.
 
-- [ ] **Deduplicate selectolax parse in feed path**
+- [x] **Deduplicate selectolax parse in feed path**
   When a page is classified as `"feed"`:
   1. `_detect_content_type()` parses HTML with selectolax
   2. `_basic_extract()` parses the same HTML again with selectolax
-  In large forums this doubles parse time (~5ms → ~10ms).  Options:
-  - Thread a pre-parsed `HTMLParser` tree through the pipeline
-  - Cache the tree on `self` (careful with re-entrancy)
-  - Accept the overhead (it's small, but inelegant)
+  
+  **Fix**: `_detect_content_type_sync()` now returns `(category, tree)`
+  where `tree` is the parsed `HTMLParser`.  `_basic_extract()` accepts
+  an optional `tree` parameter — when provided, it skips re-parsing.
+  `smart_fetch_url()` passes the tree from detection to extraction in
+  the feed branch.
 
 ---
 
@@ -156,6 +155,23 @@ When the fallback triggers:
   the target servers.  Options:
   - Add a `requests_per_second` valve (default: ~10/s)
   - Use `asyncio.Semaphore` with a token-bucket or sliding-window
+
+---
+
+## Additional changes (not in original TODO)
+
+- [x] **Remove User-Agent override, let curl_cffi handle it**
+  `DEFAULT_USER_AGENTS` dict and the block that injected it into
+  `request_headers` were removed.  curl_cffi already sets the correct
+  User-Agent matching each impersonate profile (e.g. `firefox_147` →
+  `Macintosh; Intel Mac OS X 10.15`).  Our override was incoherent
+  with the TLS fingerprint.  Users can still pass a custom UA via
+  `headers={"User-Agent": "..."}`.
+
+- [x] **Change default browser/OS to firefox_147/linux**
+  `DEFAULT_BROWSER` changed from `chrome_145` to `firefox_147`.
+  Default `os_profile` changed from `"windows"` to `"linux"`.
+  Firefox + Linux worked where Chrome + Windows was blocked (EL PAÍS).
 
 ---
 
