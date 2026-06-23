@@ -86,7 +86,7 @@ Base: review feedback on fitness for the Open WebUI harness.
   **Risk**: None — new method, no callers.
 
   ---
-  ### Change 2 — Status events in `smart_fetch_url()`
+  ### ✅ Change 2 — Status events in `smart_fetch_url()`
 
   **File**: `smart_fetch_url.py`
   **Insertion points**: between l. 207 and l. 367 (try body)
@@ -108,8 +108,8 @@ Base: review feedback on fitness for the Open WebUI harness.
   | **3 — Timing** | `"✅ {url}"` | `"✅ {url} ({elapsed:.1f}s)"` | Total elapsed seconds | Diagnose slowness |
   | **4 — Combined** | `"✅ {url}"` | `"✅ {url} ({word_count}w, {elapsed:.1f}s)"` | Words + time | Power users |
 
-  **TBD** — choose option when implementing:
-  `[ ] 1 — Word count` `[ ] 2 — Content type` `[ ] 3 — Timing` `[ ] 4 — Combined`
+  **Chosen**: Option 4 — Combined (word count + timing).
+  `[ ] 1 — Word count` `[ ] 2 — Content type` `[ ] 3 — Timing` `[x] 4 — Combined`
 
   Early validation returns (empty URL / bad protocol, l. 211-214) are outside
   the `try` block and do not emit events — correct, since the operation never

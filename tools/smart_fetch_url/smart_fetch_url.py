@@ -203,6 +203,8 @@ class Tools:
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
         timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
+        uv_verbose = uv.verbose if uv else None
+        verbose = uv_verbose if uv_verbose is not None else self.valves.verbose
 
         # Validate
         if not url or not url.strip():
@@ -213,6 +215,9 @@ class Tools:
             return f"Error: Invalid URL protocol. Only http/https are supported: {url}"
 
         try:
+            _start_time = time.monotonic()
+            await self._emit_status(__event_emitter__, f"🌐 {url}", done=False)
+
             (raw_html, final_url, status_code, content_type, resp_headers, raw_bytes) = (
                 await self._fetch_with_fingerprint(
                     url=url,
@@ -261,6 +266,10 @@ class Tools:
                     os=os,
                     status_code=status_code,
                 )
+                word_count = extracted.get("word_count", 0)
+                _elapsed = time.monotonic() - _start_time
+                _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
+                await self._emit_status(__event_emitter__, _desc, done=True)
                 if show_favicons:
                     await self._emit_sources(__event_emitter__, [final_url])
                 return result
@@ -281,6 +290,8 @@ class Tools:
                     os=os,
                     status_code=status_code,
                 )
+                _elapsed = time.monotonic() - _start_time
+                await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
                 if show_favicons:
                     await self._emit_sources(__event_emitter__, [final_url])
                 return result
@@ -300,6 +311,8 @@ class Tools:
                     browser=browser,
                     os=os,
                 )
+                _elapsed = time.monotonic() - _start_time
+                await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
                 if show_favicons:
                     await self._emit_sources(__event_emitter__, [final_url])
                 return result
@@ -357,6 +370,10 @@ class Tools:
 
             # Step 8: Emit source events for Open WebUI's Citations component (bottom of message)
             visited_urls = self._collect_visited_urls(url, final_url, alternate_urls)
+            word_count = extracted.get("word_count", 0)
+            _elapsed = time.monotonic() - _start_time
+            _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
+            await self._emit_status(__event_emitter__, _desc, done=True)
             if show_favicons:
                 await self._emit_sources(__event_emitter__, visited_urls)
 
@@ -364,6 +381,7 @@ class Tools:
 
         except Exception as e:
             error_msg = self._format_error(e, url)
+            await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
             logger.exception(f"smart_fetch_url failed for {url}")
             return error_msg
 
