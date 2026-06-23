@@ -161,6 +161,7 @@ class Tools:
         self.valves = self.Valves()
         self._cffi_available = None  # lazy check
         self._thread_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+        self._fallback_note: Optional[str] = None
 
     def _get_thread_pool(self) -> concurrent.futures.ThreadPoolExecutor:
         if self._thread_pool is None:
@@ -257,6 +258,8 @@ class Tools:
                     format=format,
                 )
             )
+            fallback_note = self._fallback_note
+            self._fallback_note = None
 
             # Step 2: Route by Content-Type
             #
@@ -293,6 +296,7 @@ class Tools:
                     browser=browser,
                     os=os,
                     status_code=status_code,
+                    note=fallback_note,
                 )
                 word_count = extracted.get("word_count", 0)
                 _elapsed = time.monotonic() - _start_time
@@ -317,6 +321,7 @@ class Tools:
                     browser=browser,
                     os=os,
                     status_code=status_code,
+                    note=fallback_note,
                 )
                 _elapsed = time.monotonic() - _start_time
                 await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
@@ -394,6 +399,7 @@ class Tools:
                 browser=browser,
                 os=os,
                 status_code=status_code,
+                note=fallback_note,
             )
 
             # Step 8: Emit source events for Open WebUI's Citations component (bottom of message)
@@ -557,15 +563,10 @@ class Tools:
                 proxy=proxy,
             )
         except ImportError:
-            logger.warning("curl_cffi not available, falling back to httpx")
-            return await self._fetch_with_httpx(
-                url=url,
-                headers=request_headers,
-                timeout_ms=timeout_ms,
-                proxy=proxy,
-            )
-        except Exception as e:
-            logger.warning(f"curl_cffi failed ({e}), falling back to httpx")
+            msg = "curl_cffi not installed — falling back to httpx (no TLS fingerprinting)"
+            logger.warning(msg)
+            print(msg, file=__import__("sys").stderr)
+            self._fallback_note = "⚠️ Fetched via httpx fallback (curl_cffi not installed, no TLS fingerprinting)"
             return await self._fetch_with_httpx(
                 url=url,
                 headers=request_headers,
@@ -1335,6 +1336,7 @@ class Tools:
         browser: str,
         os: str,
         status_code: int,
+        note: Optional[str] = None,
     ) -> str:
         """Build the final output string depending on format."""
 
@@ -1352,6 +1354,8 @@ class Tools:
                 "browser": browser,
                 "os": os,
             }
+            if note:
+                result["note"] = note
             return json.dumps(result, indent=2, ensure_ascii=False)
 
         # Build a metadata header for text-based formats
@@ -1369,6 +1373,8 @@ class Tools:
             parts.append(f"> Published: {published}")
         parts.append(f"> Words: {word_count}")
         parts.append(f"> Browser: {browser}/{os}")
+        if note:
+            parts.append(f"> {note}")
         parts.append("")
 
         if content:
