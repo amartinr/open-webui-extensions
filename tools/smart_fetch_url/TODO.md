@@ -136,7 +136,7 @@ Base: review feedback on fitness for the Open WebUI harness.
   **Risk**: Low. Same pattern — only the emitter changes.
 
   ---
-  ### Change 4 — `done=True` coverage in all return paths
+  ### ✅ Change 4 — `done=True` coverage in all return paths
 
   **File**: `smart_fetch_url.py`
 
