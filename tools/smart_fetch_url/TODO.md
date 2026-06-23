@@ -100,30 +100,30 @@ themselves have no explicit `CancelledError` handling:
 
 | Location | Problem | Status |
 |----------|---------|--------|
-| `_fetch_with_curl_cffi()` | `await session.get()` puede recibir `CancelledError` sin cleanup explícito | ❌ Pendiente |
-| `_fetch_with_httpx()` | `await client.get()` puede recibir `CancelledError` sin cleanup explícito | ❌ Pendiente |
-| `smart_fetch_url()` | `except Exception` no captura `CancelledError` (es `BaseException`), pero no hay logging ni cleanup antes de propagarlo | ❌ Pendiente |
-| Defensive timeout global | No hay un `asyncio.wait_for()` envolviendo todo el fetch por si Stop no propaga correctamente | ❌ Pendiente |
+| `_fetch_with_curl_cffi()` | `await session.get()` can receive `CancelledError` with no explicit cleanup | ❌ Pending |
+| `_fetch_with_httpx()` | `await client.get()` can receive `CancelledError` with no explicit cleanup | ❌ Pending |
+| `smart_fetch_url()` | `except Exception` does not catch `CancelledError` (it is a `BaseException`), no logging or cleanup before re-raise | ❌ Pending |
+| Defensive global timeout | No `asyncio.wait_for()` wrapping the whole fetch in case Stop does not propagate correctly | ❌ Pending |
 
-**Fix propuesto**:
-- Añadir `except asyncio.CancelledError` en `_fetch_with_curl_cffi` y `_fetch_with_httpx`
-  para logging y re-raise
-- Añadir `except asyncio.CancelledError` en `smart_fetch_url()` antes del `except Exception`
-- Opcional: envolver el bloque principal con `asyncio.wait_for(timeout=30)`
-  como defensa ante cancelaciones que no se propaguen
+**Proposed fix**:
+- Add `except asyncio.CancelledError` in `_fetch_with_curl_cffi` and `_fetch_with_httpx`
+  for logging and re-raise
+- Add `except asyncio.CancelledError` in `smart_fetch_url()` before the `except Exception`
+- Optional: wrap the main block with `asyncio.wait_for(timeout=30)`
+  as a defence when Stop does not propagate correctly
 
 ---
 
-### ⚠️ Decisión de diseño: fallback de curl_cffi a httpx
+### ✅ Decided: fallback from curl_cffi to httpx
 
-Actualmente `_fetch_with_fingerprint()` cae a httpx en **cualquier** excepción
-de curl_cffi (no solo `ImportError`). Esto maximiza resiliencia pero puede
-enmascarar errores de configuración (proxy mal formado, versión incompatible).
+`_fetch_with_fingerprint()` now only falls back to httpx on `ImportError`.
+Any other error from curl_cffi propagates directly to the caller, making
+real curl_cffi errors visible instead of being masked by the httpx attempt.
 
-**Decisión**: mantener el fallback en toda excepción, pero subir el nivel
-de logging a `logger.error` y considerar añadir una nota en el mensaje de
-resultado indicando que se usó httpx sin fingerprinting. Esto da visibilidad
-sin perder robustez.
+When the fallback triggers:
+- A warning is written to the log and to stderr
+- A `fallback_note` is set and propagated through `_format_output()` so the
+  LLM agent sees a `> ⚠️ Fetched via httpx fallback (...)` line in the result
 
 ---
 
