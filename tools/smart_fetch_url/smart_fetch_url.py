@@ -445,12 +445,18 @@ class Tools:
                         show_favicons=False,  # batch handles its own source list
                         __event_emitter__=None,  # suppress per-item events
                     )
+                    await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ✅ {single_url}", done=False)
                     return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{result}\n\n---\n"
                 except Exception as e:
+                    await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
                     return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: {self._format_error(e, single_url)}\n\n---\n"
+
+        await self._emit_status(__event_emitter__, f"[0/{len(urls)}] Fetching {len(urls)} URLs…", done=False)
 
         tasks = [fetch_one(i, u) for i, u in enumerate(urls)]
         results = await asyncio.gather(*tasks)
+
+        await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
 
         # Emit a single combined source list for all batch URLs
         await self._emit_sources(__event_emitter__, urls)

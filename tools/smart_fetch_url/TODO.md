@@ -119,7 +119,7 @@ Base: review feedback on fitness for the Open WebUI harness.
   visually detectable (perpetual shimmer).
 
   ---
-  ### Change 3 — Status events in `batch_fetch_urls()`
+  ### ✅ Change 3 — Status events in `batch_fetch_urls()`
 
   **File**: `smart_fetch_url.py`
   **Lines affected**: l. 417-460 (`fetch_one` + return)
