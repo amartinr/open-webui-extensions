@@ -21,7 +21,7 @@ Base: review feedback on fitness for the Open WebUI harness.
 
 ## P0·UX — User-facing issues in the harness
 
-- [ ] **UI freezes during fetch — no progress feedback**
+- [x] **UI freezes during fetch — no progress feedback**
   Open WebUI pauses token streaming while a tool runs.  The user sees a
   frozen screen for the entire fetch + extraction time.  Currently the
   tool only emits `"source"` events at the very end.
@@ -161,7 +161,7 @@ Base: review feedback on fitness for the Open WebUI harness.
   **Risk**: Very low — checklist only.
 
   ---
-  ### Change 5 — Zombie threads: wrapper `_run_in_thread()`
+  ### ✅ Change 5 — Zombie threads: wrapper `_run_in_thread()`
 
   **File**: `smart_fetch_url.py`
   **Lines affected**: 7 `asyncio.to_thread` callsites

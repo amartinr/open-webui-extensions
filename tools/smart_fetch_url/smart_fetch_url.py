@@ -11,6 +11,7 @@ licence: MIT
 """
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -155,6 +156,31 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         self._cffi_available = None  # lazy check
+        self._thread_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+    def _get_thread_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+        if self._thread_pool is None:
+            self._thread_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="smart_fetch"
+            )
+        return self._thread_pool
+
+    async def _run_in_thread(self, func, timeout: float = 30.0):
+        loop = asyncio.get_running_loop()
+        pool = self._get_thread_pool()
+        fut = loop.run_in_executor(pool, func)
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.CancelledError:
+            fut.cancel()
+            raise
+        except asyncio.TimeoutError:
+            fut.cancel()
+            raise
+
+    def __del__(self):
+        if self._thread_pool is not None:
+            self._thread_pool.shutdown(wait=False, cancel_futures=True)
 
     # ──────────────────────────────────────────────
     #  Core tool method
@@ -695,7 +721,7 @@ class Tools:
                     include_comments=include_replies,
                 )
 
-            doc = await asyncio.to_thread(_do_extract)
+            doc = await self._run_in_thread(_do_extract)
 
             if doc is not None and doc.text:
                 content = doc.text
@@ -711,7 +737,7 @@ class Tools:
 
         # Fallback: just return raw text
         if not content:
-            content = await asyncio.to_thread(self._strip_html, raw_html)
+            content = await self._run_in_thread(lambda: self._strip_html(raw_html))
 
         # Build metadata dict from Document if available
         meta = {}
@@ -887,7 +913,7 @@ class Tools:
             "unknown" -> no clear signals - defer to default trafilatura behavior
         """
         try:
-            return await asyncio.to_thread(Tools._detect_content_type_sync, raw_html)
+            return await self._run_in_thread(lambda: Tools._detect_content_type_sync(raw_html))
         except Exception:
             logger.warning(
                 "Content type detection failed, falling back to 'unknown'"
@@ -932,7 +958,7 @@ class Tools:
 
                 return text.strip()
 
-            return await asyncio.to_thread(_do_extract)
+            return await self._run_in_thread(_do_extract)
 
         except ImportError:
             pass
@@ -975,7 +1001,7 @@ class Tools:
                 tree = HTMLParser(raw_html)
                 return tree.css('link[rel="alternate"]')
 
-            alternates = await asyncio.to_thread(_find_alternates)
+            alternates = await self._run_in_thread(_find_alternates)
 
             candidates = []
             for link in alternates:
@@ -1200,7 +1226,7 @@ class Tools:
                 "word_count": len(content.split()) if content else 0,
             }
 
-        return await asyncio.to_thread(_do_extract)
+        return await self._run_in_thread(_do_extract)
 
     async def _extract_docx(self, url: str, raw_bytes: bytes) -> dict:
         """Extract text from a modern Word document (.docx).
@@ -1278,7 +1304,7 @@ class Tools:
                 "word_count": len(content.split()) if content else 0,
             }
 
-        return await asyncio.to_thread(_do_extract)
+        return await self._run_in_thread(_do_extract)
 
     # ──────────────────────────────────────────────
     #  Internal: Format helpers
