@@ -197,7 +197,7 @@ class Tools:
         format: str = "markdown",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
-        os: str = "windows",
+        os_profile: str = "windows",
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
         include_replies: bool = True,
@@ -215,7 +215,7 @@ class Tools:
         :param max_chars: Maximum characters to return (default: 50000)
         :param browser: Browser profile for TLS fingerprinting.
                         Examples: chrome_145, firefox_147, safari_18_0, edge_135
-        :param os: OS profile hint. Options: windows, macos, linux, android, ios
+        :param os_profile: OS profile hint. Options: windows, macos, linux, android, ios
         :param timeout_ms: Request timeout in milliseconds
         :param remove_images: Strip image references from output
         :param include_replies: Include reply/comment threads when site supports them
@@ -251,7 +251,7 @@ class Tools:
                 await self._fetch_with_fingerprint(
                     url=url,
                     browser=browser,
-                    os=os,
+                    os_profile=os_profile,
                     timeout_ms=timeout_ms,
                     proxy=self.valves.proxy,
                     headers=headers,
@@ -294,7 +294,7 @@ class Tools:
                     format=format,
                     word_count=extracted.get("word_count", 0),
                     browser=browser,
-                    os=os,
+                    os_profile=os_profile,
                     status_code=status_code,
                     note=fallback_note,
                 )
@@ -319,7 +319,7 @@ class Tools:
                     format=format,
                     word_count=0,
                     browser=browser,
-                    os=os,
+                    os_profile=os_profile,
                     status_code=status_code,
                     note=fallback_note,
                 )
@@ -342,7 +342,7 @@ class Tools:
                     status_code=status_code,
                     content_type=content_type,
                     browser=browser,
-                    os=os,
+                    os_profile=os_profile,
                 )
                 _elapsed = time.monotonic() - _start_time
                 await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
@@ -370,7 +370,7 @@ class Tools:
                     raw_html=raw_html,
                     url=final_url,
                     browser=browser,
-                    os=os,
+                    os_profile=os_profile,
                     timeout_ms=timeout_ms,
                     proxy=self.valves.proxy,
                     headers=headers,
@@ -397,7 +397,7 @@ class Tools:
                 format=format,
                 word_count=extracted.get("word_count", 0),
                 browser=browser,
-                os=os,
+                os_profile=os_profile,
                 status_code=status_code,
                 note=fallback_note,
             )
@@ -429,7 +429,7 @@ class Tools:
         format: str = "markdown",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
-        os: str = "windows",
+        os_profile: str = "windows",
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
         include_replies: bool = True,
@@ -448,7 +448,7 @@ class Tools:
         :param format: Output format: "markdown", "html", "txt", "json", or "raw"
         :param max_chars: Maximum characters per URL
         :param browser: Browser profile for TLS fingerprinting
-        :param os: OS profile hint
+        :param os_profile: OS profile hint
         :param timeout_ms: Request timeout per URL in milliseconds
         :param remove_images: Strip image references from output
         :param include_replies: Include reply/comment threads when site supports them
@@ -480,7 +480,7 @@ class Tools:
                         format=format,
                         max_chars=max_chars,
                         browser=browser,
-                        os=os,
+                        os_profile=os_profile,
                         timeout_ms=timeout_ms,
                         remove_images=remove_images,
                         include_replies=include_replies,
@@ -514,7 +514,7 @@ class Tools:
         self,
         url: str,
         browser: str,
-        os: str,
+        os_profile: str,
         timeout_ms: int,
         proxy: Optional[str] = None,
         headers: Optional[dict] = None,
@@ -692,13 +692,13 @@ class Tools:
             raw_html = str(raw_html) if raw_html is not None else ""
 
         # ── Detect content type for routing ─────────────────
-        content_category = await self._detect_content_type(raw_html)
+        content_category, content_tree = await self._detect_content_type(raw_html)
         logger.info("Content type detected: %s for %s", content_category, url)
 
         if content_category == "feed":
             # Feed/forum/listing: use selectolax for full content.
             # Trafilatura would only extract the first post.
-            content = await self._basic_extract(raw_html, format, remove_images)
+            content = await self._basic_extract(raw_html, format, remove_images, tree=content_tree)
             word_count = len(content.split()) if content else 0
             return {
                 "content": content or "",
@@ -814,8 +814,12 @@ class Tools:
     })
 
     @staticmethod
-    def _detect_content_type_sync(raw_html: str) -> str:
-        """Synchronous detection logic (runs in a thread)."""
+    def _detect_content_type_sync(raw_html: str) -> tuple[str, Any]:
+        """Synchronous detection logic (runs in a thread).
+
+        Returns:
+            (category, tree) where tree is the parsed HTMLParser or None.
+        """
         from selectolax.parser import HTMLParser
 
         tree = HTMLParser(raw_html)
@@ -906,12 +910,12 @@ class Tools:
 
         # ── Decision ──────────────────────────────────────────────────────────────
         if feed_score >= Tools._DT_FEED_MIN_SCORE and feed_score >= article_score:
-            return "feed"
+            return "feed", tree
         if article_score >= Tools._DT_ARTICLE_MIN_SCORE and article_score >= feed_score:
-            return "article"
-        return "unknown"
+            return "article", tree
+        return "unknown", tree
 
-    async def _detect_content_type(self, raw_html: str) -> str:
+    async def _detect_content_type(self, raw_html: str) -> tuple[str, Any]:
         """
         Classify a page as 'feed', 'article', or 'unknown'.
 
@@ -919,9 +923,13 @@ class Tools:
         Runs in a thread to avoid blocking the event loop.
 
         Returns:
-            "feed"    -> page is a feed/forum/listing - use selectolax full extraction
-            "article" -> page is a single article - use trafilatura
-            "unknown" -> no clear signals - defer to default trafilatura behavior
+            (category, tree) where tree is the parsed HTMLParser (for feed reuse)
+            or None if detection failed.
+
+            category is:
+                "feed"    -> page is a feed/forum/listing - use selectolax full extraction
+                "article" -> page is a single article - use trafilatura
+                "unknown" -> no clear signals - defer to default trafilatura behavior
         """
         try:
             return await self._run_in_thread(lambda: Tools._detect_content_type_sync(raw_html))
@@ -929,10 +937,14 @@ class Tools:
             logger.warning(
                 "Content type detection failed, falling back to 'unknown'"
             )
-            return "unknown"
+            return "unknown", None
 
-    async def _basic_extract(self, html: str, format: str, remove_images: bool) -> str:
+    async def _basic_extract(self, html: str, format: str, remove_images: bool, tree=None) -> str:
         """Basic HTML extraction fallback using selectolax or regex.
+
+        If *tree* is provided (a pre-parsed selectolax HTMLParser), it is used
+        directly instead of re-parsing the HTML — avoids duplicate work when
+        content-type detection already parsed the page.
 
         Runs in a thread to avoid blocking the event loop.
         """
@@ -940,7 +952,9 @@ class Tools:
             from selectolax.parser import HTMLParser
 
             def _do_extract():
-                tree = HTMLParser(html)
+                nonlocal tree
+                if tree is None:
+                    tree = HTMLParser(html)
 
                 # Remove unwanted elements
                 for tag in ("script", "style", "nav", "header", "footer", "aside"):
@@ -991,7 +1005,7 @@ class Tools:
         raw_html: str,
         url: str,
         browser: str,
-        os: str,
+        os_profile: str,
         timeout_ms: int,
         proxy: Optional[str],
         headers: Optional[dict],
@@ -1047,7 +1061,7 @@ class Tools:
                     alt_raw, alt_final, _, _, _, _ = await self._fetch_with_fingerprint(
                         url=resolved,
                         browser=browser,
-                        os=os,
+                        os_profile=os_profile,
                         timeout_ms=timeout_ms,
                         proxy=proxy,
                         headers=headers,
@@ -1334,7 +1348,7 @@ class Tools:
         format: str,
         word_count: int,
         browser: str,
-        os: str,
+        os_profile: str,
         status_code: int,
         note: Optional[str] = None,
     ) -> str:
@@ -1352,7 +1366,7 @@ class Tools:
                 "wordCount": word_count,
                 "content": content,
                 "browser": browser,
-                "os": os,
+                "os": os_profile,
             }
             if note:
                 result["note"] = note
@@ -1372,7 +1386,7 @@ class Tools:
         if published:
             parts.append(f"> Published: {published}")
         parts.append(f"> Words: {word_count}")
-        parts.append(f"> Browser: {browser}/{os}")
+        parts.append(f"> Browser: {browser}/{os_profile}")
         if note:
             parts.append(f"> {note}")
         parts.append("")
@@ -1390,14 +1404,14 @@ class Tools:
         status_code: int,
         content_type: str,
         browser: str,
-        os: str,
+        os_profile: str,
     ) -> str:
         """Build raw format response with metadata prefix."""
         lines = [
             f"> URL: {final_url}",
             f"> Status: {status_code}",
             f"> Content-Type: {content_type}",
-            f"> Browser: {browser}/{os}",
+            f"> Browser: {browser}/{os_profile}",
             f"> Size: {len(raw_html)} bytes",
             "",
             raw_html,

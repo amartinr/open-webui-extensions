@@ -30,7 +30,7 @@ Import into Open WebUI at **Workspace → Tools → +** and attach to a model.
 ### `smart_fetch_url`
 
 ```
-smart_fetch_url(url, format?, max_chars?, browser?, os?, timeout_ms?,
+smart_fetch_url(url, format?, max_chars?, browser?, os_profile?, timeout_ms?,
                 remove_images?, include_replies?, proxy?, headers?)
 ```
 
@@ -40,7 +40,7 @@ Configuration values are resolved with the following precedence:
 ### `batch_fetch_urls`
 
 ```
-batch_fetch_urls(urls, format?, max_chars?, browser?, os?,
+batch_fetch_urls(urls, format?, max_chars?, browser?, os_profile?,
                  timeout_ms?, concurrency?)
 ```
 
