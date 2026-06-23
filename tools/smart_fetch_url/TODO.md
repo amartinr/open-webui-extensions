@@ -11,6 +11,11 @@ Base: review feedback on fitness for the Open WebUI harness.
   `async with httpx.AsyncClient()` per request.
 - [x] **`pypdf` not needed in requirements** — transitive dependency of
   Open WebUI itself.
+- [x] **Pass proxy correctly to curl_cffi and httpx**
+  - curl_cffi: `AsyncSession(proxies=)` expects a **dict** `{"http": ..., "https": ...}`,
+    not a plain string. Fixed by converting at callsite.
+  - httpx: `AsyncClient.get()` does not accept `proxies=` — it must be passed as
+    `proxy=` (singular) to the `AsyncClient()` constructor. Fixed accordingly.
 
 ## P0·UX — User-facing issues in the harness ✅
 
@@ -87,6 +92,38 @@ callable.
 
 **Known limitation**: `cancel_futures=True` only cancels futures not yet
 started; already-running threads are not killed. Mitigated by the 30s timeout.
+
+### ❌ Change 6 — CancelledError in async fetch methods
+
+Change 5 protects CPU-bound thread operations. But the async fetch methods
+themselves have no explicit `CancelledError` handling:
+
+| Location | Problem | Status |
+|----------|---------|--------|
+| `_fetch_with_curl_cffi()` | `await session.get()` puede recibir `CancelledError` sin cleanup explícito | ❌ Pendiente |
+| `_fetch_with_httpx()` | `await client.get()` puede recibir `CancelledError` sin cleanup explícito | ❌ Pendiente |
+| `smart_fetch_url()` | `except Exception` no captura `CancelledError` (es `BaseException`), pero no hay logging ni cleanup antes de propagarlo | ❌ Pendiente |
+| Defensive timeout global | No hay un `asyncio.wait_for()` envolviendo todo el fetch por si Stop no propaga correctamente | ❌ Pendiente |
+
+**Fix propuesto**:
+- Añadir `except asyncio.CancelledError` en `_fetch_with_curl_cffi` y `_fetch_with_httpx`
+  para logging y re-raise
+- Añadir `except asyncio.CancelledError` en `smart_fetch_url()` antes del `except Exception`
+- Opcional: envolver el bloque principal con `asyncio.wait_for(timeout=30)`
+  como defensa ante cancelaciones que no se propaguen
+
+---
+
+### ⚠️ Decisión de diseño: fallback de curl_cffi a httpx
+
+Actualmente `_fetch_with_fingerprint()` cae a httpx en **cualquier** excepción
+de curl_cffi (no solo `ImportError`). Esto maximiza resiliencia pero puede
+enmascarar errores de configuración (proxy mal formado, versión incompatible).
+
+**Decisión**: mantener el fallback en toda excepción, pero subir el nivel
+de logging a `logger.error` y considerar añadir una nota en el mensaje de
+resultado indicando que se usó httpx sin fingerprinting. Esto da visibilidad
+sin perder robustez.
 
 ---
 
