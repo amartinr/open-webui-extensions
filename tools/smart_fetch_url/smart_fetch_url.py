@@ -770,9 +770,10 @@ class Tools:
         # Guard: trafilatura expects str or bytes — normalise anything else
         if not isinstance(raw_html, (str, bytes)):
             logger.warning(
-                "unexpected raw_html type %s, coercing to empty string", type(raw_html).__name__
+                "unexpected raw_html type=%s repr=%.200s, coercing to empty string",
+                type(raw_html).__name__, repr(raw_html),
             )
-            raw_html = str(raw_html) if raw_html is not None else ""
+            raw_html = ""  # don't str() a list — produces garbage
 
         # ── Detect content type for routing ─────────────────
         content_category, content_tree = await self._detect_content_type(raw_html)
