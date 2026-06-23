@@ -175,3 +175,21 @@ When the fallback triggers:
 - [x] **Removed the shared httpx client entirely**
   Done as part of the P0 fix.  `_fetch_with_httpx()` now uses
   `async with httpx.AsyncClient()` per request.
+
+## P4 — Timeout hardening
+
+- [x] **Global 30s operation timeout**
+  `smart_fetch_url()` now wraps `_execute_fetch()` in
+  `asyncio.wait_for(timeout=GLOBAL_OPERATION_TIMEOUT_SEC=30)`.
+  No single call exceeds 30s wall-clock time regardless of how
+  many extraction stages (detect → trafilatura → basic → alternate)
+  are triggered sequentially.
+
+- [x] **Reduce THREAD_TIMEOUT_SEC from 10 to 5**
+  CPU-bound operations (trafilatura, selectolax, PDF, DOCX) now
+  time out after 5s instead of 10s. A typical page extracts in <2s.
+
+- [x] **Eliminate GLOBAL_DEFENSE_TIMEOUT_SEC**
+  The per-fetch defense timeout is now simply `timeout_ms / 1000`
+  (no ×2 multiplier, no 30s floor) — the global 30s timeout covers
+  edge cases where the HTTP request overruns.
