@@ -384,9 +384,9 @@ class Tools:
             word_count = extracted.get("word_count", 0)
             _elapsed = time.monotonic() - _start_time
             _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
-            await self._emit_status(__event_emitter__, _desc, done=True)
             if show_favicons:
                 await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_status(__event_emitter__, _desc, done=True)
             return result
 
         if not self._is_text_content(content_type):
@@ -407,9 +407,9 @@ class Tools:
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
-            await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             if show_favicons:
                 await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             return result
 
         # Text path: raw bytes no longer needed — drop the reference
@@ -428,9 +428,9 @@ class Tools:
                 os_profile=os_profile,
             )
             _elapsed = time.monotonic() - _start_time
-            await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             if show_favicons:
                 await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             return result
 
         # Step 4: Extract content
@@ -490,9 +490,9 @@ class Tools:
         word_count = extracted.get("word_count", 0)
         _elapsed = time.monotonic() - _start_time
         _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
-        await self._emit_status(__event_emitter__, _desc, done=True)
         if show_favicons:
             await self._emit_sources(__event_emitter__, visited_urls)
+        await self._emit_status(__event_emitter__, _desc, done=True)
 
         return result
 
@@ -588,10 +588,10 @@ class Tools:
             await self._emit_status(__event_emitter__, f"❌ Batch cancelled", done=True)
             raise
 
-        await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
-
-        # Emit a single combined source list for all batch URLs
+        # Emit sources BEFORE done=True so Open WebUI has time to process
+        # all cite events while the shimmer is still active.
         await self._emit_sources(__event_emitter__, urls)
+        await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
 
         return "".join(results)
 
@@ -1611,21 +1611,29 @@ class Tools:
 
         The frontend Citations.svelte renders these at the bottom of the message
         with favicons (fetched from google's favicon service).
+
+        Emits all URLs concurrently via ``asyncio.gather`` instead of
+        sequentially, so N URLs cost one ``await`` cycle (the slowest)
+        instead of N sequential ``await emitter()`` calls that could
+        delay LLM streaming.
         """
         if emitter is None or not urls:
             return
+
+        async def _emit_one(u: str):
+            await emitter(
+                {
+                    "type": "source",
+                    "data": {
+                        "source": {"name": u, "id": u},
+                        "document": [""],
+                        "metadata": [{"source": u, "name": u, "url": u}],
+                    },
+                }
+            )
+
         try:
-            for url in urls:
-                await emitter(
-                    {
-                        "type": "source",
-                        "data": {
-                            "source": {"name": url, "id": url},
-                            "document": [""],
-                            "metadata": [{"source": url, "name": url, "url": url}],
-                        },
-                    }
-                )
+            await asyncio.gather(*(_emit_one(u) for u in urls))
         except asyncio.CancelledError:
             raise  # never swallow cancellation
         except Exception:
