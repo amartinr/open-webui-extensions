@@ -1431,6 +1431,47 @@ class Tools:
         except Exception:
             pass  # Event emission is best-effort
 
+    async def _emit_status(
+        self,
+        emitter: Optional[Any],
+        description: str,
+        done: bool = False,
+    ):
+        """
+        Emit a real-time status event for the Open WebUI progress indicator.
+
+        Uses ``"type": "status"`` which is the only real-time feedback type
+        that works in Native Mode.  Always emit a final ``done=True`` to
+        stop the shimmer animation.
+
+        Payload format (works identically in Default and Native modes):
+
+        .. code-block:: python
+
+            {
+                "type": "status",
+                "data": {
+                    "description": "Human-readable text",
+                    "done": False,      # False = shimmer animation active
+                    "hidden": False,     # True = saved to history, not shown
+                },
+            }
+        """
+        if emitter is None:
+            return
+        try:
+            await emitter(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": description,
+                        "done": done,
+                    },
+                }
+            )
+        except Exception:
+            pass  # Event emission is best-effort
+
     # ──────────────────────────────────────────────
     #  Internal: Error formatting
     # ──────────────────────────────────────────────
