@@ -128,6 +128,10 @@ class Tools:
             False,
             description="Emit detailed status events during fetch",
         )
+        proxy: Optional[str] = Field(
+            None,
+            description="Proxy URL for all requests (http://user:pass@host:port or socks5://host:port). Admin-only.",
+        )
 
     class UserValves(BaseModel):
         """Per-user overrides for fetch settings. Configured from the chat session."""
@@ -196,7 +200,6 @@ class Tools:
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
         include_replies: bool = True,
-        proxy: Optional[str] = None,
         headers: Optional[dict] = None,
         show_favicons: bool = True,
         __event_emitter__: Optional[Any] = None,
@@ -215,7 +218,6 @@ class Tools:
         :param timeout_ms: Request timeout in milliseconds
         :param remove_images: Strip image references from output
         :param include_replies: Include reply/comment threads when site supports them
-        :param proxy: Proxy URL (http://user:pass@host:port or socks5://host:port)
         :param headers: Custom HTTP headers to send
         :param show_favicons: Emit source events so Open Web UI displays
                               favicons and a clickable URL list below the response
@@ -250,7 +252,7 @@ class Tools:
                     browser=browser,
                     os=os,
                     timeout_ms=timeout_ms,
-                    proxy=proxy,
+                    proxy=self.valves.proxy,
                     headers=headers,
                     format=format,
                 )
@@ -365,7 +367,7 @@ class Tools:
                     browser=browser,
                     os=os,
                     timeout_ms=timeout_ms,
-                    proxy=proxy,
+                    proxy=self.valves.proxy,
                     headers=headers,
                     format=format,
                     remove_images=remove_images,
@@ -423,6 +425,9 @@ class Tools:
         browser: Optional[str] = None,
         os: str = "windows",
         timeout_ms: Optional[int] = None,
+        remove_images: bool = False,
+        include_replies: bool = True,
+        headers: Optional[dict] = None,
         concurrency: Optional[int] = None,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
@@ -439,6 +444,9 @@ class Tools:
         :param browser: Browser profile for TLS fingerprinting
         :param os: OS profile hint
         :param timeout_ms: Request timeout per URL in milliseconds
+        :param remove_images: Strip image references from output
+        :param include_replies: Include reply/comment threads when site supports them
+        :param headers: Custom HTTP headers to send
         :param concurrency: Max concurrent fetches (default: 8)
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
@@ -468,6 +476,9 @@ class Tools:
                         browser=browser,
                         os=os,
                         timeout_ms=timeout_ms,
+                        remove_images=remove_images,
+                        include_replies=include_replies,
+                        headers=headers,
                         show_favicons=False,  # batch handles its own source list
                         __event_emitter__=None,  # suppress per-item events
                     )
