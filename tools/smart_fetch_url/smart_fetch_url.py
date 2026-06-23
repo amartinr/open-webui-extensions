@@ -87,7 +87,7 @@ BROWSER_PROFILES = {
     "opera_114": "opera114",
 }
 
-DEFAULT_BROWSER = "chrome_145"
+DEFAULT_BROWSER = "firefox_147"
 DEFAULT_MAX_CHARS = 50_000
 DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
@@ -95,12 +95,7 @@ DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.
 DEFAULT_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 DEFAULT_RAW_ACCEPT = "text/html,application/xhtml+xml,application/json,application/xml;q=0.9,text/markdown;q=0.8,text/plain;q=0.8,*/*;q=0.7"
 DEFAULT_JSON_ACCEPT = "application/json,text/json,application/ld+json;q=0.9,text/plain;q=0.8,*/*;q=0.7"
-DEFAULT_USER_AGENTS = {
-    "chrome_145": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-    "firefox_147": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0",
-    "safari_18_0": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-    "edge_135": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0",
-}
+
 
 
 class Tools:
@@ -197,7 +192,7 @@ class Tools:
         format: str = "markdown",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
-        os_profile: str = "windows",
+        os_profile: str = "linux",
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
         include_replies: bool = True,
@@ -214,7 +209,7 @@ class Tools:
                        "txt" (plain text), "json" (structured), or "raw" (full server response)
         :param max_chars: Maximum characters to return (default: 50000)
         :param browser: Browser profile for TLS fingerprinting.
-                        Examples: chrome_145, firefox_147, safari_18_0, edge_135
+                        Examples: firefox_147, chrome_145, safari_18_0, edge_135
         :param os_profile: OS profile hint. Options: windows, macos, linux, android, ios
         :param timeout_ms: Request timeout in milliseconds
         :param remove_images: Strip image references from output
@@ -429,7 +424,7 @@ class Tools:
         format: str = "markdown",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
-        os_profile: str = "windows",
+        os_profile: str = "linux",
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
         include_replies: bool = True,
@@ -547,11 +542,8 @@ class Tools:
         if "Accept-Language" not in request_headers:
             request_headers["Accept-Language"] = DEFAULT_ACCEPT_LANGUAGE
 
-        # Set User-Agent from profile if not explicitly provided
-        if "User-Agent" not in request_headers:
-            ua = DEFAULT_USER_AGENTS.get(browser)
-            if ua:
-                request_headers["User-Agent"] = ua
+        # curl_cffi sets its own User-Agent matching the impersonate profile.
+        # Only override if the caller explicitly provided one.
 
         # Try curl_cffi first (async), fall back to httpx
         try:
