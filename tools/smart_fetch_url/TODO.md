@@ -60,8 +60,8 @@ Batch manages its own events; sub-calls pass `__event_emitter__=None`.
 ### ✅ Change 4 — `done=True` coverage verified
 
 Audit of all `return` paths in `smart_fetch_url()`:
-- URL vacía / protocolo inválido → fuera del `try`, sin `__event_emitter__` ✅ aceptable
-- Documento extraíble, binario no texto, raw format, éxito normal, excepción → todos emiten `done=True` (Change 2)
+- Empty URL / invalid protocol → outside `try`, no `__event_emitter__` ✅ acceptable
+- Extractable doc, binary non-text, raw format, normal success, exception → all emit `done=True` (Change 2)
 
 ### ✅ Change 5 — Zombie threads: wrapper `_run_in_thread()`
 
