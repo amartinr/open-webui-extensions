@@ -586,9 +586,10 @@ class Tools:
 
         timeout_sec = timeout_ms / 1000
 
+        proxies_dict = {"http": proxy, "https": proxy} if proxy else None
         async with AsyncSession(
             impersonate=browser,
-            proxies=proxy,
+            proxies=proxies_dict,
         ) as session:
             resp = await session.get(
                 url,
@@ -634,10 +635,8 @@ class Tools:
             "follow_redirects": True,
             "timeout": timeout_ms / 1000,
         }
-        if proxy:
-            request_kwargs["proxies"] = proxy
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(proxy=proxy) as client:
             resp = await client.get(url, **request_kwargs)
             resp.raise_for_status()
 
