@@ -166,7 +166,7 @@ When the fallback triggers:
 
 ## P3 — Nice-to-have
 
-- [ ] **Graceful message for unsupported document formats**
+- [x] **Graceful message for unsupported document formats**
   Currently `.xlsx`, `.pptx`, `.odt`, EPUB, RTF, legacy `.doc` show a
   message saying extraction isn't implemented.  Consider pointing the
   user to Open WebUI's knowledge-base upload as a workaround (already

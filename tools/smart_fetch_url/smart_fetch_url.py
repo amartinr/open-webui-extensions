@@ -92,7 +92,9 @@ DEFAULT_MAX_CHARS = 50_000
 DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
 DEFAULT_BATCH_REQUESTS_PER_SEC = 10
-GLOBAL_DEFENSE_TIMEOUT_SEC = 30
+THREAD_TIMEOUT_SEC = 5
+MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK = 30
+GLOBAL_OPERATION_TIMEOUT_SEC = 30
 DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 DEFAULT_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 DEFAULT_RAW_ACCEPT = "text/html,application/xhtml+xml,application/json,application/xml;q=0.9,text/markdown;q=0.8,text/plain;q=0.8,*/*;q=0.7"
@@ -186,7 +188,7 @@ class Tools:
             )
         return self._thread_pool
 
-    async def _run_in_thread(self, func, timeout: float = 30.0):
+    async def _run_in_thread(self, func, timeout: float = THREAD_TIMEOUT_SEC):
         loop = asyncio.get_running_loop()
         pool = self._get_thread_pool()
         fut = loop.run_in_executor(pool, func)
@@ -263,175 +265,29 @@ class Tools:
             _start_time = time.monotonic()
             await self._emit_status(__event_emitter__, f"🌐 {url}", done=False)
 
-            _defense_timeout = max(timeout_ms / 1000 * 2, GLOBAL_DEFENSE_TIMEOUT_SEC)
-            (raw_html, final_url, status_code, content_type, resp_headers, raw_bytes) = (
-                await asyncio.wait_for(
-                    self._fetch_with_fingerprint(
+            result = await asyncio.wait_for(
+                self._execute_fetch(
                     url=url,
                     browser=browser,
                     os_profile=os_profile,
                     timeout_ms=timeout_ms,
-                    proxy=self.valves.proxy,
-                    headers=headers,
                     format=format,
-                ),
-                    timeout=_defense_timeout,
-                )
-            )
-            fallback_note = self._fallback_note
-            self._fallback_note = None
-
-            # Step 2: Route by Content-Type
-            #
-            # 2a — extractable documents (PDF, DOCX, …).  Download bytes
-            #      and extract text with a format-specific parser.
-            # 2b — true binary (images, video, fonts, …).  Show metadata
-            #      only — binary data in the LLM context is harmful.
-            # 2c — text / HTML / JSON / unknown.  Continue to the
-            #      normal trafilatura / raw pipeline below.
-
-            if self._is_extractable_document(content_type):
-                extracted = await self._extract_document_content(
-                    url=final_url,
-                    content_type=content_type,
-                    raw_bytes=raw_bytes,
-                )
-                raw_bytes = None  # release early — GC hint for large docs
-
-                content = extracted.get("content", "")
-                if max_chars and len(content) > max_chars:
-                    content = content[:max_chars]
-
-                result = self._format_output(
-                    url=url,
-                    final_url=final_url,
-                    title=extracted.get("title", ""),
-                    author=extracted.get("author", ""),
-                    site=urlparse(final_url).hostname or "",
-                    language=extracted.get("language", ""),
-                    published=extracted.get("published", ""),
-                    content=content,
-                    format=format,
-                    word_count=extracted.get("word_count", 0),
-                    browser=browser,
-                    os_profile=os_profile,
-                    status_code=status_code,
-                    note=fallback_note,
-                )
-                word_count = extracted.get("word_count", 0)
-                _elapsed = time.monotonic() - _start_time
-                _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
-                await self._emit_status(__event_emitter__, _desc, done=True)
-                if show_favicons:
-                    await self._emit_sources(__event_emitter__, [final_url])
-                return result
-
-            if not self._is_text_content(content_type):
-                result = self._format_output(
-                    url=url,
-                    final_url=final_url,
-                    title="",
-                    author="",
-                    site=urlparse(final_url).hostname or "",
-                    language="",
-                    published="",
-                    content=f"[Non-text content ({content_type}). Content not displayed to avoid context pollution.]",
-                    format=format,
-                    word_count=0,
-                    browser=browser,
-                    os_profile=os_profile,
-                    status_code=status_code,
-                    note=fallback_note,
-                )
-                _elapsed = time.monotonic() - _start_time
-                await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
-                if show_favicons:
-                    await self._emit_sources(__event_emitter__, [final_url])
-                return result
-
-            # Text path: raw bytes no longer needed — drop the reference
-            # so the GC can reclaim the body before extraction runs.
-            raw_bytes = None
-
-            # Step 3: Handle raw format early — return the full server response
-            if format == "raw":
-                result = self._build_raw_response(
-                    url=url,
-                    final_url=final_url,
-                    raw_html=raw_html,
-                    status_code=status_code,
-                    content_type=content_type,
-                    browser=browser,
-                    os_profile=os_profile,
-                )
-                _elapsed = time.monotonic() - _start_time
-                await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
-                if show_favicons:
-                    await self._emit_sources(__event_emitter__, [final_url])
-                return result
-
-            # Step 4: Extract content
-            extracted = await self._extract_content(
-                raw_html=raw_html,
-                url=final_url,
-                format=format,
-                remove_images=remove_images,
-                include_replies=include_replies,
-            )
-
-            # Step 5: Alternate content fallback for thin/no content
-            alternate_urls = []
-            if (
-                format != "json"
-                and extracted.get("word_count", 0)
-                < 30  # MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK
-            ):
-                extracted, alternates_used = await self._try_alternate_fallback(
-                    raw_html=raw_html,
-                    url=final_url,
-                    browser=browser,
-                    os_profile=os_profile,
-                    timeout_ms=timeout_ms,
-                    proxy=self.valves.proxy,
-                    headers=headers,
-                    format=format,
+                    max_chars=max_chars,
                     remove_images=remove_images,
-                )
-                alternate_urls = alternates_used or []
-
-            # Step 6: Truncate
-            content = extracted.get("content", "")
-            if max_chars and len(content) > max_chars:
-                content = content[:max_chars]
-
-            # Step 7: Build result
-            result = self._format_output(
-                url=url,
-                final_url=final_url,
-                title=extracted.get("title", ""),
-                author=extracted.get("author", ""),
-                site=extracted.get("site", ""),
-                language=extracted.get("language", ""),
-                published=extracted.get("published", ""),
-                content=content,
-                format=format,
-                word_count=extracted.get("word_count", 0),
-                browser=browser,
-                os_profile=os_profile,
-                status_code=status_code,
-                note=fallback_note,
+                    include_replies=include_replies,
+                    show_favicons=show_favicons,
+                    verbose=verbose,
+                    headers=headers,
+                    __event_emitter__=__event_emitter__,
+                    _start_time=_start_time,
+                ),
+                timeout=GLOBAL_OPERATION_TIMEOUT_SEC,
             )
-
-            # Step 8: Emit source events for Open WebUI's Citations component (bottom of message)
-            visited_urls = self._collect_visited_urls(url, final_url, alternate_urls)
-            word_count = extracted.get("word_count", 0)
-            _elapsed = time.monotonic() - _start_time
-            _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
-            await self._emit_status(__event_emitter__, _desc, done=True)
-            if show_favicons:
-                await self._emit_sources(__event_emitter__, visited_urls)
-
             return result
+
+        except asyncio.TimeoutError:
+            await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
+            return f"Error: Operation timed out after {GLOBAL_OPERATION_TIMEOUT_SEC}s for {url}"
 
         except asyncio.CancelledError:
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
@@ -442,6 +298,201 @@ class Tools:
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
             logger.exception(f"smart_fetch_url failed for {url}")
             return error_msg
+
+    # ──────────────────────────────────────────────
+    #  Internal: full fetch+extract pipeline (runs under global timeout)
+    # ──────────────────────────────────────────────
+
+    async def _execute_fetch(
+        self,
+        url: str,
+        browser: str,
+        os_profile: str,
+        timeout_ms: int,
+        format: str,
+        max_chars: int,
+        remove_images: bool,
+        include_replies: bool,
+        show_favicons: bool,
+        verbose: bool,
+        headers: Optional[dict],
+        __event_emitter__: Optional[Any],
+        _start_time: float,
+    ) -> str:
+        """Execute the full fetch, extract, and format pipeline.
+
+        Called from :meth:`smart_fetch_url` wrapped in
+        ``asyncio.wait_for(timeout=GLOBAL_OPERATION_TIMEOUT_SEC)``.
+        """
+        _defense_timeout = timeout_ms / 1000
+        (raw_html, final_url, status_code, content_type, resp_headers, raw_bytes) = (
+            await asyncio.wait_for(
+                self._fetch_with_fingerprint(
+                url=url,
+                browser=browser,
+                os_profile=os_profile,
+                timeout_ms=timeout_ms,
+                proxy=self.valves.proxy,
+                headers=headers,
+                format=format,
+            ),
+                timeout=_defense_timeout,
+            )
+        )
+        fallback_note = self._fallback_note
+        self._fallback_note = None
+
+        # Step 2: Route by Content-Type
+        #
+        # 2a — extractable documents (PDF, DOCX, …).  Download bytes
+        #      and extract text with a format-specific parser.
+        # 2b — true binary (images, video, fonts, …).  Show metadata
+        #      only — binary data in the LLM context is harmful.
+        # 2c — text / HTML / JSON / unknown.  Continue to the
+        #      normal trafilatura / raw pipeline below.
+
+        if self._is_extractable_document(content_type):
+            extracted = await self._extract_document_content(
+                url=final_url,
+                content_type=content_type,
+                raw_bytes=raw_bytes,
+            )
+            raw_bytes = None  # release early — GC hint for large docs
+
+            content = extracted.get("content", "")
+            if max_chars and len(content) > max_chars:
+                content = content[:max_chars]
+
+            result = self._format_output(
+                url=url,
+                final_url=final_url,
+                title=extracted.get("title", ""),
+                author=extracted.get("author", ""),
+                site=urlparse(final_url).hostname or "",
+                language=extracted.get("language", ""),
+                published=extracted.get("published", ""),
+                content=content,
+                format=format,
+                word_count=extracted.get("word_count", 0),
+                browser=browser,
+                os_profile=os_profile,
+                status_code=status_code,
+                note=fallback_note,
+            )
+            word_count = extracted.get("word_count", 0)
+            _elapsed = time.monotonic() - _start_time
+            _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
+            await self._emit_status(__event_emitter__, _desc, done=True)
+            if show_favicons:
+                await self._emit_sources(__event_emitter__, [final_url])
+            return result
+
+        if not self._is_text_content(content_type):
+            result = self._format_output(
+                url=url,
+                final_url=final_url,
+                title="",
+                author="",
+                site=urlparse(final_url).hostname or "",
+                language="",
+                published="",
+                content=f"[Non-text content ({content_type}). Content not displayed to avoid context pollution.]",
+                format=format,
+                word_count=0,
+                browser=browser,
+                os_profile=os_profile,
+                status_code=status_code,
+                note=fallback_note,
+            )
+            _elapsed = time.monotonic() - _start_time
+            await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
+            if show_favicons:
+                await self._emit_sources(__event_emitter__, [final_url])
+            return result
+
+        # Text path: raw bytes no longer needed — drop the reference
+        # so the GC can reclaim the body before extraction runs.
+        raw_bytes = None
+
+        # Step 3: Handle raw format early — return the full server response
+        if format == "raw":
+            result = self._build_raw_response(
+                url=url,
+                final_url=final_url,
+                raw_html=raw_html,
+                status_code=status_code,
+                content_type=content_type,
+                browser=browser,
+                os_profile=os_profile,
+            )
+            _elapsed = time.monotonic() - _start_time
+            await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
+            if show_favicons:
+                await self._emit_sources(__event_emitter__, [final_url])
+            return result
+
+        # Step 4: Extract content
+        extracted = await self._extract_content(
+            raw_html=raw_html,
+            url=final_url,
+            format=format,
+            remove_images=remove_images,
+            include_replies=include_replies,
+        )
+
+        # Step 5: Alternate content fallback for thin/no content
+        alternate_urls = []
+        if (
+            format != "json"
+            and extracted.get("word_count", 0)
+            < MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK
+        ):
+            extracted, alternates_used = await self._try_alternate_fallback(
+                raw_html=raw_html,
+                url=final_url,
+                browser=browser,
+                os_profile=os_profile,
+                timeout_ms=timeout_ms,
+                proxy=self.valves.proxy,
+                headers=headers,
+                format=format,
+                remove_images=remove_images,
+            )
+            alternate_urls = alternates_used or []
+
+        # Step 6: Truncate
+        content = extracted.get("content", "")
+        if max_chars and len(content) > max_chars:
+            content = content[:max_chars]
+
+        # Step 7: Build result
+        result = self._format_output(
+            url=url,
+            final_url=final_url,
+            title=extracted.get("title", ""),
+            author=extracted.get("author", ""),
+            site=extracted.get("site", ""),
+            language=extracted.get("language", ""),
+            published=extracted.get("published", ""),
+            content=content,
+            format=format,
+            word_count=extracted.get("word_count", 0),
+            browser=browser,
+            os_profile=os_profile,
+            status_code=status_code,
+            note=fallback_note,
+        )
+
+        # Step 8: Emit source events for Open WebUI's Citations component (bottom of message)
+        visited_urls = self._collect_visited_urls(url, final_url, alternate_urls)
+        word_count = extracted.get("word_count", 0)
+        _elapsed = time.monotonic() - _start_time
+        _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
+        await self._emit_status(__event_emitter__, _desc, done=True)
+        if show_favicons:
+            await self._emit_sources(__event_emitter__, visited_urls)
+
+        return result
 
     # ──────────────────────────────────────────────
     #  Batch variant
@@ -1105,7 +1156,7 @@ class Tools:
                         format=format,
                         remove_images=remove_images,
                     )
-                    if alt_extracted.get("word_count", 0) > 30:
+                    if alt_extracted.get("word_count", 0) > MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK:
                         alternates_used.append(alt_final)
                         return alt_extracted, alternates_used
                 except Exception:
