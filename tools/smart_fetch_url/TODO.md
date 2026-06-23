@@ -59,15 +59,15 @@ Base: review feedback on fitness for the Open WebUI harness.
   4. **`"source"` / `"citation"` events work in both modes** — the
      tool already uses these correctly for the citations list.
 
-  **Implementation plan** — 5 cambios numerados, por orden de implementación:
+  **Implementation plan** — 5 changes, in implementation order:
 
   ---
-  ### ✅ Cambio 1 — Helper `_emit_status()`
+  ### ✅ Change 1 — Helper `_emit_status()`
 
-  **Archivo**: `smart_fetch_url.py`
-  **Insertar**: junto a `_emit_sources` (~l. 1406), antes o después
+  **File**: `smart_fetch_url.py`
+  **Insert**: next to `_emit_sources` (~l. 1406), before or after
 
-  Crear un método auxiliar que centralice el formato del evento status:
+  Centralise the status event payload format into a single helper:
 
   ```python
   async def _emit_status(self, emitter, description, done=False):
@@ -82,158 +82,100 @@ Base: review feedback on fitness for the Open WebUI harness.
           pass  # best-effort
   ```
 
-  **Verificación**: `Tools()._emit_status(None, "test")` no lanza error.
-  **Riesgo**: Ninguno — método nuevo sin callers.
+  **Verification**: `Tools()._emit_status(None, "test")` does not raise.
+  **Risk**: None — new method, no callers.
 
   ---
-  ### Cambio 2 — Status events en `smart_fetch_url()`
+  ### Change 2 — Status events in `smart_fetch_url()`
 
-  **Archivo**: `smart_fetch_url.py`
-  **Puntos de inserción**: entre l. 207 y l. 363 (cuerpo del try)
+  **File**: `smart_fetch_url.py`
+  **Insertion points**: between l. 207 and l. 367 (try body)
 
-  Resolver el Valve `verbose` al inicio (junto a los otros valves, l. 207):
-  ```python
-  uv = self._get_user_valves(__user__)
-  max_chars = ...
-  timeout_ms = ...
-  browser = ...
-  verbose = (uv.verbose if uv else None) or self.valves.verbose  # NUEVA
-  ```
+  **Base events** (always, regardless of verbose):
 
-  Insertar llamadas a `_emit_status` en estos puntos:
+  | # | Point | Event | `done` |
+  |---|-------|-------|--------|
+  | A | l. 215 (entering try, after validation) | `"🌐 {url}"` | `False` |
+  | B | All success returns (~l. 244, 260, 272, 362) | `"✅ {url}"` | `True` |
+  | C | l. 367 (`except`) | `"❌ {url}"` | `True` |
 
-  | # | Tras línea | Evento | `done` | Condición |
-  |---|-----------|--------|--------|-----------|
-  | A | l. 215 (try) | `"🔍 {url}"` | `False` | siempre |
-  | B | l. 244 (doc extraíble, antes de emit_sources) | `"✅ {url} ({word_count}w)"` | `True` | siempre |
-  | C | l. 260 (binario, antes de emit_sources) | `"✅ {url} (binario)"` | `True` | siempre |
-  | D | l. 272 (raw, antes de emit_sources) | `"✅ {url} (raw)"` | `True` | siempre |
-  | E | l. 277 (antes de `_extract_content`) | `"📄 Extrayendo…"` | `False` | solo si `verbose=True` |
-  | F | l. 296 (antes de `_try_alternate_fallback`) | `"🔄 Buscando alternativa…"` | `False` | solo si `verbose=True` |
-  | G | l. 362 (antes de `return result` éxito) | `"✅ {url} ({word_count}w)"` | `True` | siempre |
-  | H | l. 367 (`except`) | `"❌ {url}"` | `True` | siempre |
+  **Additional info gated by Valve `verbose`**:
 
-  **Importante**: Asegurar que los retornos tempranos (B, C, D, G, H) emiten
-  `done=True` **antes** de `_emit_sources` o del return.  Sin `done=True`
-  el shimmer se queda animando para siempre.
+  | Option | `verbose=False` (default) | `verbose=True` | Extra info | Use case |
+  |--------|--------------------------|----------------|------------|----------|
+  | **1 — Word count** | `"✅ {url}"` | `"✅ {url} ({word_count}w)"` | Number of extracted words | LLM knows how much content it received |
+  | **2 — Content type** | `"✅ {url}"` | `"✅ {url} [{type}]"` | `article` / `feed` / `PDF` / `raw` | Debug routing internals |
+  | **3 — Timing** | `"✅ {url}"` | `"✅ {url} ({elapsed:.1f}s)"` | Total elapsed seconds | Diagnose slowness |
+  | **4 — Combined** | `"✅ {url}"` | `"✅ {url} ({word_count}w, {elapsed:.1f}s)"` | Words + time | Power users |
 
-  **Verificación**:
-  - `verbose=False` (default): solo A + B/C/D/G/H → 2 eventos por fetch
-  - `verbose=True`: aparecen E y F adicionales
-  - Todos los caminos de retorno (incluyendo validación de URL en l. 210-214)
-    producen un `done=True` si hay `__event_emitter__` disponible
+  **TBD** — choose option when implementing:
+  `[ ] 1 — Word count` `[ ] 2 — Content type` `[ ] 3 — Timing` `[ ] 4 — Combined`
 
-  **Riesgo**: Bajo.  Cada inserción es 1-2 líneas.  Si se omite un `done=True`
-  es detectable visualmente (shimmer perpetuo).
+  Early validation returns (empty URL / bad protocol, l. 211-214) are outside
+  the `try` block and do not emit events — correct, since the operation never
+  started.
+
+  **Risk**: Low. Each insertion is 1 line. Forgetting a `done=True` is
+  visually detectable (perpetual shimmer).
 
   ---
-  ### Cambio 3 — Status events en `batch_fetch_urls()`
+  ### Change 3 — Status events in `batch_fetch_urls()`
 
-  **Archivo**: `smart_fetch_url.py`
-  **Líneas afectadas**: l. 417-460 (`fetch_one` + retorno)
+  **File**: `smart_fetch_url.py`
+  **Lines affected**: l. 417-460 (`fetch_one` + return)
 
-  **Problema de diseño**: si cada `smart_fetch_url` emite sus propios eventos
-  (Cambio 2), y además `fetch_one` emite los suyos, hay duplicación.
+  Design: batch manages its own events; sub-calls to `smart_fetch_url` do
+  NOT emit events (still pass `__event_emitter__=None` as today).
 
-  **Decisión**: `batch_fetch_urls` pasa el emitter a las sub-llamadas pero
-  fuerza `verbose=False` internamente.  Es `fetch_one` quien emite el
-  progreso por item con el formato `[i/N]`.
+  | # | Point | Event | `done` |
+  |---|-------|-------|--------|
+  | A | Before the gather | `"[0/{n}] Fetching {n} URLs…"` | `False` |
+  | B | Per completed URL (inside `fetch_one`) | `"[{i+1}/{n}] ✅ {single_url}"` | `False` |
+  | C | After the gather | `"✅ Fetched {n} URLs"` | `True` |
 
-  **Opción A** (recomendada):
-  - `batch_fetch_urls` emite un status inicial: `"[0/{n}] Iniciando…"` (done=False)
-  - `fetch_one` pasa `__event_emitter__` a `smart_fetch_url`, pero añade
-    un wrapper que emite `"[{i+1}/{n}] ✅ {url}"` al completar cada item
-    (done=False)
-  - Al final del gather: `"✅ Batch completado — {n} URLs"` (done=True)
-
-  **Código sketch para `fetch_one`**:
-  ```python
-  async def fetch_one(index: int, single_url: str) -> str:
-      async with semaphore:
-          try:
-              result = await self.smart_fetch_url(
-                  url=single_url,
-                  format=format,
-                  max_chars=max_chars,
-                  browser=browser,
-                  os=os,
-                  timeout_ms=timeout_ms,
-                  show_favicons=False,
-                  __event_emitter__=__event_emitter__,  # ← pasar emitter
-                  __user__=__user__,
-              )
-              await self._emit_status(
-                  __event_emitter__,
-                  f"[{index + 1}/{len(urls)}] ✅ {single_url}",
-              )
-              return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{result}\n\n---\n"
-          except Exception as e:
-              await self._emit_status(
-                  __event_emitter__,
-                  f"[{index + 1}/{len(urls)}] ❌ {single_url}",
-                  done=True,
-              )
-              return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: {self._format_error(e, single_url)}\n\n---\n"
-  ```
-
-  Pero esto reintroduce el problema: si `smart_fetch_url` ya emite "🔍" y "✅",
-  se mezclan con los `[i/N]` del batch.  **Opción B**: crear un flag
-  `_suppress_status=False` opcional en `smart_fetch_url` que las sub-llamadas
-  activen, desactivando sus propios eventos y dejando que `fetch_one`
-  maneje todo el progreso.
-
-  Opción elegida (marcar al implementar): **[ ] A / [ ] B**
-
-  **Verificación**:
-  - Batch de 5 URLs emite ~7 eventos: 1 inicial + 5 por item + 1 final
-  - No hay duplicación de mensajes "🔍" / "✅"
-  - shimmer finaliza con `done=True`
-
-  **Riesgo**: Medio — tocar el flujo batch existente.
+  **Risk**: Low. Same pattern — only the emitter changes.
 
   ---
-  ### Cambio 4 — Cobertura de `done=True` en todos los retornos
+  ### Change 4 — `done=True` coverage in all return paths
 
-  **Archivo**: `smart_fetch_url.py`
+  **File**: `smart_fetch_url.py`
 
-  Revisar que **todos** los puntos de salida emitan `done=True` si hay
-  `__event_emitter__` disponible.  Incluyendo:
+  Audit that **all** exit points emit `done=True` when `__event_emitter__`
+  is available. Includes:
 
-  | Línea | Condición | Estado hoy |
-  |-------|-----------|------------|
-  | l. 211 | URL vacía | ❌ return string directo |
-  | l. 214 | Protocolo inválido | ❌ return string directo |
-  | l. 244 | Documento extraíble | ❌ solo `_emit_sources` |
-  | l. 260 | Binario no texto | ❌ solo `_emit_sources` |
-  | l. 272 | Formato raw | ❌ solo `_emit_sources` |
-  | l. 362 | Éxito normal | ❌ solo `_emit_sources` |
-  | l. 367 | Excepción general | ❌ return error msg |
+  | Line | Condition | Status today |
+  |------|-----------|-------------|
+  | l. 211 | Empty URL | ❌ bare string return |
+  | l. 214 | Invalid protocol | ❌ bare string return |
+  | l. 244 | Extractable document | ❌ only `_emit_sources` |
+  | l. 260 | Binary non-text | ❌ only `_emit_sources` |
+  | l. 272 | Raw format | ❌ only `_emit_sources` |
+  | l. 362 | Normal success | ❌ only `_emit_sources` |
+  | l. 367 | General exception | ❌ return error msg |
 
-  Los retornos de validación (l. 211, 214) no tienen `__event_emitter__`
-  a su alcance (están fuera del `try`) — no emiten eventos porque la
-  validación ocurre antes de cualquier operación.  Es aceptable.
+  Validation returns (l. 211, 214) are outside the `try` — they don't have
+  access to `__event_emitter__`. Acceptable since the operation never started.
 
-  Para el resto, el Cambio 2 ya cubre B/C/D/G/H.  Este cambio es
-  simplemente una verificación cruzada.
+  For the rest, Change 2 already covers B/C/D/G/H. This is a cross-check.
 
-  **Riesgo**: Muy bajo — solo check list.
+  **Risk**: Very low — checklist only.
 
   ---
-  ### Cambio 5 — Zombie threads: wrapper `_run_in_thread()`
+  ### Change 5 — Zombie threads: wrapper `_run_in_thread()`
 
-  **Archivo**: `smart_fetch_url.py`
-  **Líneas afectadas**: 7 callsites de `asyncio.to_thread`
+  **File**: `smart_fetch_url.py`
+  **Lines affected**: 7 `asyncio.to_thread` callsites
 
-  **Problema**: `asyncio.to_thread()` no expone el `ThreadPoolExecutor`
-  subyacente, así que no podemos hacer `cancel_futures=True`.  Si el
-  usuario cancela la generación, la task asyncio se cancela pero el
-  thread sigue ejecutándose hasta completar.
+  **Problem**: `asyncio.to_thread()` does not expose the underlying
+  `ThreadPoolExecutor`, so we cannot set `cancel_futures=True`. If the user
+  cancels generation, the asyncio task is cancelled but the thread runs to
+  completion.
 
-  **Solución propuesta**: Sustituir `asyncio.to_thread(func)` por un
-  wrapper que use un `ThreadPoolExecutor` propio con
-  `cancel_futures=True` en shutdown, más un timeout de seguridad.
+  **Proposed solution**: Replace `asyncio.to_thread(func)` with a wrapper
+  backed by a dedicated `ThreadPoolExecutor` with `cancel_futures=True`
+  on shutdown, plus a safety timeout.
 
-  **Código**:
+  **Code**:
 
   ```python
   import concurrent.futures
@@ -255,25 +197,21 @@ Base: review feedback on fitness for the Open WebUI harness.
           try:
               return await asyncio.wait_for(fut, timeout=timeout)
           except asyncio.CancelledError:
-              fut.cancel()  # marca la future como cancelada
-              # El thread sigue ejecutándose, pero el pool se encargará
-              # de él.  Con cancel_futures=True en shutdown se cortan.
+              fut.cancel()
               raise
           except asyncio.TimeoutError:
               fut.cancel()
               raise
 
-      # Opcional: cleanup al final de la vida del Tools
-      # (Open WebUI no garantiza que __del__ se llame, pero no duele)
       def __del__(self):
           if self._thread_pool is not None:
               self._thread_pool.shutdown(wait=False, cancel_futures=True)
   ```
 
-  **Callsites a reemplazar**:
+  **Callsites to replace**:
 
-  | # | Línea actual | Código actual | Reemplazar por |
-  |---|-------------|---------------|----------------|
+  | # | Current line | Current code | Replace with |
+  |---|-------------|--------------|--------------|
   | 1 | l. 674 | `await asyncio.to_thread(_do_extract)` | `await self._run_in_thread(_do_extract)` |
   | 2 | l. 690 | `await asyncio.to_thread(self._strip_html, raw_html)` | `await self._run_in_thread(lambda: self._strip_html(raw_html))` |
   | 3 | l. 866 | `await asyncio.to_thread(Tools._detect_content_type_sync, raw_html)` | `await self._run_in_thread(lambda: Tools._detect_content_type_sync(raw_html))` |
@@ -282,21 +220,19 @@ Base: review feedback on fitness for the Open WebUI harness.
   | 6 | l. 1179 | `return await asyncio.to_thread(_do_extract)` | `return await self._run_in_thread(_do_extract)` |
   | 7 | l. 1257 | `return await asyncio.to_thread(_do_extract)` | `return await self._run_in_thread(_do_extract)` |
 
-  **Nota**: `asyncio.to_thread` acepta args posicionales (`*args`).
-  Nuestro wrapper no.  Para los casos con argumentos (l. 690, 866),
-  usamos `lambda` para capturarlos.
+  **Note**: `asyncio.to_thread` accepts positional args (`*args`). Our
+  wrapper does not. For cases with arguments (l. 690, 866), use `lambda`
+  to capture them.
 
-  **Riesgo**: Medio.  Aunque `_run_in_thread` es un sustituto directo,
-  hay 7 callsites que tocar y el timeout de 30s podría ser demasiado
-  corto para PDFs muy grandes (aunque 30s es generoso).  Se puede
-  parametrizar por tipo de operación si hace falta.
+  **Risk**: Medium. 7 callsites to touch, and the 30s timeout might be too
+  short for very large PDFs (though 30s is generous). Can be parametrised
+  per operation type if needed.
 
-  **Limitación conocida**: `concurrent.futures.ThreadPoolExecutor` con
-  `cancel_futures=True` solo cancela futures **no iniciadas**.  Una vez
-  que el thread ya está ejecutándose, `cancel_futures=True` no lo mata.
-  Para eso necesitaríamos algo como `threading.Event` de señalización
-  o `PEP 554` (no llegó).  Es mejor que nada, pero no es una solución
-  completa.
+  **Known limitation**: `concurrent.futures.ThreadPoolExecutor` with
+  `cancel_futures=True` only cancels futures **not yet started**. Once a
+  thread is already running, `cancel_futures=True` does not kill it.
+  That would require `threading.Event` signalling or `PEP 554` (not
+  accepted). Better than nothing, but not a complete solution.
 
 ---
 
