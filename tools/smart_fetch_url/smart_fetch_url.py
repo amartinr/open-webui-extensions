@@ -810,6 +810,17 @@ class Tools:
             }
 
         # ── Article / Unknown path: existing trafilatura logic ───
+        # Belt-and-suspenders guard: ensure raw_html is str/bytes before
+        # passing to trafilatura. The top-of-method guard should have caught
+        # this already, but certain code paths (e.g. alternate fallback
+        # recursion) could land here with a non-string value.
+        if not isinstance(raw_html, (str, bytes)):
+            logger.warning(
+                "raw_html is %s (repr=%.200s) before trafilatura — coercing to empty string",
+                type(raw_html).__name__, repr(raw_html),
+            )
+            raw_html = ""
+
         # Try trafilatura first (best extraction quality)
         try:
             import trafilatura
@@ -839,10 +850,22 @@ class Tools:
 
         # Fallback: basic extraction
         if not content and format != "json":
+            if not isinstance(raw_html, (str, bytes)):
+                logger.warning(
+                    "raw_html is %s before _basic_extract — coercing to empty string",
+                    type(raw_html).__name__,
+                )
+                raw_html = ""
             content = await self._basic_extract(raw_html, format, remove_images)
 
         # Fallback: just return raw text
         if not content:
+            if not isinstance(raw_html, (str, bytes)):
+                logger.warning(
+                    "raw_html is %s before _strip_html — coercing to empty string",
+                    type(raw_html).__name__,
+                )
+                raw_html = ""
             content = await self._run_in_thread(lambda: self._strip_html(raw_html))
 
         # Build metadata dict from Document if available
