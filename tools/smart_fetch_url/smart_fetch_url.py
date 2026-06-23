@@ -88,7 +88,7 @@ BROWSER_PROFILES = {
 }
 
 DEFAULT_BROWSER = "firefox_147"
-DEFAULT_MAX_CHARS = 50_000
+DEFAULT_MAX_CHARS = 16_384
 DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
 DEFAULT_BATCH_REQUESTS_PER_SEC = 10
@@ -232,7 +232,7 @@ class Tools:
         :param url: URL to fetch (http/https only)
         :param format: Output format: "markdown" (default, readable), "html" (cleaned HTML),
                        "txt" (plain text), "json" (structured), or "raw" (full server response)
-        :param max_chars: Maximum characters to return (default: 50000)
+        :param max_chars: Maximum characters to return (default: 16384)
         :param browser: Browser profile for TLS fingerprinting.
                         Examples: firefox_147, chrome_145, safari_18_0, edge_135
         :param os_profile: OS profile hint. Options: windows, macos, linux, android, ios
