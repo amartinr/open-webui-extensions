@@ -118,7 +118,7 @@ When the fallback triggers:
   When a page is classified as `"feed"`:
   1. `_detect_content_type()` parses HTML with selectolax
   2. `_basic_extract()` parses the same HTML again with selectolax
-  
+
   **Fix**: `_detect_content_type_sync()` now returns `(category, tree)`
   where `tree` is the parsed `HTMLParser`.  `_basic_extract()` accepts
   an optional `tree` parameter — when provided, it skips re-parsing.
@@ -127,34 +127,23 @@ When the fallback triggers:
 
 ---
 
-## P2 — Production hardening
+## P2 — Production hardening ✅
 
-- [ ] **CancelledError handling in async fetch methods**
-  Change 5 (thread pool) already handles cancellation for CPU-bound work.
-  But the async fetch methods themselves have no explicit `CancelledError`
-  handling when the user presses Stop during a network request:
+- [x] **CancelledError handling in async fetch methods**
+  - `_fetch_with_curl_cffi()`: `await session.get()` wrapped in
+    `try/except asyncio.CancelledError` — logs and re-raises.
+  - `_fetch_with_httpx()`: same pattern around `await client.get()`.
+  - `smart_fetch_url()`: `except asyncio.CancelledError` added before
+    `except Exception` — emits `❌` status and re-raises.
+  - **Defensive timeout**: `_fetch_with_fingerprint()` wrapped with
+    `asyncio.wait_for(timeout=max(timeout_ms/1000*2, 30))` to catch
+    hangs when Stop does not propagate.  Uses `GLOBAL_DEFENSE_TIMEOUT_SEC`
+    constant (30s) to avoid magic numbers.
 
-  | Location | Problem |
-  |----------|---------|
-  | `_fetch_with_curl_cffi()` | `await session.get()` can receive `CancelledError` with no explicit cleanup |
-  | `_fetch_with_httpx()` | `await client.get()` can receive `CancelledError` with no explicit cleanup |
-  | `smart_fetch_url()` | `except Exception` does not catch `CancelledError` (it is a `BaseException`) |
-  | Defensive global timeout | No `asyncio.wait_for()` wrapping the whole fetch in case Stop does not propagate |
-
-  **Proposed fix**:
-  - Add `except asyncio.CancelledError` in `_fetch_with_curl_cffi` and `_fetch_with_httpx`
-    for logging and re-raise
-  - Add `except asyncio.CancelledError` in `smart_fetch_url()` before the `except Exception`
-  - Optional: wrap the main block with `asyncio.wait_for(timeout=30)`
-    as a defence when Stop does not propagate correctly
-
-- [ ] **Rate limiting for batch fetches**
-  `batch_fetch_urls()` respects concurrency via `asyncio.Semaphore`,
-  but there is no global rate limiter.  50 concurrent requests from
-  one chat session can trigger rate-limiting or abuse detection on
-  the target servers.  Options:
-  - Add a `requests_per_second` valve (default: ~10/s)
-  - Use `asyncio.Semaphore` with a token-bucket or sliding-window
+- [x] **Rate limiting for batch fetches**
+  Added `_RateLimiter` helper class (sliding-window with `asyncio.Lock`).
+  New admin Valve `requests_per_second` (default 10).  `batch_fetch_urls()`
+  calls `rate_limiter.acquire()` before each request, inside the semaphore.
 
 ---
 
