@@ -114,6 +114,8 @@ When the fallback triggers:
   breaks IDE refactoring.  The public method signature changes, but
   callers typically pass it as a keyword argument, so this is a
   backward-compatible change in practice.
+  
+  **Also**: update the docstring and the README to document the change.
 
 - [ ] **Deduplicate selectolax parse in feed path**
   When a page is classified as `"feed"`:
@@ -154,14 +156,6 @@ When the fallback triggers:
   the target servers.  Options:
   - Add a `requests_per_second` valve (default: ~10/s)
   - Use `asyncio.Semaphore` with a token-bucket or sliding-window
-
-- [ ] **Document the `os_profile` change in README**
-  When `os` → `os_profile`, update the docstring and the README so
-  existing users know.
-
-- [ ] **Add a version bump in the docstring header**
-  Current: `version: 0.5.0`
-  After all fixes: `version: 0.6.0`
 
 ---
 
