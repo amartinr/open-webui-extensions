@@ -91,11 +91,28 @@ DEFAULT_BROWSER = "firefox_147"
 DEFAULT_MAX_CHARS = 50_000
 DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
+DEFAULT_BATCH_REQUESTS_PER_SEC = 10
+GLOBAL_DEFENSE_TIMEOUT_SEC = 30
 DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 DEFAULT_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 DEFAULT_RAW_ACCEPT = "text/html,application/xhtml+xml,application/json,application/xml;q=0.9,text/markdown;q=0.8,text/plain;q=0.8,*/*;q=0.7"
 DEFAULT_JSON_ACCEPT = "application/json,text/json,application/ld+json;q=0.9,text/plain;q=0.8,*/*;q=0.7"
 
+
+class _RateLimiter:
+    """Sliding-window rate limiter for batch fetches."""
+    def __init__(self, rate: float):
+        self.rate = rate
+        self._last = 0.0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, (1.0 / self.rate) - (now - self._last))
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last = time.monotonic()
 
 
 class Tools:
@@ -118,6 +135,10 @@ class Tools:
         batch_concurrency: int = Field(
             DEFAULT_BATCH_CONCURRENCY,
             description="Default concurrency for batch_fetch_urls",
+        )
+        requests_per_second: int = Field(
+            DEFAULT_BATCH_REQUESTS_PER_SEC,
+            description="Max requests per second in batch_fetch_urls",
         )
         verbose: bool = Field(
             False,
@@ -242,8 +263,10 @@ class Tools:
             _start_time = time.monotonic()
             await self._emit_status(__event_emitter__, f"🌐 {url}", done=False)
 
+            _defense_timeout = max(timeout_ms / 1000 * 2, GLOBAL_DEFENSE_TIMEOUT_SEC)
             (raw_html, final_url, status_code, content_type, resp_headers, raw_bytes) = (
-                await self._fetch_with_fingerprint(
+                await asyncio.wait_for(
+                    self._fetch_with_fingerprint(
                     url=url,
                     browser=browser,
                     os_profile=os_profile,
@@ -251,6 +274,8 @@ class Tools:
                     proxy=self.valves.proxy,
                     headers=headers,
                     format=format,
+                ),
+                    timeout=_defense_timeout,
                 )
             )
             fallback_note = self._fallback_note
@@ -408,6 +433,10 @@ class Tools:
 
             return result
 
+        except asyncio.CancelledError:
+            await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
+            raise
+
         except Exception as e:
             error_msg = self._format_error(e, url)
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
@@ -464,11 +493,14 @@ class Tools:
             return "Error: No URLs provided."
 
         concurrency = max(1, min(concurrency, 50))
+        requests_per_second = max(1, self.valves.requests_per_second)
 
         semaphore = asyncio.Semaphore(concurrency)
+        rate_limiter = _RateLimiter(requests_per_second)
 
         async def fetch_one(index: int, single_url: str) -> str:
             async with semaphore:
+                await rate_limiter.acquire()
                 try:
                     result = await self.smart_fetch_url(
                         url=single_url,
@@ -584,12 +616,16 @@ class Tools:
             impersonate=browser,
             proxies=proxies_dict,
         ) as session:
-            resp = await session.get(
-                url,
-                headers=headers,
-                timeout=timeout_sec,
-                allow_redirects=True,
-            )
+            try:
+                resp = await session.get(
+                    url,
+                    headers=headers,
+                    timeout=timeout_sec,
+                    allow_redirects=True,
+                )
+            except asyncio.CancelledError:
+                logger.warning("Request cancelled: %s", url)
+                raise
 
             content_type = resp.headers.get("content-type", "") or ""
             resp_headers = dict(resp.headers)
@@ -630,7 +666,11 @@ class Tools:
         }
 
         async with httpx.AsyncClient(proxy=proxy) as client:
-            resp = await client.get(url, **request_kwargs)
+            try:
+                resp = await client.get(url, **request_kwargs)
+            except asyncio.CancelledError:
+                logger.warning("Request cancelled: %s", url)
+                raise
             resp.raise_for_status()
 
             content_type = resp.headers.get("content-type", "") or ""
