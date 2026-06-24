@@ -231,7 +231,8 @@ class Tools:
 
         :param url: URL to fetch (http/https only)
         :param format: Output format: "markdown" (default, readable), "html" (cleaned HTML),
-                       "txt" (plain text), "json" (structured), or "raw" (full server response)
+                       "txt" (plain text), "json" (structured), "raw" (full server response),
+                       or "skimmd" (skimmed Markdown — links, images, video preserved)
         :param max_chars: Maximum characters to return (default: 16384)
         :param browser: Browser profile for TLS fingerprinting.
                         Examples: firefox_147, chrome_145, safari_18_0, edge_135
@@ -433,6 +434,44 @@ class Tools:
             await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             return result
 
+        # Step 3b: skimmd format — skimmed Markdown preserving links and media
+        if format == "skimmd":
+            content = _skimmd_parse(
+                raw_html,
+                base_url=final_url,
+                strip_external=True,
+            )
+            word_count = len(content.split()) if content else 0
+            if max_chars and len(content) > max_chars:
+                content = content[:max_chars]
+
+            result = self._format_output(
+                url=url,
+                final_url=final_url,
+                title=self._extract_title(raw_html),
+                author=self._extract_meta(raw_html, "author"),
+                site=urlparse(final_url).hostname or "",
+                language=self._extract_language(raw_html),
+                published=(
+                    self._extract_meta(raw_html, "article:published_time")
+                    or self._extract_meta(raw_html, "date")
+                    or ""
+                ),
+                content=content,
+                format=format,
+                word_count=word_count,
+                browser=browser,
+                os_profile=os_profile,
+                status_code=status_code,
+                note=fallback_note,
+            )
+            _elapsed = time.monotonic() - _start_time
+            _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
+            if show_favicons:
+                await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_status(__event_emitter__, _desc, done=True)
+            return result
+
         # Step 4: Extract content
         extracted = await self._extract_content(
             raw_html=raw_html,
@@ -522,7 +561,7 @@ class Tools:
         per URL with success/failure indicators.
 
         :param urls: Array of URLs to fetch (http/https only, 1-50 items)
-        :param format: Output format: "markdown", "html", "txt", "json", or "raw"
+        :param format: Output format: "markdown", "html", "txt", "json", "raw", or "skimmd" (skimmed Markdown)
         :param max_chars: Maximum characters per URL
         :param browser: Browser profile for TLS fingerprinting
         :param os_profile: OS profile hint
@@ -1703,3 +1742,310 @@ class Tools:
         return f"Request failed: {msg[:200]}"
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+#  skimmd — Skimmed Markdown (inline, zero external dependencies)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Whitelist-based HTML-to-Markdown converter used by the ``"skimmd"`` output
+# format.  Canonical source (with CLI) lives at ``test/skimmd.py``.
+
+from html.parser import HTMLParser
+
+_SKIMMD_WHITELIST = frozenset({
+    "a", "img", "video", "source", "picture",
+    "p", "br", "hr", "pre", "code",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+    "ul", "ol", "li", "dl", "dt", "dd",
+    "table", "tr", "td", "th", "thead", "tbody", "caption",
+    "strong", "em", "b", "i", "u", "span", "mark", "small",
+    "div", "section", "article", "figure", "figcaption",
+    "blockquote", "cite", "q",
+})
+
+_SKIMMD_NOISY = frozenset({
+    "script", "style", "nav", "footer", "header",
+    "noscript", "iframe", "meta", "link", "svg", "form",
+})
+
+_SKIMMD_VOID = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+})
+
+_SKIMMD_BLOCK = frozenset({
+    "p", "div", "section", "article", "figure", "figcaption",
+    "li", "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "td", "th",
+})
+
+_SKIMMD_LIST = frozenset({"ul", "ol"})
+
+_SKIMMD_ENTITIES = {
+    "amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'",
+    "nbsp": "\u00a0", "bull": "\u2022", "hellip": "\u2026",
+    "mdash": "\u2014", "ndash": "\u2013",
+    "laquo": "\u00ab", "raquo": "\u00bb",
+    "lsquo": "\u2018", "rsquo": "\u2019",
+    "ldquo": "\u201c", "rdquo": "\u201d",
+}
+
+
+class _SkimmdParser(HTMLParser):
+    """Whitelist-based HTML-to-Markdown converter (inline for Open WebUI)."""
+
+    def __init__(self, base_url: str | None = None, *, strip_external: bool = True):
+        super().__init__(convert_charrefs=False)
+        self._output: list[str] = []
+        self._buf: list[str] = []
+        self._buf_has_internal = False
+        self._buf_has_external = False
+        self._skip_depth = 0
+        self._in_pre = False
+        self._list_stack: list[str] = []
+        self._list_counters: list[int] = []
+        self._in_a = False
+        self._a_href = ""
+        self._a_is_external = False
+        self._base_url = base_url.rstrip("/") if base_url else None
+        self._strip_external = strip_external
+        self._origin: str | None = None
+        if strip_external and base_url:
+            self._origin = urlparse(base_url).hostname
+
+    def _is_external(self, href: str) -> bool:
+        if not href or not self._origin:
+            return False
+        parsed = urlparse(href)
+        if not parsed.hostname:
+            return False
+        return parsed.hostname != self._origin
+
+    def _resolve(self, url: str) -> str:
+        if self._base_url and url and url.startswith("/"):
+            return self._base_url + url
+        return url
+
+    def _emit(self, text: str) -> None:
+        if text:
+            self._buf.append(text)
+
+    def _flush_buf(self) -> None:
+        if not self._buf:
+            return
+        if self._strip_external and self._buf_has_external and not self._buf_has_internal:
+            self._reset_buf()
+            return
+        text = "".join(self._buf)
+        self._output.append(text)
+        self._reset_buf()
+
+    def _reset_buf(self) -> None:
+        self._buf = []
+        self._buf_has_internal = False
+        self._buf_has_external = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in _SKIMMD_NOISY:
+            if tag not in _SKIMMD_VOID:
+                self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        attr_dict = {k: v for k, v in attrs if v is not None}
+        for key in ("href", "src", "poster"):
+            if key in attr_dict:
+                attr_dict[key] = self._resolve(attr_dict[key])
+        if tag in _SKIMMD_BLOCK:
+            self._flush_buf()
+        self._handle_prefix(tag, attr_dict)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in _SKIMMD_NOISY:
+            if tag not in _SKIMMD_VOID:
+                self._skip_depth -= 1
+            return
+        if self._skip_depth:
+            return
+        self._handle_suffix(tag)
+        if tag in _SKIMMD_BLOCK:
+            self._flush_buf()
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        if self._strip_external and self._a_is_external:
+            return
+        text = re.sub(r"\s+", " ", data)
+        if text.strip():
+            self._emit(text)
+            if not self._a_is_external:
+                self._buf_has_internal = True
+
+    def handle_entityref(self, name: str) -> None:
+        if self._skip_depth:
+            return
+        if self._strip_external and self._a_is_external:
+            return
+        self._emit(_SKIMMD_ENTITIES.get(name, f"&{name};"))
+
+    def handle_charref(self, name: str) -> None:
+        if self._skip_depth:
+            return
+        if self._strip_external and self._a_is_external:
+            return
+        try:
+            self._emit(chr(int(name)))
+        except (ValueError, OverflowError):
+            self._emit(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        pass
+
+    def _handle_prefix(self, tag: str, attrs: dict[str, str]) -> None:
+        if tag not in _SKIMMD_WHITELIST:
+            return
+        # a — links
+        if tag == "a":
+            href = attrs.get("href", "")
+            is_ext = self._is_external(href)
+            self._a_href = href
+            self._a_is_external = is_ext
+            if self._strip_external and is_ext:
+                self._buf_has_external = True
+                return
+            self._emit("[")
+            if href:
+                self._buf_has_internal = True
+            return
+        # img
+        if tag == "img":
+            src = attrs.get("src", "")
+            alt = attrs.get("alt", "")
+            self._emit(f"![{alt}]({src})")
+            self._buf_has_internal = True
+            return
+        # video
+        if tag == "video":
+            src = attrs.get("src", "")
+            poster = attrs.get("poster", "")
+            parts: list[str] = []
+            if poster:
+                parts.append(f"![Poster]({poster})")
+            if src:
+                parts.append(f"[Video]({src})")
+            if parts:
+                self._emit(" ".join(parts))
+                self._buf_has_internal = True
+            return
+        # source
+        if tag == "source":
+            src = attrs.get("src", "")
+            if src:
+                self._emit(f" [Stream]({src})")
+                self._buf_has_internal = True
+            return
+        if tag == "picture":
+            return
+        # headings
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            self._emit(f"\n{'#' * int(tag[1])} ")
+            return
+        # lists
+        if tag in ("ul", "ol"):
+            if not self._list_stack:
+                self._emit("\n")
+            self._list_stack.append(tag)
+            self._list_counters.append(0)
+            return
+        if tag == "li":
+            indent = "  " * len(self._list_stack)
+            prefix = "-"
+            if self._list_stack and self._list_stack[-1] == "ol":
+                self._list_counters[-1] += 1
+                prefix = f"{self._list_counters[-1]}."
+            self._emit(f"\n{indent}{prefix} ")
+            return
+        # blockquote
+        if tag == "blockquote":
+            self._emit("\n> ")
+            return
+        # code
+        if tag == "pre":
+            self._in_pre = True
+            self._emit("\n```\n")
+            return
+        if tag == "code" and not self._in_pre:
+            self._emit("`")
+            return
+        # inline formatting
+        if tag in ("strong", "b"):
+            self._emit("**")
+            return
+        if tag in ("em", "i"):
+            self._emit("*")
+            return
+        # hr / br
+        if tag == "hr":
+            self._emit("\n---\n")
+            return
+        if tag == "br":
+            self._emit("\n")
+            return
+
+    def _handle_suffix(self, tag: str) -> None:
+        if tag not in _SKIMMD_WHITELIST:
+            return
+        if tag == "a":
+            if self._strip_external and self._a_is_external:
+                self._a_href = ""
+                self._a_is_external = False
+                return
+            if self._a_href:
+                self._emit(f"]({self._a_href})")
+            self._a_href = ""
+            self._a_is_external = False
+            return
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            self._emit("\n")
+            return
+        if tag in ("ul", "ol"):
+            if self._list_stack:
+                self._list_stack.pop()
+                self._list_counters.pop()
+            self._emit("\n")
+            return
+        if tag == "blockquote":
+            self._emit("\n")
+            return
+        if tag == "pre":
+            self._in_pre = False
+            self._emit("\n```\n")
+            return
+        if tag == "code" and not self._in_pre:
+            self._emit("`")
+            return
+        if tag in ("strong", "b"):
+            self._emit("**")
+            return
+        if tag in ("em", "i"):
+            self._emit("*")
+            return
+
+    def get_result(self) -> str:
+        self._flush_buf()
+        text = "".join(self._output)
+        text = re.sub(r" +\n", "\n", text)
+        text = re.sub(r"\n +", "\n", text)
+        text = re.sub(r"\n{4,}", "\n\n", text)
+        text = re.sub(r"  +", " ", text)
+        text = re.sub(r"\n\s*\n", "\n\n", text)
+        return text.strip()
+
+
+def _skimmd_parse(html: str, base_url: str | None = None, *, strip_external: bool = True) -> str:
+    """Convert HTML to Skimmed Markdown (inline for Open WebUI)."""
+    parser = _SkimmdParser(base_url=base_url, strip_external=strip_external)
+    parser.feed(html)
+    return parser.get_result()
