@@ -1110,6 +1110,8 @@ class Tools:
         """
         try:
             return await self._run_in_thread(lambda: Tools._detect_content_type_sync(raw_html))
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.warning(
                 "Content type detection failed, falling back to 'unknown'"
