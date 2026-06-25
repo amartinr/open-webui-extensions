@@ -92,6 +92,7 @@ DEFAULT_MAX_CHARS = 16_384
 DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
 DEFAULT_BATCH_REQUESTS_PER_SEC = 10
+THREAD_POOL_WORKERS = 8
 THREAD_TIMEOUT_SEC = 5
 MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK = 30
 GLOBAL_OPERATION_TIMEOUT_SEC = 30
@@ -195,7 +196,7 @@ class Tools:
     def _get_thread_pool(self) -> concurrent.futures.ThreadPoolExecutor:
         if self._thread_pool is None:
             self._thread_pool = concurrent.futures.ThreadPoolExecutor(
-                max_workers=4, thread_name_prefix="smart_fetch"
+                max_workers=THREAD_POOL_WORKERS, thread_name_prefix="smart_fetch"
             )
         return self._thread_pool
 
