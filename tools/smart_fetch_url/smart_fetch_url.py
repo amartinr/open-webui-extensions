@@ -1255,6 +1255,8 @@ class Tools:
                     if alt_extracted.get("word_count", 0) > MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK:
                         alternates_used.append(alt_final)
                         return alt_extracted, alternates_used
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
                     continue
 
