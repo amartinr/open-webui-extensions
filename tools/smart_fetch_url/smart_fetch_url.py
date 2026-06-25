@@ -629,6 +629,8 @@ class Tools:
                     )
                     await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ✅ {single_url}", done=False)
                     return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{result}\n\n---\n"
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
                     return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: {self._format_error(e, single_url)}\n\n---\n"
