@@ -181,6 +181,17 @@ class Tools:
         self._thread_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._fallback_note: Optional[str] = None
 
+    def close(self):
+        """Shut down the thread pool explicitly.
+
+        Call this when the Tools instance is no longer needed
+        (e.g. from the harness lifecycle hooks) to ensure no
+        threads outlive their owner.
+        """
+        if self._thread_pool is not None:
+            self._thread_pool.shutdown(wait=False, cancel_futures=True)
+            self._thread_pool = None
+
     def _get_thread_pool(self) -> concurrent.futures.ThreadPoolExecutor:
         if self._thread_pool is None:
             self._thread_pool = concurrent.futures.ThreadPoolExecutor(
@@ -195,17 +206,26 @@ class Tools:
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.CancelledError:
-            logger.warning("Threaded operation cancelled via CancelledError")
+            logger.warning(
+                "Threaded operation cancelled — thread continues in pool until "
+                "current work completes (fut.cancel() cannot kill running threads)"
+            )
             fut.cancel()
             raise
         except asyncio.TimeoutError:
-            logger.warning("Threaded operation timed out after %.1fs", timeout)
+            logger.warning(
+                "Threaded operation timed out after %.1fs — thread continues in pool "
+                "until current work completes",
+                timeout,
+            )
             fut.cancel()
             raise
 
     def __del__(self):
+        # Best-effort cleanup — ``close()`` is the reliable path.
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
+            self._thread_pool = None
 
     # ──────────────────────────────────────────────
     #  Core tool method
