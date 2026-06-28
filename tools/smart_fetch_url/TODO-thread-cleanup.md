@@ -33,8 +33,8 @@ All CPU-bound work (trafilatura, selectolax, pypdf, docx XML) shares the same `T
 
 **Fix**: Move the imports to module level or to `Tools.__init__()`.
 
-### 5. `raw_bytes` held until `_execute_fetch()` returns
+### 5. ~~`raw_bytes` held until `_execute_fetch()` returns~~ ✅ FIXED
 
-For the binary/document path, `raw_bytes` (potentially many MB for a large PDF) stays in scope until the end of `_execute_fetch()`.  Already mitigated for the text path (`raw_bytes = None`), but the document path only frees it after `_extract_document_content()` returns and the method exits.
+~~For the binary/document path, `raw_bytes` (potentially many MB for a large PDF) stays in scope until the end of `_execute_fetch()`.  Already mitigated for the text path (`raw_bytes = None`), but the document path only frees it after `_extract_document_content()` returns and the method exits.~~
 
-**Mitigation**: Already in place (`raw_bytes = None` after extraction in the document path).  For very large files, consider streaming the body instead of loading it entirely into memory.
+**Fix**: Replaced `raw_bytes = None` with `del raw_bytes` in both the document and text paths.  `del` removes the name from the local namespace entirely so the frame no longer holds a slot for it — tracebacks from later exceptions cannot resurrect the bytes.  The document path also hoists `word_count` extraction before the delete, keeping formatting/output work fully separated from the raw body.

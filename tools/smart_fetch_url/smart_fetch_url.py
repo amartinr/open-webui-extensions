@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Always preferred over 'fetch_url'. Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Use by default.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.5.0
+version: 0.8.1
 licence: MIT
 """
 
@@ -381,11 +381,13 @@ class Tools:
                 content_type=content_type,
                 raw_bytes=raw_bytes,
             )
-            raw_bytes = None  # release early — GC hint for large docs
+            del raw_bytes  # free immediately — large docs (50MB+ PDF) must
+            # not persist through formatting and event emission.
 
             content = extracted.get("content", "")
             if max_chars and len(content) > max_chars:
                 content = content[:max_chars]
+            word_count = extracted.get("word_count", 0)
 
             result = self._format_output(
                 url=url,
@@ -397,13 +399,12 @@ class Tools:
                 published=extracted.get("published", ""),
                 content=content,
                 format=format,
-                word_count=extracted.get("word_count", 0),
+                word_count=word_count,
                 browser=browser,
                 os_profile=os_profile,
                 status_code=status_code,
                 note=fallback_note,
             )
-            word_count = extracted.get("word_count", 0)
             _elapsed = time.monotonic() - _start_time
             _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
             if show_favicons:
@@ -434,9 +435,9 @@ class Tools:
             await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             return result
 
-        # Text path: raw bytes no longer needed — drop the reference
+        # Text path: raw bytes no longer needed — drop the binding
         # so the GC can reclaim the body before extraction runs.
-        raw_bytes = None
+        del raw_bytes
 
         # Step 3: Handle raw format early — return the full server response
         if format == "raw":
