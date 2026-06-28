@@ -12,7 +12,7 @@ A Python port of [pi-smart-fetch](https://pi.dev/packages/pi-smart-fetch) by [Th
 - **Rich metadata** - title, author, site, language, published date
 - **Alternate content fallback** - follows `<link rel="alternate">` when extraction yields thin content
 - **Batch fetch** - multiple URLs with bounded concurrency
-- **Multiple output formats** - markdown, html, text, json, raw
+- **Multiple output formats** - markdown, html, text, json, raw, skimmd
 - **UserValves** - per-user overrides for all config settings (max_chars, timeout, browser, concurrency) from the chat session
 
 ## Requirements
@@ -43,6 +43,30 @@ Configuration values are resolved with the following precedence:
 batch_fetch_urls(urls, format?, max_chars?, browser?, os_profile?,
                  timeout_ms?, concurrency?, remove_images?, include_replies?, headers?)
 ```
+
+## Output Formats
+
+| Format | Description | Use case |
+|---|---|---|
+| `markdown` | Clean text via trafilatura (default) | Articles, blog posts |
+| `html` | Lightly cleaned HTML | When structure matters |
+| `txt` | Plain text, no formatting | Minimal token usage |
+| `json` | Structured output with metadata | Programmatic consumption |
+| `raw` | Full unprocessed server response | Debugging, passthrough |
+| **`skimmd`** | Skimmed Markdown — whitelist-based HTML-to-MD converter | Feeds, listings, media-rich pages |
+
+### `skimmd` — Skimmed Markdown
+
+Preserves **all links, images, and videos** while stripping navigation, scripts,
+and structural noise. Ideal for Reddit frontpages, forum threads, search results,
+galleries, or any page where trafilatura's article extraction is too aggressive.
+
+- **Zero external dependencies** — uses only stdlib (`html.parser`, `re`, `urllib`)
+- **Whitelist-based** — only known-safe tags survive; everything else is stripped
+- **`strip_external=True`** — blocks containing only external links are discarded;
+  mixed blocks keep internal content and drop external anchor text
+- **Inline in `smart_fetch_url.py`** — no separate import needed when pasted into
+  Open WebUI
 
 ### UserValves (per-user, configurable from chat)
 
