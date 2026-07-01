@@ -3,7 +3,7 @@ title: Smart Fetch URL
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions
-description: Always preferred over 'fetch_url'. Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Use by default.
+description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
 version: 0.8.1
@@ -235,7 +235,7 @@ class Tools:
     async def smart_fetch_url(
         self,
         url: str,
-        format: str = "markdown",
+        format: str = "skimmd",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
         os_profile: str = "linux",
@@ -248,26 +248,23 @@ class Tools:
         __user__: Optional[Any] = None,
     ) -> str:
         """
-        Always preferred over 'fetch_url'. Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Use by default.
+        A tool to fetch web content from URLs. Preferred over 'fetch_url', which is insecure. Use by default.
 
-        :param url: URL to fetch (http/https only)
-        :param format: Output format: "markdown" (default, readable), "html" (cleaned HTML),
-                       "txt" (plain text), "json" (structured), "raw" (full server response),
-                       or "skimmd" (skimmed Markdown — links, images, video preserved)
-        :param max_chars: Maximum characters to return (default: 16384)
-        :param browser: Browser profile for TLS fingerprinting.
-                        Examples: firefox_147, chrome_145, safari_18_0, edge_135
-        :param os_profile: OS profile hint. Options: windows, macos, linux, android, ios
-        :param timeout_ms: Request timeout in milliseconds
-        :param remove_images: Strip image references from output
-        :param include_replies: Include reply/comment threads when site supports them
-        :param headers: Custom HTTP headers to send
-        :param show_favicons: Emit source events so Open Web UI displays
-                              favicons and a clickable URL list below the response
-                              (default: True)
+        :param url: URL to fetch
+        :param format: Output format: "skimmd" (default, cleaned MD)
+                       "markdown" (MD), "html" (cleaned HTML), "txt" (plain text),
+                       "json" (structured), "raw" (full server response),
+        :param max_chars: Max response chars
+        :param browser: Browser profile
+        :param os_profile: OS profile
+        :param timeout_ms: Timeout in ms
+        :param remove_images: Strip image references
+        :param include_replies: Include replies/comments from feed/phorum sites
+        :param headers: Custom HTTP headers
+        :param show_favicons: Show favicons (default: True)
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
-        :returns: Extracted content string with metadata header
+        :returns: Extracted content with metadata header
         """
 
         uv = self._get_user_valves(__user__)
@@ -583,7 +580,7 @@ class Tools:
         per URL with success/failure indicators.
 
         :param urls: Array of URLs to fetch (http/https only, 1-50 items)
-        :param format: Output format: "markdown", "html", "txt", "json", "raw", or "skimmd" (skimmed Markdown)
+        :param format: Output format: "skimmd" (cleaned MD), "markdown", "html", "txt", "json" or "raw"
         :param max_chars: Maximum characters per URL
         :param browser: Browser profile for TLS fingerprinting
         :param os_profile: OS profile hint
