@@ -183,7 +183,7 @@ class Tools:
         self._thread_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._fallback_note: Optional[str] = None
 
-    def close(self):
+    def _close(self):
         """Shut down the thread pool explicitly.
 
         Call this when the Tools instance is no longer needed
@@ -224,7 +224,7 @@ class Tools:
             raise
 
     def __del__(self):
-        # Best-effort cleanup — ``close()`` is the reliable path.
+        # Best-effort cleanup — ``_close()`` is the reliable path.
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
             self._thread_pool = None
