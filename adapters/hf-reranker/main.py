@@ -6,6 +6,7 @@ import requests
 
 DEFAULT_INFERENCE_URL = "https://router.huggingface.co/hf-inference/models"
 DEFAULT_TIMEOUT = 30
+ERROR_DETAIL_MAX_CHARS = 500
 
 parser = argparse.ArgumentParser(description="HF Reranker adapter for Open WebUI")
 parser.add_argument(
@@ -42,24 +43,31 @@ async def rerank(request: Request, payload: dict):
 
     inputs = [{"text": query, "text_pair": doc} for doc in docs]
 
-    resp = requests.post(
-        f"{HF_INFERENCE_URL}/{model}",
-        headers={"Authorization": auth},
-        json={"inputs": inputs},
-        timeout=HF_TIMEOUT,
-    )
-
-    if not resp.ok:
-        raise HTTPException(
-            status_code=502,
-            detail=f"HF Inference error ({resp.status_code}): {resp.text[:500]}",
+    try:
+        resp = requests.post(
+            f"{HF_INFERENCE_URL}/{model}",
+            headers={"Authorization": auth},
+            json={"inputs": inputs},
+            timeout=HF_TIMEOUT,
         )
+        resp.raise_for_status()
+        scores = resp.json()
+        results = [
+            {"index": i, "relevance_score": s["score"]}
+            for i, s in enumerate(scores[0])
+        ]
+    except requests.HTTPError as exc:
+        raise HTTPException(
+            status_code=exc.response.status_code,
+            detail=exc.response.text[:ERROR_DETAIL_MAX_CHARS],
+        )
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="HF Inference timed out")
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except (ValueError, IndexError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
-    scores = resp.json()
-    results = [
-        {"index": i, "relevance_score": s["score"]}
-        for i, s in enumerate(scores[0])
-    ]
     return {"results": results}
 
 
