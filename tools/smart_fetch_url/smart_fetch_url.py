@@ -253,13 +253,13 @@ class Tools:
         :param url: URL to fetch
         :param format: Output format: "skimmd" (default, cleaned MD)
                        "markdown" (MD), "html" (cleaned HTML), "txt" (plain text),
-                       "json" (structured), "raw" (full server response),
+                       "json" (structured), "raw" (full server response)
         :param max_chars: Max response chars
         :param browser: Browser profile
         :param os_profile: OS profile
         :param timeout_ms: Timeout in ms
         :param remove_images: Strip image references
-        :param include_replies: Include replies/comments from feed/phorum sites
+        :param include_replies: Include replies/comments from feed/forum sites
         :param headers: Custom HTTP headers
         :param show_favicons: Show favicons (default: True)
         :param __event_emitter__: Internal — for UI progress updates
@@ -570,6 +570,7 @@ class Tools:
         include_replies: bool = True,
         headers: Optional[dict] = None,
         concurrency: Optional[int] = None,
+        show_favicons: bool = True,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
     ) -> str:
@@ -588,6 +589,7 @@ class Tools:
         :param remove_images: Strip image references from output
         :param include_replies: Include reply/comment threads when site supports them
         :param headers: Custom HTTP headers to send
+        :param show_favicons: Show favicons via source events (default: True)
         :param concurrency: Max concurrent fetches (default: 8)
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
@@ -650,7 +652,8 @@ class Tools:
 
         # Emit sources BEFORE done=True so Open WebUI has time to process
         # all cite events while the shimmer is still active.
-        await self._emit_sources(__event_emitter__, urls)
+        if show_favicons:
+            await self._emit_sources(__event_emitter__, urls)
         await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
 
         return "".join(results)
