@@ -1,4 +1,3 @@
-import argparse
 import os
 
 from fastapi import FastAPI, HTTPException, Request
@@ -8,28 +7,8 @@ DEFAULT_INFERENCE_URL = "https://router.huggingface.co/hf-inference/models"
 DEFAULT_TIMEOUT = 30
 ERROR_DETAIL_MAX_CHARS = 500
 
-parser = argparse.ArgumentParser(description="HF Reranker adapter for Open WebUI")
-parser.add_argument(
-    "--inference-url",
-    default=os.getenv("HF_INFERENCE_URL", DEFAULT_INFERENCE_URL),
-    help="HF Inference base URL (env: HF_INFERENCE_URL)",
-)
-parser.add_argument(
-    "--timeout",
-    type=float,
-    default=float(os.getenv("HF_TIMEOUT", DEFAULT_TIMEOUT)),
-    help="Request timeout in seconds (env: HF_TIMEOUT)",
-)
-parser.add_argument(
-    "--port",
-    type=int,
-    default=int(os.getenv("PORT", "8000")),
-    help="Port to listen on (env: PORT)",
-)
-args = parser.parse_args()
-
-HF_INFERENCE_URL = args.inference_url
-HF_TIMEOUT = args.timeout
+HF_INFERENCE_URL = os.getenv("HF_INFERENCE_URL", DEFAULT_INFERENCE_URL)
+HF_TIMEOUT = float(os.getenv("HF_TIMEOUT", DEFAULT_TIMEOUT))
 
 app = FastAPI()
 
@@ -72,6 +51,30 @@ async def rerank(request: Request, payload: dict):
 
 
 if __name__ == "__main__":
+    import argparse
     import uvicorn
+
+    parser = argparse.ArgumentParser(description="HF Reranker adapter for Open WebUI")
+    parser.add_argument(
+        "--inference-url",
+        default=HF_INFERENCE_URL,
+        help="HF Inference base URL (env: HF_INFERENCE_URL)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=HF_TIMEOUT,
+        help="Request timeout in seconds (env: HF_TIMEOUT)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("PORT", "8000")),
+        help="Port to listen on (env: PORT)",
+    )
+    args = parser.parse_args()
+
+    HF_INFERENCE_URL = args.inference_url
+    HF_TIMEOUT = args.timeout
 
     uvicorn.run(app, host="0.0.0.0", port=args.port)
