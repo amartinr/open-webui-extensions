@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.8.2
+version: 0.8.3
 licence: MIT
 """
 
@@ -18,7 +18,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
@@ -87,6 +87,7 @@ BROWSER_PROFILES = {
     "opera_114": "opera114",
 }
 
+VALID_FORMATS = frozenset({"skimmd", "markdown", "html", "txt", "json", "raw"})
 DEFAULT_BROWSER = "firefox_147"
 DEFAULT_MAX_CHARS = 16_384
 DEFAULT_TIMEOUT_MS = 15_000
@@ -235,7 +236,7 @@ class Tools:
     async def smart_fetch_url(
         self,
         url: str,
-        format: str = "skimmd",
+        format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "skimmd",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
         os_profile: str = "linux",
@@ -275,6 +276,8 @@ class Tools:
         verbose = uv_verbose if uv_verbose is not None else self.valves.verbose
 
         # Validate
+        if format not in VALID_FORMATS:
+            return f"Error: Invalid format '{format}'. Must be one of: {', '.join(sorted(VALID_FORMATS))}."
         if not url or not url.strip():
             return "Error: URL is required."
 
@@ -561,7 +564,7 @@ class Tools:
     async def batch_fetch_urls(
         self,
         urls: list[str],
-        format: str = "markdown",
+        format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "markdown",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
         os_profile: str = "linux",
@@ -602,6 +605,8 @@ class Tools:
         browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
         concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
 
+        if format not in VALID_FORMATS:
+            return f"Error: Invalid format '{format}'. Must be one of: {', '.join(sorted(VALID_FORMATS))}."
         if not urls:
             return "Error: No URLs provided."
 
