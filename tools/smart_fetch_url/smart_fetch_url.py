@@ -239,12 +239,9 @@ class Tools:
         format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "skimmd",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
-        os_profile: str = "linux",
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
         include_replies: bool = True,
-        headers: Optional[dict] = None,
-        show_favicons: bool = True,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
     ) -> str:
@@ -257,12 +254,9 @@ class Tools:
                        "json" (structured), "raw" (full server response)
         :param max_chars: Max response chars
         :param browser: Browser profile
-        :param os_profile: OS profile
         :param timeout_ms: Timeout in ms
         :param remove_images: Strip image references
         :param include_replies: Include replies/comments from feed/forum sites
-        :param headers: Custom HTTP headers
-        :param show_favicons: Show favicons (default: True)
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
         :returns: Extracted content with metadata header
@@ -293,15 +287,12 @@ class Tools:
                 self._execute_fetch(
                     url=url,
                     browser=browser,
-                    os_profile=os_profile,
                     timeout_ms=timeout_ms,
                     format=format,
                     max_chars=max_chars,
                     remove_images=remove_images,
                     include_replies=include_replies,
-                    show_favicons=show_favicons,
                     verbose=verbose,
-                    headers=headers,
                     __event_emitter__=__event_emitter__,
                     _start_time=_start_time,
                 ),
@@ -331,15 +322,12 @@ class Tools:
         self,
         url: str,
         browser: str,
-        os_profile: str,
         timeout_ms: int,
         format: str,
         max_chars: int,
         remove_images: bool,
         include_replies: bool,
-        show_favicons: bool,
         verbose: bool,
-        headers: Optional[dict],
         __event_emitter__: Optional[Any],
         _start_time: float,
     ) -> str:
@@ -354,10 +342,8 @@ class Tools:
                 self._fetch_with_fingerprint(
                 url=url,
                 browser=browser,
-                os_profile=os_profile,
                 timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
-                headers=headers,
                 format=format,
             ),
                 timeout=_defense_timeout,
@@ -401,14 +387,12 @@ class Tools:
                 format=format,
                 word_count=word_count,
                 browser=browser,
-                os_profile=os_profile,
                 status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
             _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
-            if show_favicons:
-                await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_sources(__event_emitter__, [final_url])
             await self._emit_status(__event_emitter__, _desc, done=True)
             return result
 
@@ -425,13 +409,11 @@ class Tools:
                 format=format,
                 word_count=0,
                 browser=browser,
-                os_profile=os_profile,
                 status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
-            if show_favicons:
-                await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_sources(__event_emitter__, [final_url])
             await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             return result
 
@@ -448,11 +430,9 @@ class Tools:
                 status_code=status_code,
                 content_type=content_type,
                 browser=browser,
-                os_profile=os_profile,
             )
             _elapsed = time.monotonic() - _start_time
-            if show_favicons:
-                await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_sources(__event_emitter__, [final_url])
             await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             return result
 
@@ -483,14 +463,12 @@ class Tools:
                 format=format,
                 word_count=word_count,
                 browser=browser,
-                os_profile=os_profile,
                 status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
             _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
-            if show_favicons:
-                await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_sources(__event_emitter__, [final_url])
             await self._emit_status(__event_emitter__, _desc, done=True)
             return result
 
@@ -514,10 +492,8 @@ class Tools:
                 raw_html=raw_html,
                 url=final_url,
                 browser=browser,
-                os_profile=os_profile,
                 timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
-                headers=headers,
                 format=format,
                 remove_images=remove_images,
             )
@@ -541,7 +517,6 @@ class Tools:
             format=format,
             word_count=extracted.get("word_count", 0),
             browser=browser,
-            os_profile=os_profile,
             status_code=status_code,
             note=fallback_note,
         )
@@ -551,8 +526,7 @@ class Tools:
         word_count = extracted.get("word_count", 0)
         _elapsed = time.monotonic() - _start_time
         _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
-        if show_favicons:
-            await self._emit_sources(__event_emitter__, visited_urls)
+        await self._emit_sources(__event_emitter__, visited_urls)
         await self._emit_status(__event_emitter__, _desc, done=True)
 
         return result
@@ -567,13 +541,10 @@ class Tools:
         format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "markdown",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
-        os_profile: str = "linux",
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
         include_replies: bool = True,
-        headers: Optional[dict] = None,
         concurrency: Optional[int] = None,
-        show_favicons: bool = True,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
     ) -> str:
@@ -587,12 +558,9 @@ class Tools:
         :param format: Output format: "skimmd" (cleaned MD), "markdown", "html", "txt", "json" or "raw"
         :param max_chars: Maximum characters per URL
         :param browser: Browser profile for TLS fingerprinting
-        :param os_profile: OS profile hint
         :param timeout_ms: Request timeout per URL in milliseconds
         :param remove_images: Strip image references from output
         :param include_replies: Include reply/comment threads when site supports them
-        :param headers: Custom HTTP headers to send
-        :param show_favicons: Show favicons via source events (default: True)
         :param concurrency: Max concurrent fetches (default: 8)
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
@@ -625,12 +593,9 @@ class Tools:
                         format=format,
                         max_chars=max_chars,
                         browser=browser,
-                        os_profile=os_profile,
                         timeout_ms=timeout_ms,
                         remove_images=remove_images,
                         include_replies=include_replies,
-                        headers=headers,
-                        show_favicons=False,  # batch handles its own source list
                         __event_emitter__=None,  # suppress per-item events
                     )
                     await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ✅ {single_url}", done=False)
@@ -657,8 +622,7 @@ class Tools:
 
         # Emit sources BEFORE done=True so Open WebUI has time to process
         # all cite events while the shimmer is still active.
-        if show_favicons:
-            await self._emit_sources(__event_emitter__, urls)
+        await self._emit_sources(__event_emitter__, urls)
         await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
 
         return "".join(results)
@@ -671,10 +635,8 @@ class Tools:
         self,
         url: str,
         browser: str,
-        os_profile: str,
         timeout_ms: int,
         proxy: Optional[str] = None,
-        headers: Optional[dict] = None,
         format: str = "markdown",
     ) -> tuple[str, str, int, str, dict, Optional[bytes]]:
         """
@@ -689,7 +651,7 @@ class Tools:
         resolved_browser = BROWSER_PROFILES.get(browser, browser)
 
         # Build headers
-        request_headers = dict(headers or {})
+        request_headers = {}
 
         # Set default Accept based on format
         accept_key = "Accept"
@@ -1193,10 +1155,8 @@ class Tools:
         raw_html: str,
         url: str,
         browser: str,
-        os_profile: str,
         timeout_ms: int,
         proxy: Optional[str],
-        headers: Optional[dict],
         format: str,
         remove_images: bool,
     ) -> tuple[dict, list[str]]:
@@ -1249,10 +1209,8 @@ class Tools:
                     alt_raw, alt_final, _, _, _, _ = await self._fetch_with_fingerprint(
                         url=resolved,
                         browser=browser,
-                        os_profile=os_profile,
                         timeout_ms=timeout_ms,
                         proxy=proxy,
-                        headers=headers,
                         format=format,
                     )
                     alt_extracted = await self._extract_content(
@@ -1538,7 +1496,6 @@ class Tools:
         format: str,
         word_count: int,
         browser: str,
-        os_profile: str,
         status_code: int,
         note: Optional[str] = None,
     ) -> str:
@@ -1556,7 +1513,6 @@ class Tools:
                 "wordCount": word_count,
                 "content": content,
                 "browser": browser,
-                "os": os_profile,
             }
             if note:
                 result["note"] = note
@@ -1576,7 +1532,7 @@ class Tools:
         if published:
             parts.append(f"> Published: {published}")
         parts.append(f"> Words: {word_count}")
-        parts.append(f"> Browser: {browser}/{os_profile}")
+        parts.append(f"> Browser: {browser}")
         if note:
             parts.append(f"> {note}")
         parts.append("")
@@ -1594,14 +1550,13 @@ class Tools:
         status_code: int,
         content_type: str,
         browser: str,
-        os_profile: str,
     ) -> str:
         """Build raw format response with metadata prefix."""
         lines = [
             f"> URL: {final_url}",
             f"> Status: {status_code}",
             f"> Content-Type: {content_type}",
-            f"> Browser: {browser}/{os_profile}",
+            f"> Browser: {browser}",
             f"> Size: {len(raw_html)} bytes",
             "",
             raw_html,

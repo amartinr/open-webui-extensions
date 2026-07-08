@@ -1,4 +1,4 @@
-1.  **Remove unused or redundant parameters from the function signature**
+1.  [x] **Remove unused or redundant parameters from the function signature**
     The following parameters should be removed:
       - `os_profile` — never used internally by curl_cffi, only appears in
         output metadata
