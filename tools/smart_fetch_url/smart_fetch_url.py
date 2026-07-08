@@ -309,7 +309,8 @@ class Tools:
                         return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: The operation timed out\n\n---\n"
                     except Exception as e:
                         await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
-                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: {self._format_error(e, single_url)}\n\n---\n"
+                        error_data = self._format_error(e, single_url)
+                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: {error_data['message']}\n\n---\n"
 
             await self._emit_status(__event_emitter__, f"[0/{len(urls)}] Fetching {len(urls)} URLs…", done=False)
 
@@ -354,17 +355,17 @@ class Tools:
 
         except asyncio.TimeoutError:
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
-            return f"Error: Operation timed out after {GLOBAL_OPERATION_TIMEOUT_SEC}s for {url}"
+            return f"Error: The operation timed out"
 
         except asyncio.CancelledError:
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
             raise
 
         except Exception as e:
-            error_msg = self._format_error(e, url)
+            error_data = self._format_error(e, url)
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
             logger.exception(f"smart_fetch_url failed for {url}")
-            return error_msg
+            return f"Error: {error_data['message']}"
 
     # ──────────────────────────────────────────────
     #  Internal: full fetch+extract pipeline (runs under global timeout)
@@ -1675,21 +1676,27 @@ class Tools:
     #  Internal: Error formatting
     # ──────────────────────────────────────────────
 
-    def _format_error(self, error: Exception, url: str) -> str:
+    def _format_error(self, error: Exception, url: str) -> dict[str, str]:
+        """Classify an exception into a structured error dict.
+
+        Returns ``{"error_type": "...", "message": "..."}`` so callers
+        can use it for both JSON output and text-based metadata without
+        duplicating logic.
+        """
         msg = str(error)
         if "Name or service not known" in msg or "nodename nor servname" in msg:
-            return f"DNS error: Could not resolve hostname for {url}"
+            return {"error_type": "dns", "message": "DNS resolution failed"}
         if "Connection refused" in msg or "connect" in msg.lower():
-            return f"Connection refused: Could not connect to {url}"
+            return {"error_type": "connection_refused", "message": "Connection refused"}
         if "timeout" in msg.lower() or "timed out" in msg.lower():
-            return f"Timeout: Request to {url} timed out"
+            return {"error_type": "timeout", "message": "Connection timed out"}
         if "403" in msg:
-            return f"Access denied (403): {url} is blocking the request"
+            return {"error_type": "http_403", "message": "403 Forbidden"}
         if "404" in msg:
-            return f"Not found (404): {url} does not exist"
+            return {"error_type": "http_404", "message": "404 Not Found"}
         if "SSL" in msg or "certificate" in msg.lower():
-            return f"TLS/SSL error: Could not establish secure connection to {url}"
-        return f"Request failed: {msg[:200]}"
+            return {"error_type": "tls", "message": "SSL connection error"}
+        return {"error_type": "internal", "message": "Internal error"}
 
 
 # ═════════════════════════════════════════════════════════════════════════════

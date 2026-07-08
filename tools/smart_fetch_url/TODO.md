@@ -30,7 +30,7 @@
     agent's decision of which tool to call, and ensures consistent parameter
     names and defaults across both modes.
 
-5.  **Refactor `_format_error` to return structured error data**
+5.  [x] **Refactor `_format_error` to return structured error data**
     Instead of returning a formatted string directly, `_format_error` should
     return a dictionary with `error_type` and `message` keys, e.g.
     `{"error_type": "dns", "message": "DNS resolution failed"}`. This way the
