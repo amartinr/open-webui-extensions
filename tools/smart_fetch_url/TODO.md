@@ -18,14 +18,11 @@
     incorrect naming). Replace it with the actual list of 36 supported
     profiles (including generic aliases like `chrome`, `firefox`, `safari`,
     etc.) and adapt the code to pass them directly to curl_cffi without the
-    broken dictionary lookup.
+    broken dictionary lookup.  The default was also changed from
+    ``"firefox_147"`` to the ``"firefox"`` alias (curl_cffi resolves it to
+    the latest Firefox profile), making task 4 unnecessary.
 
-4.  **Change `browser` default from `"firefox_147"` to `"firefox147"`**
-    The current default includes an underscore that only works because of the
-    `BROWSER_PROFILES` mapping. Once the mapping is updated, the default must
-    match the exact string that curl_cffi expects.
-
-5.  **Unify `smart_fetch_url` and `batch_fetch_urls` into a single tool**
+4.  **Unify `smart_fetch_url` and `batch_fetch_urls` into a single tool**
     Merge both into `smart_fetch_url` with a single `urls` parameter that
     always accepts a `list[str]` (even for a single URL). Internally,
     dispatch to single-fetch or batch logic based on `len(urls)`. This
@@ -33,14 +30,14 @@
     agent's decision of which tool to call, and ensures consistent parameter
     names and defaults across both modes.
 
-6.  **Refactor `_format_error` to return structured error data**
+5.  **Refactor `_format_error` to return structured error data**
     Instead of returning a formatted string directly, `_format_error` should
     return a dictionary with `error_type` and `message` keys, e.g.
     `{"error_type": "dns", "message": "DNS resolution failed"}`. This way the
     caller can use it both for JSON output and for text-based metadata
     without duplicating logic.
 
-7.  **Refactor `_format_output` to build responses from a single metadata dict
+6.  **Refactor `_format_output` to build responses from a single metadata dict
     and unify error/success output**
     Construct a single dictionary internally with all fields (status, url,
     title, word count, error info, etc.) and serialize it according to the
