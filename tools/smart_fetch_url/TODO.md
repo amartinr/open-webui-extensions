@@ -37,7 +37,7 @@
     caller can use it both for JSON output and for text-based metadata
     without duplicating logic.
 
-6.  **Refactor `_format_output` to build responses from a single metadata dict
+6.  [x] **Refactor `_format_output` to build responses from a single metadata dict
     and unify error/success output**
     Construct a single dictionary internally with all fields (status, url,
     title, word count, error info, etc.) and serialize it according to the

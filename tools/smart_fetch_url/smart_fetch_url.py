@@ -306,11 +306,23 @@ class Tools:
                         raise
                     except asyncio.TimeoutError:
                         await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
-                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: The operation timed out\n\n---\n"
+                        err_result = self._format_output(
+                            url=single_url, final_url=single_url, title="", author="",
+                            site="", language="", published="", content="",
+                            format=format, word_count=0, browser=browser, status_code=0,
+                            error={"error_type": "timeout", "message": "The operation timed out"},
+                        )
+                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
                     except Exception as e:
                         await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
                         error_data = self._format_error(e, single_url)
-                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: {error_data['message']}\n\n---\n"
+                        err_result = self._format_output(
+                            url=single_url, final_url=single_url, title="", author="",
+                            site="", language="", published="", content="",
+                            format=format, word_count=0, browser=browser, status_code=0,
+                            error=error_data,
+                        )
+                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
 
             await self._emit_status(__event_emitter__, f"[0/{len(urls)}] Fetching {len(urls)} URLs…", done=False)
 
@@ -355,7 +367,12 @@ class Tools:
 
         except asyncio.TimeoutError:
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
-            return f"Error: The operation timed out"
+            return self._format_output(
+                url=url, final_url=url, title="", author="", site="",
+                language="", published="", content="", format=format,
+                word_count=0, browser=browser, status_code=0,
+                error={"error_type": "timeout", "message": "The operation timed out"},
+            )
 
         except asyncio.CancelledError:
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
@@ -365,7 +382,12 @@ class Tools:
             error_data = self._format_error(e, url)
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
             logger.exception(f"smart_fetch_url failed for {url}")
-            return f"Error: {error_data['message']}"
+            return self._format_output(
+                url=url, final_url=url, title="", author="", site="",
+                language="", published="", content="", format=format,
+                word_count=0, browser=browser, status_code=0,
+                error=error_data,
+            )
 
     # ──────────────────────────────────────────────
     #  Internal: full fetch+extract pipeline (runs under global timeout)
@@ -1461,48 +1483,58 @@ class Tools:
         browser: str,
         status_code: int,
         note: Optional[str] = None,
+        error: Optional[dict[str, str]] = None,
     ) -> str:
-        """Build the final output string depending on format."""
+        """Build the final output string from a single metadata dict.
 
+        All text-based formats share the same dict→lines loop.
+        On error, ``error`` is a dict with ``"error_type"`` and ``"message"``
+        keys (as returned by :meth:`_format_error`); ``content`` and
+        ``word_count`` are ignored.
+        """
+        # ── Build metadata dict (ordered, for consistent text output) ──
+        fields: dict[str, str] = {}
+
+        if error:
+            fields["Status"] = "error"
+            fields["Error"] = error["message"]
+        else:
+            fields["Status"] = "ok"
+
+        resolved_url = final_url or url
+        fields["URL"] = resolved_url
+        if title:
+            fields["Title"] = title
+        if author:
+            fields["Author"] = author
+        if site and site != urlparse(resolved_url).hostname:
+            fields["Site"] = site
+        if language:
+            fields["Language"] = language
+        if published:
+            fields["Published"] = published
+        fields["Words"] = str(word_count)
+        fields["Browser"] = browser
+        if note:
+            fields["Note"] = note
+
+        # ── JSON ───────────────────────────────────────────────────────
         if format == "json":
-            result = {
-                "url": url,
-                "finalUrl": final_url,
-                "title": title,
-                "author": author,
-                "site": site,
-                "language": language,
-                "publishedDate": published,
-                "wordCount": word_count,
-                "content": content,
-                "browser": browser,
-            }
-            if note:
-                result["note"] = note
+            result = dict(fields)
+            result["statusCode"] = status_code
+            if error:
+                result["errorType"] = error.get("error_type", "")
+            else:
+                result["content"] = content
+            result["url"] = url
+            result["finalUrl"] = resolved_url
             return json.dumps(result, indent=2, ensure_ascii=False)
 
-        # Build a metadata header for text-based formats
-        parts = []
-        parts.append(f"> URL: {final_url}")
-        if title:
-            parts.append(f"> Title: {title}")
-        if author:
-            parts.append(f"> Author: {author}")
-        if site and site != urlparse(final_url).hostname:
-            parts.append(f"> Site: {site}")
-        if language:
-            parts.append(f"> Language: {language}")
-        if published:
-            parts.append(f"> Published: {published}")
-        parts.append(f"> Words: {word_count}")
-        parts.append(f"> Browser: {browser}")
-        if note:
-            parts.append(f"> {note}")
+        # ── Text-based formats ─────────────────────────────────────────
+        parts: list[str] = [f"> {k}: {v}" for k, v in fields.items()]
         parts.append("")
-
-        if content:
+        if content and not error:
             parts.append(content)
-
         return "\n".join(parts)
 
     def _build_raw_response(
@@ -1516,8 +1548,9 @@ class Tools:
     ) -> str:
         """Build raw format response with metadata prefix."""
         lines = [
+            f"> Status: ok",
             f"> URL: {final_url}",
-            f"> Status: {status_code}",
+            f"> HTTP Status: {status_code}",
             f"> Content-Type: {content_type}",
             f"> Browser: {browser}",
             f"> Size: {len(raw_html)} bytes",
@@ -1676,7 +1709,7 @@ class Tools:
     #  Internal: Error formatting
     # ──────────────────────────────────────────────
 
-    def _format_error(self, error: Exception, url: str) -> dict[str, str]:
+    def _format_error(self, error: Exception, _url: str = "") -> dict[str, str]:
         """Classify an exception into a structured error dict.
 
         Returns ``{"error_type": "...", "message": "..."}`` so callers
