@@ -8,7 +8,7 @@
       - `show_favicons` — UI cosmetic feature with no functional impact;
         hardcode to `true`
 
-2.  **Change `include_replies` default from `true` to `false`**
+2.  [x] **Change `include_replies` default from `true` to `false`**
     Including comment threads by default consumes unnecessary tokens and
     context space. Users who need replies can explicitly set it to `true`.
 

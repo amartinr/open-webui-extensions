@@ -241,7 +241,7 @@ class Tools:
         browser: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
-        include_replies: bool = True,
+        include_replies: bool = False,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
     ) -> str:
@@ -543,7 +543,7 @@ class Tools:
         browser: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
-        include_replies: bool = True,
+        include_replies: bool = False,
         concurrency: Optional[int] = None,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
