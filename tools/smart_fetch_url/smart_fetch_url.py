@@ -30,65 +30,38 @@ logger = logging.getLogger(__name__)
 #  Browser TLS profiles (fingerprints)
 # ──────────────────────────────────────────────
 
-# These map to curl_cffi's impersonate strings.
-# curl_cffi natively supports: chrome99, chrome100, chrome101, chrome104,
-# chrome107, chrome110, chrome116, chrome119, chrome120, chrome123,
-# chrome124, chrome131, chrome133, chrome134, chrome135, chrome145,
-# safari15_3, safari15_5, safari17_0, safari17_2_1, safari18_0,
-# safari17_5, safari18_2, firefox110, firefox117, firefox147,
-# firefox133, firefox135, firefox137, edge99, edge101, edge127,
-# edge133, edge135, opera92, opera95, opera105, opera114
-#
-# We expose them with human-readable names and map to curl_cffi aliases.
-
-BROWSER_PROFILES = {
-    # Chrome
-    "chrome_99": "chrome99",
-    "chrome_100": "chrome100",
-    "chrome_101": "chrome101",
-    "chrome_104": "chrome104",
-    "chrome_107": "chrome107",
-    "chrome_110": "chrome110",
-    "chrome_116": "chrome116",
-    "chrome_119": "chrome119",
-    "chrome_120": "chrome120",
-    "chrome_123": "chrome123",
-    "chrome_124": "chrome124",
-    "chrome_131": "chrome131",
-    "chrome_133": "chrome133",
-    "chrome_134": "chrome134",
-    "chrome_135": "chrome135",
-    "chrome_145": "chrome145",
-    # Firefox
-    "firefox_110": "firefox110",
-    "firefox_117": "firefox117",
-    "firefox_133": "firefox133",
-    "firefox_135": "firefox135",
-    "firefox_137": "firefox137",
-    "firefox_147": "firefox147",
-    # Safari
-    "safari_15_3": "safari15_3",
-    "safari_15_5": "safari15_5",
-    "safari_17_0": "safari17_0",
-    "safari_17_2_1": "safari17_2_1",
-    "safari_17_5": "safari17_5",
-    "safari_18_0": "safari18_0",
-    "safari_18_2": "safari18_2",
+# Valid browser impersonate profiles from curl_cffi.
+# These are the exact strings accepted by AsyncSession(impersonate=...).
+# Source: curl_cffi/requests/impersonate.py ``BrowserTypeLiteral``.
+BROWSER_PROFILES: frozenset = frozenset({
     # Edge
-    "edge_99": "edge99",
-    "edge_101": "edge101",
-    "edge_127": "edge127",
-    "edge_133": "edge133",
-    "edge_135": "edge135",
-    # Opera
-    "opera_92": "opera92",
-    "opera_95": "opera95",
-    "opera_105": "opera105",
-    "opera_114": "opera114",
-}
+    "edge99", "edge101",
+    # Chrome
+    "chrome99", "chrome100", "chrome101", "chrome104", "chrome107",
+    "chrome110", "chrome116", "chrome119", "chrome120", "chrome123",
+    "chrome124", "chrome131", "chrome133a", "chrome136", "chrome142",
+    "chrome145", "chrome146",
+    # Chrome Android
+    "chrome99_android", "chrome131_android",
+    # Safari
+    "safari153", "safari155", "safari170", "safari180", "safari184",
+    "safari260", "safari2601",
+    # Safari iOS
+    "safari172_ios", "safari180_ios", "safari184_ios", "safari260_ios",
+    # Firefox
+    "firefox133", "firefox135", "firefox144", "firefox147",
+    # Tor
+    "tor145",
+    # Generic aliases (curl_cffi resolves to latest version)
+    "chrome", "edge", "safari", "safari_ios", "safari_beta",
+    "safari_ios_beta", "chrome_android", "firefox",
+    # Deprecated aliases (still accepted by curl_cffi)
+    "safari15_3", "safari15_5", "safari17_0", "safari17_2_ios",
+    "safari18_0", "safari18_0_ios", "safari18_4", "safari18_4_ios",
+})
 
 VALID_FORMATS = frozenset({"skimmd", "markdown", "html", "txt", "json", "raw"})
-DEFAULT_BROWSER = "firefox_147"
+DEFAULT_BROWSER = "firefox"
 DEFAULT_MAX_CHARS = 16_384
 DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
@@ -648,7 +621,13 @@ class Tools:
         raw_bytes is the undecoded response body — needed for binary
         document extraction (PDF, DOCX, etc.).
         """
-        resolved_browser = BROWSER_PROFILES.get(browser, browser)
+        resolved_browser = browser
+        if resolved_browser not in BROWSER_PROFILES:
+            logger.warning(
+                "Browser profile '%s' is not in the known curl_cffi list; "
+                "passing through to curl_cffi anyway",
+                resolved_browser,
+            )
 
         # Build headers
         request_headers = {}

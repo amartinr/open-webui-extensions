@@ -12,7 +12,7 @@
     Including comment threads by default consumes unnecessary tokens and
     context space. Users who need replies can explicitly set it to `true`.
 
-3.  **Update the supported browser list and adapt the code accordingly**
+3.  [x] **Update the supported browser list and adapt the code accordingly**
     The current `BROWSER_PROFILES` mapping is outdated and contains many
     invalid entries (~2/3 of profiles don't exist in curl_cffi or use
     incorrect naming). Replace it with the actual list of 36 supported
