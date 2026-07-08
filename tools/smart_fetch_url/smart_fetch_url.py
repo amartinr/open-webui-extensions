@@ -111,11 +111,11 @@ class Tools:
         )
         batch_concurrency: int = Field(
             DEFAULT_BATCH_CONCURRENCY,
-            description="Default concurrency for batch_fetch_urls",
+            description="Default concurrency for batch fetches",
         )
         requests_per_second: int = Field(
             DEFAULT_BATCH_REQUESTS_PER_SEC,
-            description="Max requests per second in batch_fetch_urls",
+            description="Max requests per second in batch fetches",
         )
         verbose: bool = Field(
             False,
@@ -208,49 +208,128 @@ class Tools:
 
     async def smart_fetch_url(
         self,
-        url: str,
+        urls: list[str],
         format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "skimmd",
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         remove_images: bool = False,
         include_replies: bool = False,
+        concurrency: Optional[int] = None,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
     ) -> str:
         """
-        A tool to fetch web content from URLs. Preferred over 'fetch_url', which is insecure. Use by default.
+        Fetch one or more URLs with browser-grade TLS fingerprinting and clean content extraction.
 
-        :param url: URL to fetch
+        Handles single URLs and batches with the same interface — pass a list
+        with one element for a single fetch, or multiple URLs for concurrent
+        batch fetching.
+
+        :param urls: URL(s) to fetch (http/https only).  A single-item list
+                     runs the full single-fetch pipeline; multiple URLs are
+                     fetched concurrently with bounded concurrency.
         :param format: Output format: "skimmd" (default, cleaned MD)
                        "markdown" (MD), "html" (cleaned HTML), "txt" (plain text),
                        "json" (structured), "raw" (full server response)
         :param max_chars: Max response chars
         :param browser: Browser profile
-        :param timeout_ms: Timeout in ms
+        :param timeout_ms: Timeout in ms per request
         :param remove_images: Strip image references
         :param include_replies: Include replies/comments from feed/forum sites
+        :param concurrency: Max concurrent fetches for batch (default: 8)
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
-        :returns: Extracted content with metadata header
+        :returns: Extracted content with metadata header (single) or
+                  labeled results separated by ``---`` lines (batch)
         """
 
         uv = self._get_user_valves(__user__)
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
         timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
+        concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
         uv_verbose = uv.verbose if uv else None
         verbose = uv_verbose if uv_verbose is not None else self.valves.verbose
 
         # Validate
         if format not in VALID_FORMATS:
             return f"Error: Invalid format '{format}'. Must be one of: {', '.join(sorted(VALID_FORMATS))}."
-        if not url or not url.strip():
-            return "Error: URL is required."
+        if not urls or not isinstance(urls, list):
+            return "Error: A list of URLs is required."
+        if len(urls) > 50:
+            return f"Error: Maximum 50 URLs per batch, got {len(urls)}."
 
-        url = url.strip()
-        if not url.startswith(("http://", "https://")):
-            return f"Error: Invalid URL protocol. Only http/https are supported: {url}"
+        # Validate and clean each URL
+        cleaned: list[str] = []
+        for u in urls:
+            if not u or not isinstance(u, str) or not u.strip():
+                return "Error: Each URL must be a non-empty string."
+            u = u.strip()
+            if not u.startswith(("http://", "https://")):
+                return f"Error: Invalid URL protocol. Only http/https are supported: {u}"
+            cleaned.append(u)
+        urls = cleaned
+
+        # ── Batch path ──────────────────────────────────────────────
+        if len(urls) > 1:
+            concurrency = max(1, min(concurrency, 50))
+            requests_per_second = max(1, self.valves.requests_per_second)
+
+            semaphore = asyncio.Semaphore(concurrency)
+            rate_limiter = _RateLimiter(requests_per_second)
+
+            async def fetch_one(index: int, single_url: str) -> str:
+                async with semaphore:
+                    await rate_limiter.acquire()
+                    try:
+                        _start = time.monotonic()
+                        await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] 🌐 {single_url}", done=False)
+                        result = await asyncio.wait_for(
+                            self._execute_fetch(
+                                url=single_url,
+                                browser=browser,
+                                timeout_ms=timeout_ms,
+                                format=format,
+                                max_chars=max_chars,
+                                remove_images=remove_images,
+                                include_replies=include_replies,
+                                verbose=verbose,
+                                __event_emitter__=None,  # suppress per-item events
+                                _start_time=_start,
+                            ),
+                            timeout=GLOBAL_OPERATION_TIMEOUT_SEC,
+                        )
+                        await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ✅ {single_url}", done=False)
+                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{result}\n\n---\n"
+                    except asyncio.CancelledError:
+                        raise
+                    except asyncio.TimeoutError:
+                        await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
+                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: The operation timed out\n\n---\n"
+                    except Exception as e:
+                        await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
+                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: {self._format_error(e, single_url)}\n\n---\n"
+
+            await self._emit_status(__event_emitter__, f"[0/{len(urls)}] Fetching {len(urls)} URLs…", done=False)
+
+            tasks = [fetch_one(i, u) for i, u in enumerate(urls)]
+            try:
+                results = await asyncio.gather(*tasks)
+            except asyncio.CancelledError:
+                logger.warning("Batch fetch cancelled by user (Stop button)")
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await self._emit_status(__event_emitter__, f"❌ Batch cancelled", done=True)
+                raise
+
+            await self._emit_sources(__event_emitter__, urls)
+            await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
+            return "".join(results)
+
+        # ── Single URL path ─────────────────────────────────────────
+        url = urls[0]
 
         try:
             _start_time = time.monotonic()
@@ -503,102 +582,6 @@ class Tools:
         await self._emit_status(__event_emitter__, _desc, done=True)
 
         return result
-
-    # ──────────────────────────────────────────────
-    #  Batch variant
-    # ──────────────────────────────────────────────
-
-    async def batch_fetch_urls(
-        self,
-        urls: list[str],
-        format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "markdown",
-        max_chars: Optional[int] = None,
-        browser: Optional[str] = None,
-        timeout_ms: Optional[int] = None,
-        remove_images: bool = False,
-        include_replies: bool = False,
-        concurrency: Optional[int] = None,
-        __event_emitter__: Optional[Any] = None,
-        __user__: Optional[Any] = None,
-    ) -> str:
-        """
-        Fetch multiple URLs concurrently with browser-grade TLS fingerprinting.
-
-        Each URL is fetched with the same parameters. Results are clearly labeled
-        per URL with success/failure indicators.
-
-        :param urls: Array of URLs to fetch (http/https only, 1-50 items)
-        :param format: Output format: "skimmd" (cleaned MD), "markdown", "html", "txt", "json" or "raw"
-        :param max_chars: Maximum characters per URL
-        :param browser: Browser profile for TLS fingerprinting
-        :param timeout_ms: Request timeout per URL in milliseconds
-        :param remove_images: Strip image references from output
-        :param include_replies: Include reply/comment threads when site supports them
-        :param concurrency: Max concurrent fetches (default: 8)
-        :param __event_emitter__: Internal — for UI progress updates
-        :param __user__: Internal — for user-specific valve overrides
-        :returns: Labeled results for all URLs
-        """
-
-        uv = self._get_user_valves(__user__)
-        max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
-        timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
-        browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
-        concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
-
-        if format not in VALID_FORMATS:
-            return f"Error: Invalid format '{format}'. Must be one of: {', '.join(sorted(VALID_FORMATS))}."
-        if not urls:
-            return "Error: No URLs provided."
-
-        concurrency = max(1, min(concurrency, 50))
-        requests_per_second = max(1, self.valves.requests_per_second)
-
-        semaphore = asyncio.Semaphore(concurrency)
-        rate_limiter = _RateLimiter(requests_per_second)
-
-        async def fetch_one(index: int, single_url: str) -> str:
-            async with semaphore:
-                await rate_limiter.acquire()
-                try:
-                    result = await self.smart_fetch_url(
-                        url=single_url,
-                        format=format,
-                        max_chars=max_chars,
-                        browser=browser,
-                        timeout_ms=timeout_ms,
-                        remove_images=remove_images,
-                        include_replies=include_replies,
-                        __event_emitter__=None,  # suppress per-item events
-                    )
-                    await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ✅ {single_url}", done=False)
-                    return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{result}\n\n---\n"
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
-                    return f"## [{index + 1}/{len(urls)}] {single_url}\n\nError: {self._format_error(e, single_url)}\n\n---\n"
-
-        await self._emit_status(__event_emitter__, f"[0/{len(urls)}] Fetching {len(urls)} URLs…", done=False)
-
-        tasks = [fetch_one(i, u) for i, u in enumerate(urls)]
-        try:
-            results = await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
-            logger.warning("batch_fetch_urls cancelled by user (Stop button)")
-            # Cancel any remaining tasks so threads don't keep running
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
-            await self._emit_status(__event_emitter__, f"❌ Batch cancelled", done=True)
-            raise
-
-        # Emit sources BEFORE done=True so Open WebUI has time to process
-        # all cite events while the shimmer is still active.
-        await self._emit_sources(__event_emitter__, urls)
-        await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
-
-        return "".join(results)
 
     # ──────────────────────────────────────────────
     #  Internal: TLS-fingerprinted fetch

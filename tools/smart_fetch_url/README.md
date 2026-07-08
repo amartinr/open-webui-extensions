@@ -11,7 +11,7 @@ A Python port of [pi-smart-fetch](https://pi.dev/packages/pi-smart-fetch) by [Th
 - **Smart Content-Type routing** - handles binary files, extractable documents (PDF, DOCX), and text/HTML with different code paths
 - **Rich metadata** - title, author, site, language, published date
 - **Alternate content fallback** - follows `<link rel="alternate">` when extraction yields thin content
-- **Batch fetch** - multiple URLs with bounded concurrency
+- **Single + batch** — one interface: pass a list with one URL or many; batch uses bounded concurrency
 - **Multiple output formats** - markdown, html, text, json, raw, skimmd
 - **UserValves** - per-user overrides for all config settings (max_chars, timeout, browser, concurrency) from the chat session
 
@@ -30,30 +30,26 @@ Import into Open WebUI at **Workspace → Tools → +** and attach to a model.
 ### `smart_fetch_url`
 
 ```
-smart_fetch_url(url, format?, max_chars?, browser?, os_profile?, timeout_ms?,
-                remove_images?, include_replies?, proxy?, headers?, show_favicons?)
+smart_fetch_url(urls, format?, max_chars?, browser?, timeout_ms?,
+                remove_images?, include_replies?, concurrency?)
 ```
 
 Configuration values are resolved with the following precedence:
 **method argument > UserValve (chat) > admin Valve > global default**.
 
-### `batch_fetch_urls`
-
-```
-batch_fetch_urls(urls, format?, max_chars?, browser?, os_profile?,
-                 timeout_ms?, concurrency?, remove_images?, include_replies?, headers?)
-```
+Pass a single-element list for a single fetch, or multiple URLs for
+concurrent batch fetching (up to 50, bounded by ``concurrency``).
 
 ## Output Formats
 
 | Format | Description | Use case |
 |---|---|---|
-| `markdown` | Clean text via trafilatura (default) | Articles, blog posts |
+| `skimmd` | Skimmed Markdown (default) — whitelist-based HTML-to-MD converter | Feeds, listings, media-rich pages |
+| `markdown` | Clean text via trafilatura | Articles, blog posts |
 | `html` | Lightly cleaned HTML | When structure matters |
 | `txt` | Plain text, no formatting | Minimal token usage |
 | `json` | Structured output with metadata | Programmatic consumption |
 | `raw` | Full unprocessed server response | Debugging, passthrough |
-| **`skimmd`** | Skimmed Markdown — whitelist-based HTML-to-MD converter | Feeds, listings, media-rich pages |
 
 ### `skimmd` — Skimmed Markdown
 

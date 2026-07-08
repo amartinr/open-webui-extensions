@@ -22,7 +22,7 @@
     ``"firefox_147"`` to the ``"firefox"`` alias (curl_cffi resolves it to
     the latest Firefox profile), making task 4 unnecessary.
 
-4.  **Unify `smart_fetch_url` and `batch_fetch_urls` into a single tool**
+4.  [x] **Unify `smart_fetch_url` and `batch_fetch_urls` into a single tool**
     Merge both into `smart_fetch_url` with a single `urls` parameter that
     always accepts a `list[str]` (even for a single URL). Internally,
     dispatch to single-fetch or batch logic based on `len(urls)`. This
