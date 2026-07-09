@@ -1,3 +1,12 @@
+---
+title: Agent Loop Guard
+author: open-webui-tools
+author_url: https://github.com/your-org/open-webui-tools
+version: 1.0.0
+required_open_webui_version: 0.5.0
+requirements: httpx, pydantic
+---
+
 # Pipe Function: Agent Loop Guard
 
 ## 1. Purpose
@@ -151,7 +160,7 @@ The `pipe()` method receives every chat completion request. `body["model"]`
 contains the full sub-pipe ID (e.g. `"pipe-uuid.deepseek/deepseek-v4-flash"`).
 
 ```python
-async def pipe(self, body: dict, __user__: Optional[dict] = None):
+async def pipe(self, body: dict, __user__: Optional[dict] = None, __metadata__: Optional[dict] = None):
     # Strip prefix to get the real model ID
     model = body["model"].split(".", 1)[-1]
     ...
@@ -175,7 +184,7 @@ configuration.
 | `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls per turn before force-termination |
 | `ENABLE_PREVENTIVE_REMINDER` | bool | True | Periodic self-evaluation reminder every N messages |
 | `REMINDER_INTERVAL` | int | 3 | Inject preventive reminder every N user messages |
-| `INJECTION_POSITION` | str | `"prepend"` | Where to inject: `"prepend"`, `"append_system"`, `"append_user"` |
+| `INJECTION_POSITION` | Literal["prepend","append_system","append_user"] | `"prepend"` | Where to inject the warning message |
 | `MAX_WARNINGS_BEFORE_TERMINATE` | int | 2 | Escalation steps before force-termination |
 
 ---
@@ -345,10 +354,11 @@ present, it escalates rather than re-injecting.
 
 ```python
 def _last_system_contains(self, messages: list[dict], text: str) -> bool:
-    for msg in reversed(messages):
-        if msg.get("role") == "system":
-            return text.lower() in msg.get("content", "").lower()
-    return False
+    return any(
+        msg.get("role") == "system"
+        and text.lower() in msg.get("content", "").lower()
+        for msg in messages
+    )
 ```
 
 ---
@@ -370,7 +380,7 @@ Please try a more specific query or reduce the scope of your request.
 
 ```python
 from pydantic import BaseModel, Field
-from typing import Optional, AsyncGenerator
+from typing import Literal, Optional, AsyncGenerator
 import httpx
 import json
 
@@ -402,9 +412,9 @@ class Pipe:
             default=3,
             description="Inject preventive reminder every N user messages.",
         )
-        INJECTION_POSITION: str = Field(
+        INJECTION_POSITION: Literal["prepend", "append_system", "append_user"] = Field(
             default="prepend",
-            description="Where to inject: prepend, append_system, or append_user.",
+            description="Where to inject the warning message.",
         )
         MAX_WARNINGS_BEFORE_TERMINATE: int = Field(
             default=2,
@@ -488,10 +498,11 @@ class Pipe:
         return 0
 
     def _last_system_contains(self, messages: list[dict], text: str) -> bool:
-        for msg in reversed(messages):
-            if msg.get("role") == "system":
-                return text.lower() in msg.get("content", "").lower()
-        return False
+        return any(
+            msg.get("role") == "system"
+            and text.lower() in msg.get("content", "").lower()
+            for msg in messages
+        )
 
     # ------------------------------------------------------------------
     # Injection
@@ -524,7 +535,7 @@ class Pipe:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
                     if line:
-                        yield line + "\n"
+                        yield line
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
         async with httpx.AsyncClient(timeout=300) as client:
@@ -536,7 +547,7 @@ class Pipe:
     # Main entry point
     # ------------------------------------------------------------------
 
-    async def pipe(self, body: dict, __user__: Optional[dict] = None):
+    async def pipe(self, body: dict, __user__: Optional[dict] = None, __metadata__: Optional[dict] = None):
         messages = body.get("messages", [])
         if not messages:
             return ""
