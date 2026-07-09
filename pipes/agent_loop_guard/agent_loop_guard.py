@@ -17,32 +17,15 @@ log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
-# Guard messages (structured with metadata, composed at injection time)
+# Guard message helpers
 # --------------------------------------------------------------------------
-# Each entry has:
-#   marker — stable token for detection (_escalation_level, etc.)
-#   text   — human-readable message sent to the LLM
-#   level  — 1=warning, 2=final
-#
-# The composed string sent to the LLM is: marker + " " + text
 
-_GUARD_MESSAGES = {
-    "warning": {
-        "marker": "[GUARD_WARN]",
-        "level": 1,
-        "text": "Tool call repeated. No progress. Summarize or change approach.",
-    },
-    "final": {
-        "marker": "[GUARD_FINAL]",
-        "level": 2,
-        "text": "Still repeating. Stop now and summarize what you have.",
-    },
-}
+def _warning_msg(tool_name: str, total: int) -> str:
+    return f"{tool_name} called {total}x with same args. Change approach or summarize."
 
 
-def _compose(msg: dict) -> str:
-    """Compose a guard message string for the LLM: marker + text."""
-    return f"{msg['marker']} {msg['text']}"
+def _final_warning_msg(tool_name: str, total: int) -> str:
+    return f"{tool_name} called {total}x. Still repeating. Stop now and summarize."
 
 
 def _runaway_instruction(total: int, max_calls: int) -> str:
@@ -52,9 +35,9 @@ def _runaway_instruction(total: int, max_calls: int) -> str:
     )
 
 
-def _loop_blocked_tool_instruction(tool_name: str) -> str:
+def _loop_blocked_tool_instruction(tool_name: str, total: int) -> str:
     return (
-        f"TOOL REMOVED: {tool_name} blocked after repeated identical calls. "
+        f"TOOL REMOVED: {tool_name} blocked after {total} identical calls. "
         f"Other tools still available. Summarize or continue."
     )
 
@@ -105,6 +88,7 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self._models_cache: list[dict] = []
+        self._warnings_injected = 0
 
     # ------------------------------------------------------------------
     # Model discovery (manifold)
@@ -230,22 +214,6 @@ class Pipe:
             for c in recent
         )
 
-    def _escalation_level(self, messages: list[dict]) -> int:
-        """Deduce escalation level from injected guard markers.
-        Scans system AND tool messages (merge_last_tool injects into tool results).
-        0 = clean, 1 = warning, 2 = final warning."""
-        msg_final = _GUARD_MESSAGES["final"]
-        msg_warn = _GUARD_MESSAGES["warning"]
-        for m in reversed(messages):
-            if m.get("role") not in ("system", "tool"):
-                continue
-            content = m.get("content", "")
-            if msg_final["marker"] in content:
-                return 2
-            if msg_warn["marker"] in content:
-                return 1
-        return 0
-
     # ------------------------------------------------------------------
     # Tool counter
     # ------------------------------------------------------------------
@@ -360,7 +328,11 @@ class Pipe:
         # --- Analyse tool calls in current turn -----------------------
         history = self._extract_tool_calls_in_turn(messages)
         total = len(history)
-        escalation = self._escalation_level(messages)
+
+        # Reset warning counter at the start of a new user turn
+        if total == 0:
+            self._warnings_injected = 0
+
         max_esc = self.valves.MAX_WARNINGS_BEFORE_TERMINATE
 
         # --- Helper: soft-block (remove tools + inject + forward) -----
@@ -457,28 +429,30 @@ class Pipe:
         )
 
         if loop_detected:
-            if escalation >= max_esc:
+            bad_tool = history[-1]["name"]
+            if self._warnings_injected >= max_esc:
                 # Already warned enough → remove only the looping tool
-                bad_tool = history[-1]["name"]
                 return await _soft_block(
                     reason=(
                         f"Repeated tool call detected: {total} calls in this turn"
                     ),
-                    instruction=_loop_blocked_tool_instruction(bad_tool),
+                    instruction=_loop_blocked_tool_instruction(bad_tool, total),
                     blocked_tool=bad_tool,
                 )
-            elif escalation == 1:
+            elif self._warnings_injected == 1:
                 # Final warning — inject and forward normally (tools still available)
                 self._inject(messages, {
                     "role": "system",
-                    "content": _compose(_GUARD_MESSAGES["final"]),
+                    "content": _final_warning_msg(bad_tool, total),
                 })
+                self._warnings_injected = 2
             else:
                 # First warning — inject and forward normally
                 self._inject(messages, {
                     "role": "system",
-                    "content": _compose(_GUARD_MESSAGES["warning"]),
+                    "content": _warning_msg(bad_tool, total),
                 })
+                self._warnings_injected = 1
 
         # --- Tool counter ----------------------------------------------
         if (
@@ -487,6 +461,22 @@ class Pipe:
             and self.valves.MAX_TOOL_CALLS_PER_TURN > 0
         ):
             self._append_tool_counter(messages, total, self.valves.MAX_TOOL_CALLS_PER_TURN)
+
+            if __event_emitter__:
+                remaining = max(0, self.valves.MAX_TOOL_CALLS_PER_TURN - total)
+                try:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🛡️ Remaining tool calls: {remaining}/{self.valves.MAX_TOOL_CALLS_PER_TURN}",
+                                "done": True,
+                                "hidden": False,
+                            },
+                        }
+                    )
+                except Exception:
+                    log.warning("Failed to emit counter status (non-fatal)", exc_info=True)
 
         # --- Forward to gateway ---------------------------------------
         payload = {**body, "model": real_model, "messages": messages}
