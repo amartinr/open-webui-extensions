@@ -17,24 +17,35 @@ log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
+# Stable guard markers (used by detection logic, independent of message text)
+# --------------------------------------------------------------------------
+# _escalation_level() and _last_system_contains() scan for these tokens.
+# You can freely rewrite the INJECT_* messages below — as long as the
+# marker prefix stays, detection keeps working.
+
+_GUARD_MARKER_WARN = "[GUARD_WARN]"
+_GUARD_MARKER_FINAL = "[GUARD_FINAL]"
+_GUARD_MARKER_REMIND = "[GUARD_REMIND]"
+
+# --------------------------------------------------------------------------
 # Injection message templates
 # --------------------------------------------------------------------------
-# These are injected as role:"system" messages.  Keep detection markers
-# (WARNING:, FINAL WARNING:, REMINDER:) stable — _escalation_level() and
-# _last_system_contains() scan for them verbatim.
+# These are injected as role:"system" messages.  Each starts with its
+# guard marker so the analysis methods can identify them independently
+# of the human-readable text.
 
-INJECT_WARNING = (
-    "WARNING: You are repeating the same tool call without making progress. "
+INJECT_WARNING = _GUARD_MARKER_WARN + (
+    " You are repeating the same tool call without making progress. "
     "If you are stuck, stop calling tools and summarise what you have so far."
 )
 
-INJECT_FINAL_WARNING = (
-    "FINAL WARNING: You are still repeating tool calls after the previous warning. "
+INJECT_FINAL_WARNING = _GUARD_MARKER_FINAL + (
+    " You are still repeating tool calls after the previous warning. "
     "Stop calling tools now and provide a summary of everything you have gathered."
 )
 
-INJECT_REMINDER = (
-    "REMINDER: Periodically check whether your tool calls are producing new "
+INJECT_REMINDER = _GUARD_MARKER_REMIND + (
+    " Periodically check whether your tool calls are producing new "
     "results. If you detect repetition, stop and provide a summary."
 )
 
@@ -230,15 +241,15 @@ class Pipe:
         )
 
     def _escalation_level(self, messages: list[dict]) -> int:
-        """Deduce escalation level from injected system messages.
+        """Deduce escalation level from injected guard markers.
         0 = clean, 1 = warning, 2 = final warning."""
         for msg in reversed(messages):
             if msg.get("role") != "system":
                 continue
             content = msg.get("content", "")
-            if "FINAL WARNING:" in content:
+            if _GUARD_MARKER_FINAL in content:
                 return 2
-            if "WARNING:" in content:
+            if _GUARD_MARKER_WARN in content:
                 return 1
         return 0
 
@@ -446,7 +457,7 @@ class Pipe:
         if self.valves.ENABLE_PREVENTIVE_REMINDER and not loop_detected and not runaway:
             user_count = sum(1 for m in messages if m.get("role") == "user")
             if user_count > 0 and user_count % self.valves.REMINDER_INTERVAL == 0:
-                if not self._last_system_contains(messages, "REMINDER:"):
+                if not self._last_system_contains(messages, _GUARD_MARKER_REMIND):
                     self._inject(messages, {
                         "role": "system",
                         "content": INJECT_REMINDER,
