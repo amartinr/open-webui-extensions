@@ -181,21 +181,18 @@ proxy), or a dict (non-streaming proxy).
 
 ## 5. Valves
 
-Only four backend valves. The model list comes from the gateway, not from
-configuration.
-
 | Valve | Type | Default | Description |
 |-------|------|---------|-------------|
 | `GATEWAY_BASE_URL` | str | `""` | Base URL for the OpenAI-compatible gateway |
 | `GATEWAY_AUTH_HEADER` | str | `"x-bf-vk"` | HTTP header name for the API key |
 | `GATEWAY_AUTH_VALUE` | str (password) | `""` | Credential value sent in the configured auth header |
 | `GATEWAY_CUSTOM_HEADERS` | str (JSON) | `""` | JSON object of extra HTTP headers. Supports template variables: `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` (e.g. `{"x-bf-dim-host": "myhost", "x-user": "{{USER_NAME}}"}`) |
-| `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning |
-| `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls per turn before force-termination |
-| `ENABLE_PREVENTIVE_REMINDER` | bool | True | Periodic self-evaluation reminder every N messages |
+| `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls in a turn before tools are removed (soft-block). Set to 0 to disable. |
+| `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning. Set to 0 to disable. |
+| `MAX_WARNINGS_BEFORE_TERMINATE` | int | 2 | Warnings before tools are removed (soft-block). Set to 0 to soft-block immediately on first loop detection. |
+| `ENABLE_PREVENTIVE_REMINDER` | bool | True | Inject periodic self-evaluation reminders |
 | `REMINDER_INTERVAL` | int | 3 | Inject preventive reminder every N user messages |
 | `INJECTION_POSITION` | Literal["prepend","append_system","append_user"] | `"prepend"` | Where to inject the warning message |
-| `MAX_WARNINGS_BEFORE_TERMINATE` | int | 2 | Escalation steps before force-termination |
 
 ---
 
@@ -372,314 +369,53 @@ def _last_system_contains(self, messages: list[dict], text: str) -> bool:
 
 ---
 
-## 9. Force-Termination
+## 9. Soft-block (replaces force-termination)
 
-When the pipe force-terminates, it returns a plain string — no LLM call.
+When the guard decides to stop an agent, it does **not** skip the LLM call.
+Instead, it removes `tools` from the request body and injects a system
+message instructing the agent to summarise. The LLM receives all tool
+results already in the chat and is forced to respond with text — it
+cannot call more tools because none are available.
 
-```
-I've stopped because this turn reached the limit of 15 tool calls
-without producing a final answer.
-
-Please try a more specific query or reduce the scope of your request.
-```
+This preserves all collected results and produces a useful final answer
+instead of a hardcoded guard message impersonating the agent.
 
 ---
 
-## 10. Complete Pipe Logic
+## 10. Architecture Summary
 
-```python
-from pydantic import BaseModel, Field
-from typing import Literal, Optional, AsyncGenerator
-import httpx
-import json
+The pipe is structured as a pipeline of independent phases, each one
+additive on the previous:
 
+### Phase 1 — Manifold Proxy
+- `pipes()` queries the gateway's `/models` endpoint
+- Caches results; falls back to cache on gateway failure
+- `pipe()` strips the pipe prefix from the model ID, forwards to gateway
 
-class Pipe:
-    class Valves(BaseModel):
-        GATEWAY_BASE_URL: str = Field(
-            default="",
-            description="Base URL for the OpenAI-compatible gateway (e.g. Bifrost).",
-        )
-        GATEWAY_AUTH_HEADER: str = Field(
-            default="x-bf-vk",
-            description="HTTP header name for the API key.",
-        )
-        GATEWAY_AUTH_VALUE: str = Field(
-            default="",
-            description="Credential value sent in the configured auth header.",
-            json_schema_extra={"input": {"type": "password"}},
-        )
-        GATEWAY_CUSTOM_HEADERS: str = Field(
-            default="",
-            description='JSON object of extra HTTP headers to send with every gateway request. '
-            'Example: {"x-bf-dim-host": "myhost"}.',
-        )
-        MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING: int = Field(
-            default=2,
-            description="Consecutive identical tool calls before first warning.",
-        )
-        MAX_TOOL_CALLS_PER_TURN: int = Field(
-            default=15,
-            description="Max tool calls in a turn before force-termination.",
-        )
-        ENABLE_PREVENTIVE_REMINDER: bool = Field(
-            default=True,
-            description="Inject periodic self-evaluation reminders.",
-        )
-        REMINDER_INTERVAL: int = Field(
-            default=3,
-            description="Inject preventive reminder every N user messages.",
-        )
-        INJECTION_POSITION: Literal["prepend", "append_system", "append_user"] = Field(
-            default="prepend",
-            description="Where to inject the warning message.",
-        )
-        MAX_WARNINGS_BEFORE_TERMINATE: int = Field(
-            default=2,
-            description="Escalation steps before force-termination.",
-        )
+### Phase 2 — Runaway Protection
+- `_extract_tool_calls_in_turn()` scans messages backwards from the end
+  until the last user message, collecting all tool_calls in the current turn
+- If the count reaches `MAX_TOOL_CALLS_PER_TURN`, the pipe **soft-blocks**
+  (removes tools, injects instruction, forwards)
 
-    def __init__(self):
-        self.valves = self.Valves()
-        self._models_cache: list[dict] = []
+### Phase 3 — Loop Detection & Escalation
+- `_has_consecutive_duplicates()` detects N identical consecutive calls
+- `_escalation_level()` scans existing system messages for guard markers
+  (`[GUARD_WARN]`, `[GUARD_FINAL]`) to determine current escalation level
+- Escalation ladder:
+  - Level 0 → inject WARNING (tools still available)
+  - Level 1 → inject FINAL WARNING (tools still available)
+  - Level 2 → soft-block (tools removed)
 
-    # ------------------------------------------------------------------
-    # Model discovery (manifold)
-    # ------------------------------------------------------------------
+### Phase 4 — Preventive Reminders
+- `_last_system_contains()` checks for existing guard markers
+- Every `REMINDER_INTERVAL` user messages, injects a REMINDER message
 
-    async def pipes(self) -> list[dict]:
-        """Query gateway for available models. Cache on success, fallback on failure."""
-        if not self.valves.GATEWAY_BASE_URL:
-            return [{"id": "config", "name": "⚠️ Configure gateway URL"}]
-
-        headers = self._build_gateway_headers()
-        url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/models"
-
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(url, headers=headers, timeout=10)
-                r.raise_for_status()
-                data = r.json()
-        except Exception:
-            return self._models_cache or [
-                {"id": "error", "name": "⚠️ Gateway unreachable"}
-            ]
-
-        self._models_cache = [
-            {"id": m["id"], "name": f"🛡️ {m.get('name', m['id'])}"}
-            for m in data.get("data", [])
-        ]
-        return self._models_cache
-
-    # ------------------------------------------------------------------
-    # Analysis
-    # ------------------------------------------------------------------
-
-    def _extract_tool_calls_in_turn(self, messages: list[dict]) -> list[dict]:
-        history = []
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if msg.get("role") == "user":
-                break
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg["tool_calls"]:
-                    try:
-                        args = json.loads(tc["function"]["arguments"])
-                    except (json.JSONDecodeError, KeyError):
-                        args = {}
-                    history.append({"name": tc["function"]["name"], "args": args})
-        history.reverse()
-        return history
-
-    def _has_consecutive_duplicates(
-        self, history: list[dict], threshold: int
-    ) -> bool:
-        if len(history) < threshold:
-            return False
-        recent = history[-threshold:]
-        first = recent[0]
-        return all(
-            c["name"] == first["name"] and c["args"] == first["args"]
-            for c in recent
-        )
-
-    def _escalation_level(self, messages: list[dict]) -> int:
-        for msg in reversed(messages):
-            if msg.get("role") != "system":
-                continue
-            content = msg.get("content", "")
-            if "FINAL WARNING:" in content:
-                return 2
-            if "WARNING:" in content:
-                return 1
-        return 0
-
-    def _last_system_contains(self, messages: list[dict], text: str) -> bool:
-        return any(
-            msg.get("role") == "system"
-            and text.lower() in msg.get("content", "").lower()
-            for msg in messages
-        )
-
-    # ------------------------------------------------------------------
-    # Injection
-    # ------------------------------------------------------------------
-
-    def _inject(self, messages: list[dict], message: dict) -> None:
-        pos = self.valves.INJECTION_POSITION
-        if pos == "prepend":
-            messages.insert(0, message)
-        elif pos == "append_system":
-            idx = -1
-            for i, m in enumerate(messages):
-                if m.get("role") == "system":
-                    idx = i
-            messages.insert(idx + 1, message)
-        elif pos == "append_user":
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get("role") == "user":
-                    messages.insert(i, message)
-                    return
-            messages.append(message)
-
-    # ------------------------------------------------------------------
-    # Gateway helpers
-    # ------------------------------------------------------------------
-
-    def _build_gateway_headers(self) -> dict:
-        """Build the headers dict for gateway requests."""
-        headers = {}
-        if self.valves.GATEWAY_AUTH_VALUE:
-            headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_AUTH_VALUE
-        if self.valves.GATEWAY_CUSTOM_HEADERS:
-            try:
-                extra = json.loads(self.valves.GATEWAY_CUSTOM_HEADERS)
-                if isinstance(extra, dict):
-                    headers.update(extra)
-            except json.JSONDecodeError:
-                pass
-        return headers
-
-    # ------------------------------------------------------------------
-    # Gateway proxy
-    # ------------------------------------------------------------------
-
-    async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator:
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as r:
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    if line:
-                        yield line
-
-    async def _call(self, payload: dict, headers: dict, url: str) -> dict:
-        async with httpx.AsyncClient(timeout=300) as client:
-            r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
-            return r.json()
-
-    # ------------------------------------------------------------------
-    # Main entry point
-    # ------------------------------------------------------------------
-
-    async def pipe(self, body: dict, __user__: Optional[dict] = None, __metadata__: Optional[dict] = None):
-        messages = body.get("messages", [])
-        if not messages:
-            return ""
-
-        # Strip pipe prefix from model ID
-        # "pipe-uuid.deepseek/deepseek-v4-flash" → "deepseek/deepseek-v4-flash"
-        real_model = body["model"].split(".", 1)[-1]
-
-        # --- Analysis -------------------------------------------------
-        history = self._extract_tool_calls_in_turn(messages)
-        total = len(history)
-        escalation = self._escalation_level(messages)
-        max_esc = self.valves.MAX_WARNINGS_BEFORE_TERMINATE
-
-        # --- Runaway prevention (immediate force-terminate) -----------
-        if (
-            self.valves.MAX_TOOL_CALLS_PER_TURN > 0
-            and total >= self.valves.MAX_TOOL_CALLS_PER_TURN
-        ):
-            return (
-                f"I've stopped because this turn reached the limit of "
-                f"{self.valves.MAX_TOOL_CALLS_PER_TURN} tool calls "
-                f"without producing a final answer.\n\n"
-                f"Please try a more specific query or reduce the scope "
-                f"of your request."
-            )
-
-        # --- Escalation: warn → final warn → terminate ----------------
-        loop_detected = (
-            history
-            and self.valves.MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING > 0
-            and self._has_consecutive_duplicates(
-                history,
-                self.valves.MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING,
-            )
-        )
-
-        if loop_detected:
-            if escalation >= max_esc:
-                return (
-                    f"I've stopped because I was repeating the same tool "
-                    f"call ({total} calls in this turn) without making "
-                    f"progress.\n\n"
-                    f"Please refine your query or check whether the tools "
-                    f"are returning useful results."
-                )
-            elif escalation == 1:
-                self._inject(messages, {
-                    "role": "system",
-                    "content": (
-                        "FINAL WARNING: You are still repeating tool "
-                        "calls despite receiving a warning. You MUST "
-                        "stop calling tools immediately. Provide a "
-                        "summary of everything you have gathered."
-                    ),
-                })
-            else:
-                self._inject(messages, {
-                    "role": "system",
-                    "content": (
-                        "WARNING: In this turn you called the same "
-                        "tool with the same arguments multiple times "
-                        "without achieving a different result. Stop "
-                        "and change strategy, or provide a summary."
-                    ),
-                })
-
-        # --- Preventive reminder --------------------------------------
-        if self.valves.ENABLE_PREVENTIVE_REMINDER and not loop_detected:
-            user_count = sum(1 for m in messages if m.get("role") == "user")
-            if user_count > 0 and user_count % self.valves.REMINDER_INTERVAL == 0:
-                if not self._last_system_contains(messages, "REMINDER:"):
-                    self._inject(messages, {
-                        "role": "system",
-                        "content": (
-                            "REMINDER: Periodically evaluate whether "
-                            "your tool calls are making progress. If "
-                            "you detect repetition without results, "
-                            "stop and provide a summary."
-                        ),
-                    })
-
-        # --- Forward to gateway ---------------------------------------
-        payload = {**body, "model": real_model, "messages": messages}
-
-        headers = {"Content-Type": "application/json", **self._build_gateway_headers()}
-
-        url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
-
-        try:
-            if body.get("stream", False):
-                return self._stream(payload, headers, url)
-            else:
-                return await self._call(payload, headers, url)
-        except Exception as e:
-            return f"Error calling gateway: {e}"
-```
+### Gateway proxy
+- `_stream()` forwards SSE lines from the gateway back to Open WebUI
+- `_call()` handles non-streaming requests
+- `_build_gateway_headers()` assembles auth, custom headers, and resolves
+  template variables (`{{USER_NAME}}`, `{{USER_ID}}`, etc.)
 
 ---
 
@@ -746,7 +482,7 @@ pipe()  ← continuation
   ├─ escalation=2 ≥ MAX_WARNINGS(2)
   └─ Return plain string — NO LLM call
 
-🛑 Force-terminated. Zero wasted tokens.
+🛑 Soft-blocked. LLM forced to summarise with results already gathered.
 ```
 
 ---
@@ -759,8 +495,8 @@ pipe()  ← continuation
 | Loop warning | ~60-80 | Injected system message |
 | Final warning | ~70-90 | Second injection |
 | Preventive reminder | ~50-70 | Every N user messages |
-| Force-termination | **0 LLM tokens** | Pipe returns string, skips LLM |
-| Runaway limit | **0 LLM tokens** | Pipe returns string |
+| Soft-block (runaway limit) | ~60-80 (system msg) + LLM response | Pipe removes tools, injects instruction, forwards |
+| Soft-block (loop) | ~60-80 (system msg) + LLM response | Same — all results preserved, LLM summarises |
 
 ---
 
