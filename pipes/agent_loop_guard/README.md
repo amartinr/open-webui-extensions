@@ -74,18 +74,17 @@ Level 0: Silent monitoring
   │  Consecutive duplicate tool calls detected
   ▼
 Level 1: WARNING (tools still available)
-  "WARNING: In this turn you called the same tool with the same
-   arguments multiple times…"
+  "{tool_name} called {total}x with same args. Change approach or summarize."
   │  Agent ignores → continues looping
   ▼
 Level 2: FINAL WARNING (tools still available)
-  "FINAL WARNING: You are still repeating tool calls despite
-   receiving a warning…"
+  "{tool_name} called {total}x. Still repeating. Stop now and summarize."
   │  Agent still ignores
   ▼
-SOFT-BLOCK: tools removed from body, gateway forwarded
-  Agent receives results + "provide your final answer"
-  → responds with text. No more tools.
+SOFT-BLOCK: only the looping tool removed from body["tools"]
+  Agent receives instruction + all collected results, can use other tools
+  "TOOL REMOVED: {tool_name} blocked after {total} identical calls."
+  → Agent has other tools available or can summarise.
 ```
 
 ---
@@ -109,7 +108,9 @@ SOFT-BLOCK: tools removed from body, gateway forwarded
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before soft-block. `0` = disabled |
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | `2` | Identical consecutive calls before first warning. `0` = disabled |
 | `MAX_WARNINGS_BEFORE_TERMINATE` | `2` | Warnings before soft-block. `0` = soft-block on first detection |
-| `INJECTION_POSITION` | `"append_system"` | Where to inject: `"prepend"`, `"append_system"`, or `"append_user"` |
+| `SHOW_TOOL_COUNTER` | `True` | Append descending counter (`remaining tool calls: N`) to every tool result |
+| `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
+| `INJECTION_POSITION` | `"append_user"` | Where to inject: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |
 
 ### Custom headers with templates
 
@@ -139,7 +140,7 @@ for any gateway destination.
 | Detect consecutive duplicates | ✅ | ✅ |
 | Inject warning messages | ✅ | ✅ |
 | **Remove tools from body** | ❌ Unreliable | ✅ **Definitive** |
-| **Force-terminate / skip LLM call** | ❌ Must return body | ✅ Returns string |
+| **Force-terminate / skip LLM call** | ❌ Must return body | ✅ Returns string (soft-block preferred) |
 | **Manifold** (dynamic model discovery) | ❌ | ✅ |
 | **Proxy + prefix stripping** | ❌ | ✅ |
 
@@ -165,10 +166,14 @@ HTTP requests to your gateway via `httpx.AsyncClient`. This means:
 
 See [PLAN.md](./PLAN.md) for details.
 
-- **Phase 6 — Tool Allowlist/Blocklist**: restrict which tools the agent
-  can see by name (e.g. block `delete_file`, allowlist only `calculator`)
 - **Per-model overrides**: different thresholds per sub-pipe
 - **Production hardening**: comprehensive tests, edge case coverage
+
+### Implemented
+
+- **Phase 6 — Tool Blocklist** (`TOOL_BLOCKLIST` valve): remove tools from
+  the agent's tool list by name (e.g. block `delete_file`, `terminal_execute`).
+  Matching is exact — `fetch_url` does not block `smart_fetch_url`.
 
 ---
 
