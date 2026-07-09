@@ -17,37 +17,57 @@ log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
-# Stable guard markers (used by detection logic, independent of message text)
+# Guard messages (structured with metadata, composed at injection time)
 # --------------------------------------------------------------------------
-# _escalation_level() and _last_system_contains() scan for these tokens.
-# You can freely rewrite the INJECT_* messages below — as long as the
-# marker prefix stays, detection keeps working.
+# Each entry has:
+#   marker — stable token for detection (_escalation_level, etc.)
+#   text   — human-readable message sent to the LLM
+#   level  — 0=reminder, 1=warning, 2=final
+#
+# The composed string sent to the LLM is: marker + " " + text
 
-_GUARD_MARKER_WARN = "[GUARD_WARN]"
-_GUARD_MARKER_FINAL = "[GUARD_FINAL]"
-_GUARD_MARKER_REMIND = "[GUARD_REMIND]"
+_GUARD_MESSAGES = {
+    "warning": {
+        "marker": "[GUARD_WARN]",
+        "level": 1,
+        "text": (
+            "You are repeating the same tool call without making progress. "
+            "If you are stuck, stop calling tools and summarise what you"
+            " have so far."
+        ),
+    },
+    "final": {
+        "marker": "[GUARD_FINAL]",
+        "level": 2,
+        "text": (
+            "You are still repeating tool calls after the previous warning. "
+            "Stop calling tools now and provide a summary of everything you"
+            " have gathered."
+        ),
+    },
+    "reminder": {
+        "marker": "[GUARD_REMIND]",
+        "level": 0,
+        "text": (
+            "Periodically check whether your tool calls are producing new"
+            " results. If you detect repetition, stop and provide a"
+            " summary."
+        ),
+    },
+}
 
-# --------------------------------------------------------------------------
-# Injection message templates
-# --------------------------------------------------------------------------
-# These are injected as role:"system" messages.  Each starts with its
-# guard marker so the analysis methods can identify them independently
-# of the human-readable text.
 
-INJECT_WARNING = _GUARD_MARKER_WARN + (
-    " You are repeating the same tool call without making progress. "
-    "If you are stuck, stop calling tools and summarise what you have so far."
-)
+def _compose(msg: dict) -> str:
+    """Compose a guard message string for the LLM: marker + text."""
+    return f"{msg['marker']} {msg['text']}"
 
-INJECT_FINAL_WARNING = _GUARD_MARKER_FINAL + (
-    " You are still repeating tool calls after the previous warning. "
-    "Stop calling tools now and provide a summary of everything you have gathered."
-)
 
-INJECT_REMINDER = _GUARD_MARKER_REMIND + (
-    " Periodically check whether your tool calls are producing new "
-    "results. If you detect repetition, stop and provide a summary."
-)
+def _guard_by_marker(marker: str) -> dict | None:
+    """Look up a guard message entry by its marker string."""
+    for entry in _GUARD_MESSAGES.values():
+        if entry["marker"] == marker:
+            return entry
+    return None
 
 
 def _runaway_instruction(total: int, max_calls: int) -> str:
@@ -243,13 +263,15 @@ class Pipe:
     def _escalation_level(self, messages: list[dict]) -> int:
         """Deduce escalation level from injected guard markers.
         0 = clean, 1 = warning, 2 = final warning."""
-        for msg in reversed(messages):
-            if msg.get("role") != "system":
+        msg_final = _GUARD_MESSAGES["final"]
+        msg_warn = _GUARD_MESSAGES["warning"]
+        for m in reversed(messages):
+            if m.get("role") != "system":
                 continue
-            content = msg.get("content", "")
-            if _GUARD_MARKER_FINAL in content:
+            content = m.get("content", "")
+            if msg_final["marker"] in content:
                 return 2
-            if _GUARD_MARKER_WARN in content:
+            if msg_warn["marker"] in content:
                 return 1
         return 0
 
@@ -444,23 +466,23 @@ class Pipe:
                 # Final warning — inject and forward normally (tools still available)
                 self._inject(messages, {
                     "role": "system",
-                    "content": INJECT_FINAL_WARNING,
+                    "content": _compose(_GUARD_MESSAGES["final"]),
                 })
             else:
                 # First warning — inject and forward normally
                 self._inject(messages, {
                     "role": "system",
-                    "content": INJECT_WARNING,
+                    "content": _compose(_GUARD_MESSAGES["warning"]),
                 })
 
         # --- Preventive reminder --------------------------------------
         if self.valves.ENABLE_PREVENTIVE_REMINDER and not loop_detected and not runaway:
             user_count = sum(1 for m in messages if m.get("role") == "user")
             if user_count > 0 and user_count % self.valves.REMINDER_INTERVAL == 0:
-                if not self._last_system_contains(messages, _GUARD_MARKER_REMIND):
+                if not self._last_system_contains(messages, _GUARD_MESSAGES["reminder"]["marker"]):
                     self._inject(messages, {
                         "role": "system",
-                        "content": INJECT_REMINDER,
+                        "content": _compose(_GUARD_MESSAGES["reminder"]),
                     })
 
         # --- Forward to gateway ---------------------------------------
