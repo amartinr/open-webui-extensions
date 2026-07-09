@@ -16,6 +16,45 @@ import logging
 log = logging.getLogger(__name__)
 
 
+# --------------------------------------------------------------------------
+# Injection message templates
+# --------------------------------------------------------------------------
+# These are injected as role:"system" messages.  Keep detection markers
+# (WARNING:, FINAL WARNING:, REMINDER:) stable — _escalation_level() and
+# _last_system_contains() scan for them verbatim.
+
+INJECT_WARNING = (
+    "WARNING: You are repeating the same tool call without making progress. "
+    "If you are stuck, stop calling tools and summarise what you have so far."
+)
+
+INJECT_FINAL_WARNING = (
+    "FINAL WARNING: You are still repeating tool calls after the previous warning. "
+    "Stop calling tools now and provide a summary of everything you have gathered."
+)
+
+INJECT_REMINDER = (
+    "REMINDER: Periodically check whether your tool calls are producing new "
+    "results. If you detect repetition, stop and provide a summary."
+)
+
+
+def _runaway_instruction(total: int, max_calls: int) -> str:
+    return (
+        f"TOOL CALL LIMIT REACHED: You have used {total} tool calls "
+        f"(max {max_calls}). You cannot call more tools this turn. "
+        f"Provide your final answer using the information you have gathered."
+    )
+
+
+def _loop_soft_block_instruction(total: int) -> str:
+    return (
+        f"TOOL ACCESS REVOKED: You made {total} identical tool calls without "
+        f"making progress. All tool access has been removed for this turn. "
+        f"Provide your final answer now."
+    )
+
+
 class Pipe:
     class Valves(BaseModel):
         GATEWAY_BASE_URL: str = Field(
@@ -368,12 +407,7 @@ class Pipe:
                     f"Tool call limit reached: {total} calls in this turn "
                     f"(max {self.valves.MAX_TOOL_CALLS_PER_TURN})"
                 ),
-                instruction=(
-                    f"TOOL CALL LIMIT REACHED: You have used {total} tool calls "
-                    f"(max {self.valves.MAX_TOOL_CALLS_PER_TURN}). You must stop "
-                    f"calling tools and provide your final answer using the "
-                    f"information you have already gathered."
-                ),
+                instruction=_runaway_instruction(total, self.valves.MAX_TOOL_CALLS_PER_TURN),
             )
 
         # --- Loop detection (consecutive identical tool calls) ---------
@@ -393,32 +427,19 @@ class Pipe:
                     reason=(
                         f"Repeated tool call detected: {total} calls in this turn"
                     ),
-                    instruction=(
-                        f"FINAL WARNING: You have made {total} identical tool calls "
-                        f"without making progress. All tool access has been revoked "
-                        f"for this turn. Provide your final answer now with what you "
-                        f"have gathered."
-                    ),
+                    instruction=_loop_soft_block_instruction(total),
                 )
             elif escalation == 1:
                 # Final warning — inject and forward normally (tools still available)
                 self._inject(messages, {
                     "role": "system",
-                    "content": (
-                        "FINAL WARNING: You are still repeating tool calls despite "
-                        "receiving a warning. You MUST stop calling tools immediately. "
-                        "Provide a summary of everything you have gathered."
-                    ),
+                    "content": INJECT_FINAL_WARNING,
                 })
             else:
                 # First warning — inject and forward normally
                 self._inject(messages, {
                     "role": "system",
-                    "content": (
-                        "WARNING: In this turn you called the same tool with the "
-                        "same arguments multiple times without achieving a different "
-                        "result. Stop and change strategy, or provide a summary."
-                    ),
+                    "content": INJECT_WARNING,
                 })
 
         # --- Preventive reminder --------------------------------------
@@ -428,11 +449,7 @@ class Pipe:
                 if not self._last_system_contains(messages, "REMINDER:"):
                     self._inject(messages, {
                         "role": "system",
-                        "content": (
-                            "REMINDER: Periodically evaluate whether your tool calls "
-                            "are making progress. If you detect repetition without "
-                            "results, stop and provide a summary."
-                        ),
+                        "content": INJECT_REMINDER,
                     })
 
         # --- Forward to gateway ---------------------------------------
