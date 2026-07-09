@@ -68,13 +68,11 @@ class Pipe:
             default=15,
             description="Max tool calls in a turn before tools are removed (soft-block). Set to 0 to disable.",
         )
-        MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING: int = Field(
-            default=2,
-            description="Consecutive identical tool calls before first warning. Set to 0 to disable.",
-        )
-        MAX_WARNINGS_BEFORE_TERMINATE: int = Field(
-            default=2,
-            description="Warnings before tools are removed (soft-block). Set to 0 to soft-block immediately on first loop detection.",
+        MAX_CONSECUTIVE_BEFORE_BLOCK: int = Field(
+            default=4,
+            ge=3,
+            description="Consecutive identical tool calls before soft-block (min 3). "
+            "Warnings are spaced automatically: WARNING at 50%, FINAL WARNING at 75%.",
         )
 
         INJECTION_POSITION: Literal["append_user", "merge_last_tool"] = Field(
@@ -94,7 +92,6 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self._models_cache: list[dict] = []
-        self._warnings_injected = 0
         self._merge_injected = False
 
     # ------------------------------------------------------------------
@@ -265,18 +262,24 @@ class Pipe:
         history.reverse()
         return history
 
-    def _has_consecutive_duplicates(
-        self, history: list[dict], threshold: int
-    ) -> bool:
-        """Check if the last N tool calls are identical (same name + same args)."""
-        if len(history) < threshold:
-            return False
-        recent = history[-threshold:]
-        first = recent[0]
-        return all(
-            c["name"] == first["name"] and c["args"] == first["args"]
-            for c in recent
-        )
+    def _count_consecutive_duplicates(
+        self, history: list[dict]
+    ) -> tuple[int, str | None, dict | None]:
+        """Count consecutive identical tool calls from the end of history.
+
+        Returns (count, name, args) of the repeated tool.
+        count=1 means the last call is unique (no consecutive duplicate).
+        """
+        if not history:
+            return 0, None, None
+        last = history[-1]
+        count = 0
+        for tc in reversed(history):
+            if tc["name"] == last["name"] and tc["args"] == last["args"]:
+                count += 1
+            else:
+                break
+        return count, last["name"], last["args"]
 
     # ------------------------------------------------------------------
     # Tool counter
@@ -404,10 +407,7 @@ class Pipe:
 
         # Reset per-turn state at the start of a new user turn
         if total == 0:
-            self._warnings_injected = 0
             self._merge_injected = False
-
-        max_esc = self.valves.MAX_WARNINGS_BEFORE_TERMINATE
 
         # --- Helper: soft-block (remove tools + inject + forward) -----
         async def _soft_block(
@@ -496,19 +496,22 @@ class Pipe:
             )
 
         # --- Loop detection (consecutive identical tool calls) ---------
-        loop_detected = (
-            history
-            and self.valves.MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING > 0
-            and self._has_consecutive_duplicates(
-                history,
-                self.valves.MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING,
-            )
-        )
+        consecutive, bad_tool, _ = self._count_consecutive_duplicates(history)
+        block_threshold = self.valves.MAX_CONSECUTIVE_BEFORE_BLOCK
 
-        if loop_detected:
-            bad_tool = history[-1]["name"]
-            if self._warnings_injected >= max_esc:
-                # Already warned enough → remove only the looping tool
+        if consecutive >= 2:
+            # Formula-based escalation: each level fires exactly once.
+            #   consecutive == 2                                  → WARNING
+            #   consecutive == final_pos (if N > 3)                → FINAL WARNING
+            #   consecutive >= N                                   → soft-block
+            #   otherwise                                         → silent
+            #
+            # final_pos is placed at ~60% of the range [2, N) so FINAL WARNING
+            # has separation from the block when N is large enough.
+            final_pos = 2 + (block_threshold - 2) * 3 // 5
+
+            if consecutive >= block_threshold:
+                # Soft-block: remove only the looping tool
                 return await _soft_block(
                     reason=(
                         f"Repeated tool call detected: {total} calls in this turn"
@@ -516,13 +519,12 @@ class Pipe:
                     instruction=_loop_blocked_tool_instruction(bad_tool, total),
                     blocked_tool=bad_tool,
                 )
-            elif self._warnings_injected == 1:
-                # Final warning — inject and forward normally (tools still available)
+            elif block_threshold > 3 and consecutive == final_pos:
+                # Final warning (tools still available)
                 self._inject(messages, {
                     "role": "system",
                     "content": _final_warning_msg(bad_tool, total),
                 })
-                self._warnings_injected = 2
                 if __event_emitter__:
                     try:
                         await __event_emitter__(
@@ -539,13 +541,12 @@ class Pipe:
                         )
                     except Exception:
                         log.warning("Failed to emit FINAL WARNING event (non-fatal)", exc_info=True)
-            else:
-                # First warning — inject and forward normally
+            elif consecutive == 2:
+                # First warning (tools still available)
                 self._inject(messages, {
                     "role": "system",
                     "content": _warning_msg(bad_tool, total),
                 })
-                self._warnings_injected = 1
                 if __event_emitter__:
                     try:
                         await __event_emitter__(
