@@ -107,6 +107,10 @@ class Pipe:
             default="append_user",
             description="Where to inject guard messages: 'append_user' (before last user msg) or 'merge_last_tool' (append to last tool result, after a separator).",
         )
+        SHOW_TOOL_COUNTER: bool = Field(
+            default=True,
+            description="Append 'remaining tool calls: N' to the last tool result in each turn.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -251,6 +255,25 @@ class Pipe:
             if msg_warn["marker"] in content:
                 return 1
         return 0
+
+    # ------------------------------------------------------------------
+    # Tool counter
+    # ------------------------------------------------------------------
+
+    def _append_tool_counter(self, messages: list[dict], total: int, max_calls: int) -> None:
+        """Append a descending counter to the last tool result in the current turn.
+        The counter tells the agent how many tool calls it has left."""
+        if max_calls <= 0:
+            return
+        remaining = max(0, max_calls - total)
+        # Scan backwards to find the last tool message in the current turn
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                break
+            if messages[i].get("role") == "tool":
+                original = messages[i].get("content", "")
+                messages[i]["content"] = f"{original}\n---\nremaining tool calls: {remaining}"
+                return
 
     # ------------------------------------------------------------------
     # Injection helper
@@ -449,6 +472,14 @@ class Pipe:
                     "role": "system",
                     "content": _compose(_GUARD_MESSAGES["warning"]),
                 })
+
+        # --- Tool counter ----------------------------------------------
+        if (
+            self.valves.SHOW_TOOL_COUNTER
+            and total > 0
+            and self.valves.MAX_TOOL_CALLS_PER_TURN > 0
+        ):
+            self._append_tool_counter(messages, total, self.valves.MAX_TOOL_CALLS_PER_TURN)
 
         # --- Forward to gateway ---------------------------------------
         payload = {**body, "model": real_model, "messages": messages}
