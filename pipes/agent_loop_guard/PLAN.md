@@ -135,32 +135,38 @@ tool is removed, others remain available).
 
 - `_has_consecutive_duplicates()` — checks if the last N tool calls in
   the turn are identical (same name + same args).
-- `_escalation_level()` — scans system and tool messages for
-  `[GUARD_WARN]` / `[GUARD_FINAL]` markers to deduce current level.
+- `self._warnings_injected` — instance variable tracking escalation level
+  (resets to 0 at the start of each user turn).
 - `_inject()` — inserts guard messages at configured position
   (see Phase 4 for injection options).
-- Warning/final-warning message templates (short, concise).
+- Warning/final-warning message helpers (`_warning_msg`, `_final_warning_msg`).
 
-### Guard messages
+### Guard message helpers
 
-```
-[GUARD_WARN] Tool call repeated. No progress. Summarize or change approach.
-[GUARD_FINAL] Still repeating. Stop now and summarize what you have.
+```python
+def _warning_msg(tool_name: str, total: int) -> str:
+    return f"{tool_name} called {total}x with same args. Change approach or summarize."
+
+def _final_warning_msg(tool_name: str, total: int) -> str:
+    return f"{tool_name} called {total}x. Still repeating. Stop now and summarize."
 ```
 
 ### Escalation ladder
 
 ```
-Level 0: Silent monitoring
+Level 0: Silent monitoring (_warnings_injected = 0)
   │  Consecutive duplicate tool calls detected
   ▼
-Level 1: [GUARD_WARN] (tools still available)
+Level 1: WARNING injected (_warnings_injected → 1)
+  "{tool_name} called {total}x with same args. Change approach or summarize."
   │  Agent ignores → continues looping
   ▼
-Level 2: [GUARD_FINAL] (tools still available)
+Level 2: FINAL WARNING injected (_warnings_injected → 2)
+  "{tool_name} called {total}x. Still repeating. Stop now and summarize."
   │  Agent still ignores
   ▼
-LOOP SOFT-BLOCK: only the offending tool removed from body["tools"]
+LOOP SOFT-BLOCK (_warnings_injected >= MAX_WARNINGS_BEFORE_TERMINATE)
+  Only the offending tool removed from body["tools"].
   Agent can still use other tools or summarise.
 ```
 
@@ -171,28 +177,31 @@ pipe(body)
   1. messages = body["messages"]
   2. real_model = body["model"].split(".", 1)[-1]
   3. history      = _extract_tool_calls_in_turn(messages)
-  4. escalation   = _escalation_level(messages)
+  4. total        = len(history)
   5. max_esc      = MAX_WARNINGS_BEFORE_TERMINATE
 
-  6. if len(history) >= MAX_TOOL_CALLS_PER_TURN > 0:
-       _soft_block(None)       ← removal all tools (runaway)
+  6. if total == 0:
+       self._warnings_injected = 0    ← reset at new user turn
 
-  7. loop = _has_consecutive_duplicates(history, MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING)
+  7. if total >= MAX_TOOL_CALLS_PER_TURN > 0:
+       _soft_block(None)              ← remove all tools (runaway)
 
-  8. if loop:
-       if escalation >= max_esc → _soft_block(bad_tool)  ← remove only looping tool
-       elif escalation == 1     → inject FINAL WARNING (tools still available)
-       else                     → inject WARNING (tools still available)
+  8. loop = _has_consecutive_duplicates(history, MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING)
 
-  9. Forward to gateway
+  9. if loop:
+       if self._warnings_injected >= max_esc → _soft_block(bad_tool)  ← remove only looping tool
+       elif self._warnings_injected == 1     → inject FINAL WARNING, _warnings_injected = 2
+       else                                  → inject WARNING, _warnings_injected = 1
+
+ 10. Forward to gateway (tools still available, unless soft-blocked)
 ```
 
 ### Validation
 
 - `threshold=2, max_warnings=2, max_tool_calls=15`
-- Turn: `[search("X"), search("X")]` → loop detected, escalate=0 → inject WARNING
-- Turn: `[search("X")×3]` → loop detected, escalate=1 → inject FINAL WARNING
-- Turn: `[search("X")×4]` → loop detected, escalate=2 ≥ max_warnings → **soft-block** (only `search` removed from tools, forward to gateway)
+- Turn: `[search("X"), search("X")]` → loop detected, _warnings_injected=0 → inject WARNING
+- Turn: `[search("X")×3]` → loop detected, _warnings_injected=1 → inject FINAL WARNING
+- Turn: `[search("X")×4]` → loop detected, _warnings_injected=2 ≥ max_warnings → **soft-block** (only `search` removed from tools, forward to gateway)
 - Turn: `[search("X"), search("Y")]` → **no** loop (different args).
 - Turn: `[search("X"), fetch("X")]` → **no** loop (different tool).
 - `MAX_WARNINGS_BEFORE_TERMINATE=0` → soft-block on first loop detection.
@@ -217,8 +226,8 @@ positions for guard messages.
     before the last `user` message.
   - `"merge_last_tool"`: append guard message to the last tool result
     in the current turn, after a `---` separator and the counter.
-- `_escalation_level()` updated to scan both `system` and `tool`
-  messages for markers (needed for `merge_last_tool`).
+- `_inject()` updated to support `merge_last_tool` position (appends guard
+  message to the last tool result instead of inserting a new message).
 
 ### Tool counter format
 
@@ -237,7 +246,8 @@ result of web_search...
 ---
 remaining tool calls: 12
 
-[GUARD_WARN] Tool call repeated. No progress. Summarize or change approach.
+---
+web_search called 2x with same args. Change approach or summarize.
 ```
 
 ### Soft-block messages (short)
@@ -245,7 +255,7 @@ remaining tool calls: 12
 | Type | Message |
 |:----:|---------|
 | Runaway | `TOOL LIMIT: {total}/{max} used. No more tools this turn. Summarize now.` |
-| Loop (tool removed) | `TOOL REMOVED: {tool_name} blocked after repeated identical calls. Other tools still available. Summarize or continue.` |
+| Loop (tool removed) | `TOOL REMOVED: {tool_name} blocked after {total} identical calls. Other tools still available. Summarize or continue.` |
 
 ### Validation
 
@@ -399,7 +409,7 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 
         │
         └── Phase 2 adds one method (_extract_tool_calls_in_turn)
              │
-             └── Phase 3 adds _has_consecutive_duplicates, _escalation_level, _inject
+             └── Phase 3 adds _has_consecutive_duplicates, _warnings_injected tracking, _inject
                   │
                   └── Phase 4 adds _append_tool_counter, INJECTION_POSITION options
                        │

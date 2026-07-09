@@ -497,11 +497,12 @@ OWUI executes tool
 
 pipe()  ← continuation
   ├─ history = [get_weather("Paris") × 4]
-  ├─ escalation=2 ≥ MAX_WARNINGS(2)
-  └─ Return plain string — NO LLM call
+  ├─ _warnings_injected=2 ≥ MAX_WARNINGS(2)
+  └─ _soft_block(bad_tool="get_weather")
 
-🛑 Soft-blocked: only `get_weather` removed from tools, instruction injected,
-    forwarded to gateway. LLM receives all results but cannot call `get_weather`.
+🛑 Soft-blocked: only `get_weather` removed from body["tools"], instruction
+    injected, forwarded to gateway. LLM receives all results but cannot call
+    `get_weather`. Other tools (if any) remain available.
 ```
 
 ---
