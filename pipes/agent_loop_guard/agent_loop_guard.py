@@ -21,10 +21,18 @@ class Pipe:
             default="",
             description="Base URL for the OpenAI-compatible gateway (e.g. Bifrost).",
         )
+        GATEWAY_AUTH_HEADER: str = Field(
+            default="x-bf-vk",
+            description="HTTP header name for the API key (e.g. 'Authorization', 'x-bf-vk', 'x-api-key').",
+        )
         GATEWAY_API_KEY: str = Field(
             default="",
-            description="API key for gateway authentication.",
+            description="API key value sent in the configured auth header.",
             json_schema_extra={"input": {"type": "password"}},
+        )
+        GATEWAY_DIM_HOST: str = Field(
+            default="",
+            description="Value for the x-bf-dim-host header (Bifrost routing). Leave empty if not needed.",
         )
 
     def __init__(self):
@@ -40,10 +48,7 @@ class Pipe:
         if not self.valves.GATEWAY_BASE_URL:
             return [{"id": "config", "name": "⚠️ Configure gateway URL"}]
 
-        headers = {}
-        if self.valves.GATEWAY_API_KEY:
-            headers["Authorization"] = f"Bearer {self.valves.GATEWAY_API_KEY}"
-
+        headers = self._build_gateway_headers()
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/models"
 
         try:
@@ -63,6 +68,19 @@ class Pipe:
         ]
         log.info("Model discovery: %d models cached", len(self._models_cache))
         return self._models_cache
+
+    # ------------------------------------------------------------------
+    # Gateway helpers
+    # ------------------------------------------------------------------
+
+    def _build_gateway_headers(self) -> dict:
+        """Build the headers dict for gateway requests."""
+        headers = {}
+        if self.valves.GATEWAY_API_KEY:
+            headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_API_KEY
+        if self.valves.GATEWAY_DIM_HOST:
+            headers["x-bf-dim-host"] = self.valves.GATEWAY_DIM_HOST
+        return headers
 
     # ------------------------------------------------------------------
     # Gateway proxy
@@ -107,9 +125,7 @@ class Pipe:
         real_model = body["model"].split(".", 1)[-1]
 
         # Build headers and URL for the gateway.
-        headers = {"Content-Type": "application/json"}
-        if self.valves.GATEWAY_API_KEY:
-            headers["Authorization"] = f"Bearer {self.valves.GATEWAY_API_KEY}"
+        headers = {"Content-Type": "application/json", **self._build_gateway_headers()}
 
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 

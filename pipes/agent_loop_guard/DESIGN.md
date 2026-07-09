@@ -173,13 +173,15 @@ proxy), or a dict (non-streaming proxy).
 
 ## 5. Valves
 
-Only two backend valves. The model list comes from the gateway, not from
+Only three backend valves. The model list comes from the gateway, not from
 configuration.
 
 | Valve | Type | Default | Description |
 |-------|------|---------|-------------|
 | `GATEWAY_BASE_URL` | str | `""` | Base URL for the OpenAI-compatible gateway |
-| `GATEWAY_API_KEY` | str (password) | `""` | API key for gateway authentication |
+| `GATEWAY_AUTH_HEADER` | str | `"x-bf-vk"` | HTTP header name for the API key |
+| `GATEWAY_API_KEY` | str (password) | `""` | API key value sent in the configured auth header |
+| `GATEWAY_DIM_HOST` | str | `""` | Value for the `x-bf-dim-host` header (Bifrost routing) |
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning |
 | `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls per turn before force-termination |
 | `ENABLE_PREVENTIVE_REMINDER` | bool | True | Periodic self-evaluation reminder every N messages |
@@ -204,8 +206,7 @@ async def pipes(self):
     if not self.valves.GATEWAY_BASE_URL:
         return [{"id": "config", "name": "⚠️ Configure gateway URL"}]
 
-    headers = {"Authorization": f"Bearer {self.valves.GATEWAY_API_KEY}"} \
-        if self.valves.GATEWAY_API_KEY else {}
+    headers = self._build_gateway_headers()
     url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/models"
 
     try:
@@ -391,10 +392,18 @@ class Pipe:
             default="",
             description="Base URL for the OpenAI-compatible gateway (e.g. Bifrost).",
         )
+        GATEWAY_AUTH_HEADER: str = Field(
+            default="x-bf-vk",
+            description="HTTP header name for the API key.",
+        )
         GATEWAY_API_KEY: str = Field(
             default="",
-            description="API key for gateway authentication.",
+            description="API key value sent in the configured auth header.",
             json_schema_extra={"input": {"type": "password"}},
+        )
+        GATEWAY_DIM_HOST: str = Field(
+            default="",
+            description="Value for the x-bf-dim-host header (Bifrost routing).",
         )
         MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING: int = Field(
             default=2,
@@ -434,8 +443,7 @@ class Pipe:
         if not self.valves.GATEWAY_BASE_URL:
             return [{"id": "config", "name": "⚠️ Configure gateway URL"}]
 
-        headers = {"Authorization": f"Bearer {self.valves.GATEWAY_API_KEY}"} \
-            if self.valves.GATEWAY_API_KEY else {}
+        headers = self._build_gateway_headers()
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/models"
 
         try:
@@ -524,6 +532,19 @@ class Pipe:
                     messages.insert(i, message)
                     return
             messages.append(message)
+
+    # ------------------------------------------------------------------
+    # Gateway helpers
+    # ------------------------------------------------------------------
+
+    def _build_gateway_headers(self) -> dict:
+        """Build the headers dict for gateway requests."""
+        headers = {}
+        if self.valves.GATEWAY_API_KEY:
+            headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_API_KEY
+        if self.valves.GATEWAY_DIM_HOST:
+            headers["x-bf-dim-host"] = self.valves.GATEWAY_DIM_HOST
+        return headers
 
     # ------------------------------------------------------------------
     # Gateway proxy
@@ -633,9 +654,7 @@ class Pipe:
         # --- Forward to gateway ---------------------------------------
         payload = {**body, "model": real_model, "messages": messages}
 
-        headers = {"Content-Type": "application/json"}
-        if self.valves.GATEWAY_API_KEY:
-            headers["Authorization"] = f"Bearer {self.valves.GATEWAY_API_KEY}"
+        headers = {"Content-Type": "application/json", **self._build_gateway_headers()}
 
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 
