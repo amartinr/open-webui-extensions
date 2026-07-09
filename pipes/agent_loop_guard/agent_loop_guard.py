@@ -30,9 +30,13 @@ class Pipe:
             description="API key value sent in the configured auth header.",
             json_schema_extra={"input": {"type": "password"}},
         )
-        GATEWAY_DIM_HOST: str = Field(
+        GATEWAY_HOST_HEADER: str = Field(
+            default="x-bf-dim-host",
+            description="HTTP header name for the host routing value (e.g. 'x-bf-dim-host').",
+        )
+        GATEWAY_HOST_VALUE: str = Field(
             default="",
-            description="Value for the x-bf-dim-host header (Bifrost routing). Leave empty if not needed.",
+            description="Value sent in the host routing header (e.g. Bifrost dimension). Leave empty if not needed.",
         )
 
     def __init__(self):
@@ -78,8 +82,8 @@ class Pipe:
         headers = {}
         if self.valves.GATEWAY_API_KEY:
             headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_API_KEY
-        if self.valves.GATEWAY_DIM_HOST:
-            headers["x-bf-dim-host"] = self.valves.GATEWAY_DIM_HOST
+        if self.valves.GATEWAY_HOST_VALUE:
+            headers[self.valves.GATEWAY_HOST_HEADER] = self.valves.GATEWAY_HOST_VALUE
         return headers
 
     # ------------------------------------------------------------------

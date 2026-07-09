@@ -173,7 +173,7 @@ proxy), or a dict (non-streaming proxy).
 
 ## 5. Valves
 
-Only three backend valves. The model list comes from the gateway, not from
+Only four backend valves. The model list comes from the gateway, not from
 configuration.
 
 | Valve | Type | Default | Description |
@@ -181,7 +181,8 @@ configuration.
 | `GATEWAY_BASE_URL` | str | `""` | Base URL for the OpenAI-compatible gateway |
 | `GATEWAY_AUTH_HEADER` | str | `"x-bf-vk"` | HTTP header name for the API key |
 | `GATEWAY_API_KEY` | str (password) | `""` | API key value sent in the configured auth header |
-| `GATEWAY_DIM_HOST` | str | `""` | Value for the `x-bf-dim-host` header (Bifrost routing) |
+| `GATEWAY_HOST_HEADER` | str | `"x-bf-dim-host"` | HTTP header name for the host routing value |
+| `GATEWAY_HOST_VALUE` | str | `""` | Value sent in the host routing header (e.g. Bifrost dimension) |
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning |
 | `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls per turn before force-termination |
 | `ENABLE_PREVENTIVE_REMINDER` | bool | True | Periodic self-evaluation reminder every N messages |
@@ -401,9 +402,13 @@ class Pipe:
             description="API key value sent in the configured auth header.",
             json_schema_extra={"input": {"type": "password"}},
         )
-        GATEWAY_DIM_HOST: str = Field(
+        GATEWAY_HOST_HEADER: str = Field(
+            default="x-bf-dim-host",
+            description="HTTP header name for the host routing value.",
+        )
+        GATEWAY_HOST_VALUE: str = Field(
             default="",
-            description="Value for the x-bf-dim-host header (Bifrost routing).",
+            description="Value sent in the host routing header.",
         )
         MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING: int = Field(
             default=2,
@@ -542,8 +547,8 @@ class Pipe:
         headers = {}
         if self.valves.GATEWAY_API_KEY:
             headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_API_KEY
-        if self.valves.GATEWAY_DIM_HOST:
-            headers["x-bf-dim-host"] = self.valves.GATEWAY_DIM_HOST
+        if self.valves.GATEWAY_HOST_VALUE:
+            headers[self.valves.GATEWAY_HOST_HEADER] = self.valves.GATEWAY_HOST_VALUE
         return headers
 
     # ------------------------------------------------------------------
