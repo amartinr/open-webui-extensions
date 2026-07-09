@@ -129,6 +129,7 @@ class Pipe:
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
     ):
+        print("=== AGENT_LOOP_GUARD pipe() called ===")
         messages = body.get("messages", [])
         if not messages:
             return ""
