@@ -100,8 +100,17 @@ class Pipe:
     # Gateway helpers
     # ------------------------------------------------------------------
 
-    def _build_gateway_headers(self) -> dict:
-        """Build the headers dict for gateway requests."""
+    def _build_gateway_headers(
+        self,
+        user: Optional[dict] = None,
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        """Build the headers dict for gateway requests.
+
+        Resolves template variables in header values:
+          {{USER_NAME}}, {{USER_ID}}, {{USER_EMAIL}}, {{USER_ROLE}},
+          {{CHAT_ID}}, {{MESSAGE_ID}}.
+        """
         headers = {}
         if self.valves.GATEWAY_AUTH_VALUE:
             headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_AUTH_VALUE
@@ -113,14 +122,28 @@ class Pipe:
         else:
             log.warning("GATEWAY_AUTH_VALUE is empty — gateway requests will have no auth header.")
 
-        # Parse custom headers from JSON valve
+        # Parse custom headers from JSON valve and resolve template vars
         if self.valves.GATEWAY_CUSTOM_HEADERS:
             try:
-                extra_headers = json.loads(self.valves.GATEWAY_CUSTOM_HEADERS)
-                if isinstance(extra_headers, dict):
-                    for k, v in extra_headers.items():
-                        if k and v:
-                            headers[k] = str(v)
+                raw_headers = json.loads(self.valves.GATEWAY_CUSTOM_HEADERS)
+                if isinstance(raw_headers, dict):
+                    user = user or {}
+                    meta = metadata or {}
+                    template_vars = {
+                        "{{USER_ID}}": str(user.get("id", "") or ""),
+                        "{{USER_NAME}}": str(user.get("name", "") or ""),
+                        "{{USER_EMAIL}}": str(user.get("email", "") or ""),
+                        "{{USER_ROLE}}": str(user.get("role", "") or ""),
+                        "{{CHAT_ID}}": str(meta.get("chat_id", "") or ""),
+                        "{{MESSAGE_ID}}": str(meta.get("message_id", "") or ""),
+                    }
+                    for k, v in raw_headers.items():
+                        if not k:
+                            continue
+                        val = str(v) if v is not None else ""
+                        for token, resolved in template_vars.items():
+                            val = val.replace(token, resolved)
+                        headers[k] = val
                 else:
                     log.warning("GATEWAY_CUSTOM_HEADERS is not a JSON object — ignoring")
             except json.JSONDecodeError as e:
@@ -261,7 +284,7 @@ class Pipe:
         real_model = body["model"].split(".", 1)[-1]
 
         # Build headers and URL for the gateway.
-        headers = {"Content-Type": "application/json", **self._build_gateway_headers()}
+        headers = {"Content-Type": "application/json", **self._build_gateway_headers(user=__user__, metadata=__metadata__)}
 
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 

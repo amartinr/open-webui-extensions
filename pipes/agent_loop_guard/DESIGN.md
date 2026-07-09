@@ -189,7 +189,7 @@ configuration.
 | `GATEWAY_BASE_URL` | str | `""` | Base URL for the OpenAI-compatible gateway |
 | `GATEWAY_AUTH_HEADER` | str | `"x-bf-vk"` | HTTP header name for the API key |
 | `GATEWAY_AUTH_VALUE` | str (password) | `""` | Credential value sent in the configured auth header |
-| `GATEWAY_CUSTOM_HEADERS` | str (JSON) | `""` | JSON object of extra HTTP headers (e.g. `{"x-bf-dim-host": "myhost"}`) |
+| `GATEWAY_CUSTOM_HEADERS` | str (JSON) | `""` | JSON object of extra HTTP headers. Supports template variables: `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` (e.g. `{"x-bf-dim-host": "myhost", "x-user": "{{USER_NAME}}"}`) |
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning |
 | `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls per turn before force-termination |
 | `ENABLE_PREVENTIVE_REMINDER` | bool | True | Periodic self-evaluation reminder every N messages |
