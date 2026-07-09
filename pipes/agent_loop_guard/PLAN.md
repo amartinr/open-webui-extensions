@@ -5,7 +5,7 @@ is strictly more capable than the last.
 
 ## Progress
 
-- [ ] Phase 1 — Transparent Manifold Proxy
+- [x] Phase 1 — Transparent Manifold Proxy
 - [ ] Phase 2 — Runaway Protection
 - [ ] Phase 3 — Loop Detection & Escalation
 - [ ] Phase 4 — Preventive Reminders
@@ -15,7 +15,7 @@ is strictly more capable than the last.
 
 | Phase | What it does | Status |
 |-------|-------------|:------:|
-| 1 | Transparent manifold proxy | ⬜ Pending |
+| 1 | Transparent manifold proxy | ✅ Done |
 | 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) | ⬜ Pending |
 | 3 | + Consecutive duplicate detection + escalation | ⬜ Pending |
 | 4 | + Preventive reminders | ⬜ Pending |
@@ -23,7 +23,7 @@ is strictly more capable than the last.
 
 ---
 
-## Phase 1 — Transparent Manifold Proxy  [ ]
+## Phase 1 — Transparent Manifold Proxy  [x]
 
 **Goal**: a pipe that queries the gateway, creates one sub-pipe per model,
 and forwards requests transparently. Zero analysis — pure proxy.
