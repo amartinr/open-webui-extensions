@@ -193,6 +193,10 @@ tools unavailable.
 | `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls in a turn before tools are removed (soft-block). Set to 0 to disable. |
 | `MAX_CONSECUTIVE_BEFORE_BLOCK` | int | 4 | Consecutive identical tool calls before soft-block (min 3). Warnings are spaced automatically: WARNING on first detection (consecutive=2), FINAL WARNING at ~60% of threshold, soft-block at threshold |
 
+> **Validation**: `MAX_TOOL_CALLS_PER_TURN` must be greater than `MAX_CONSECUTIVE_BEFORE_BLOCK`
+> when both are enabled. If runaway's threshold is equal or lower, Pydantic rejects the
+> configuration with a descriptive error.
+
 | `INJECTION_POSITION` | Literal["append_user","merge_last_tool"] | `"append_user"` | Where to inject guard messages: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |
 | `SHOW_TOOL_COUNTER` | bool | `True` | Append descending counter (`remaining tool calls: N`) to every tool result |
 | `TOOL_BLOCKLIST` | str | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
@@ -521,6 +525,7 @@ pipe()  ← continuation
 | Bifrost adds a new model | Appears automatically on next model refresh. |
 | `MAX_CONSECUTIVE_BEFORE_BLOCK = 3` | WARNING on consecutive=2, soft-block at consecutive=3 (no FINAL WARNING). |
 | `MAX_CONSECUTIVE_BEFORE_BLOCK = 6` | WARNING at 2, FINAL WARNING at 4 (≈60%), soft-block at 6. |
+| `MAX_TOOL_CALLS_PER_TURN ≤ MAX_CONSECUTIVE_BEFORE_BLOCK` | Error at config time — runaway would fire before loop detection, making loop invisible. |
 | Workspace model has no system prompt | Open WebUI skips system prompt injection. Pipe unaffected. |
 
 ---

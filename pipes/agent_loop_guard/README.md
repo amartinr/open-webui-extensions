@@ -114,6 +114,10 @@ from the block. For `N=3` there is no FINAL WARNING (WARNING → block directly)
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
 | `INJECTION_POSITION` | `"append_user"` | Where to inject: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |
 
+> **Note**: `MAX_TOOL_CALLS_PER_TURN` must be greater than `MAX_CONSECUTIVE_BEFORE_BLOCK`
+> when both are enabled. The pipe validates this at config time — if runaway's threshold
+> is equal or lower, Open WebUI will reject the configuration with an error.
+
 ### Custom headers with templates
 
 ```json
