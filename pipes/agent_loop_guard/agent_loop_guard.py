@@ -82,8 +82,17 @@ class Pipe:
         headers = {}
         if self.valves.GATEWAY_AUTH_VALUE:
             headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_AUTH_VALUE
+            log.debug(
+                "Auth header: %s = <redacted %d chars>",
+                self.valves.GATEWAY_AUTH_HEADER,
+                len(self.valves.GATEWAY_AUTH_VALUE),
+            )
+        else:
+            log.warning("GATEWAY_AUTH_VALUE is empty — gateway requests will have no auth header.")
         if self.valves.GATEWAY_HOST_VALUE:
             headers[self.valves.GATEWAY_HOST_HEADER] = self.valves.GATEWAY_HOST_VALUE
+
+        log.debug("Gateway headers: %s", {k: ("<redacted>" if k == self.valves.GATEWAY_AUTH_HEADER else v) for k, v in headers.items()})
         return headers
 
     # ------------------------------------------------------------------
@@ -132,6 +141,15 @@ class Pipe:
         headers = {"Content-Type": "application/json", **self._build_gateway_headers()}
 
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
+
+        log.info(
+            "Agent Loop Guard → %s (model=%s, auth_header=%s, has_auth=%s, has_host=%s)",
+            url,
+            real_model,
+            self.valves.GATEWAY_AUTH_HEADER,
+            bool(self.valves.GATEWAY_AUTH_VALUE),
+            bool(self.valves.GATEWAY_HOST_VALUE),
+        )
 
         # Forward to gateway with the real model ID.
         payload = {**body, "model": real_model}
