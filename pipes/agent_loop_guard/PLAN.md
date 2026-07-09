@@ -10,7 +10,7 @@ is strictly more capable than the last.
 - [x] Phase 3 — Loop Detection & Escalation
 - [x] Phase 4 — Tool Counter & Injection Options
 - [ ] Phase 5 — Polish & Production Readiness
-- [ ] Phase 6 — Tool Allowlist / Blocklist
+- [x] Phase 6 — Tool Blocklist
 
 ## Phase overview
 
@@ -21,7 +21,7 @@ is strictly more capable than the last.
 | 3 | + Consecutive duplicate detection + escalation + selective tool removal | ✅ Done |
 | 4 | + Descending tool counter + `merge_last_tool` injection + shortened messages | ✅ Done |
 | 5 | Polish: logging, hardening, tests | ⬜ Pending |
-| 6 | + Tool allowlist/blocklist (remove tools by name) | ⬜ Pending |
+| 6 | + Tool blocklist (remove tools by name) | ✅ Done |
 
 ---
 
@@ -271,8 +271,8 @@ remaining tool calls: 12
 3. **Model name fallback** — if gateway returns a model without `name`,
    use `id` as display name.
    → ✅ Done: `m.get('name', m['id'])` in `pipes()`.
-4. **Test with multiple gateway providers** — LiteLLM, Bifrost, custom
-   OpenAI-compatible proxies. → ⬜ Pending.
+4. **Tested with Bifrost** (production use). No other gateways planned.
+   → ✅ Done.
 5. **Test edge cases from DESIGN.md §13** — all 9 cases. → ⬜ Pending.
 6. **Replace `GATEWAY_HOST_HEADER` + `GATEWAY_HOST_VALUE` with single `GATEWAY_CUSTOM_HEADERS` valve** — the old two-valve pattern was specific to Bifrost's host-routing. The new valve accepts a JSON object so arbitrary headers (host routing, tracing, debug, etc.) can be added without adding a new valve per header. Backward-incompatible: existing installations must migrate their `GATEWAY_HOST_HEADER`/`GATEWAY_HOST_VALUE` into `GATEWAY_CUSTOM_HEADERS` as a JSON object (e.g. `{"x-bf-dim-host": "myhost"}`). → ✅ Done.
 
@@ -284,11 +284,11 @@ remaining tool calls: 12
 
 ---
 
-## Phase 6 — Tool Allowlist / Blocklist  [ ]
+## Phase 6 — Tool Blocklist  [x]
 
-**Goal**: let the admin configure which tools the agent can see by name.
+**Goal**: let the admin remove tools from the agent's tool list by name.
 The pipe filters `body["tools"]` before forwarding, so the LLM never
-knows the removed tools exist.
+knows the removed tools existed.
 
 ### Motivation
 
@@ -297,75 +297,79 @@ want to:
 
 - **Block** a dangerous tool (`terminal_execute`, `delete_file`)
 - **Remove** expensive tools (`search_web`, `fetch_url`) from cheap models
-- **Allowlist** only a small subset (e.g. `calculator` + `sql_query`)
 
 A Filter cannot do this reliably — the tool list is reconstructed after
-filter execution (see Bypass schema below). A Pipe can mutate
-`body["tools"]` directly before forwarding, and the change is
-**definitive**.
+filter execution. A Pipe can mutate `body["tools"]` directly before
+forwarding, and the change is **definitive**.
 
-### New valves
+### New valve
 
 | Valve | Type | Default | Description |
 |-------|------|---------|-------------|
-| `TOOL_BLOCKLIST` | str | `""` | Comma-separated tool names to **remove** from the agent's tool list |
-| `TOOL_ALLOWLIST` | str | `""` | Comma-separated tool names — **only** these are kept, all others removed |
+| `TOOL_BLOCKLIST` | str | `""` | Comma-separated or newline-separated tool names to **remove** from the agent's tool list |
 
-If both are set, allowlist wins (blocklist is ignored).
-If neither is set, all tools pass through unchanged (current behaviour).
+### Input format
+
+The valve accepts flexible input — commas, newlines, or a mix of both.
+All of these produce the same result:
+
+```
+delete_file, terminal_execute
+```
+
+```
+delete_file
+terminal_execute
+```
+
+```
+delete_file, terminal_execute
+fetch_url
+```
+
+Parsed with `re.split(r"[,\\n\\r]+", raw)` — whitespace around names
+is stripped automatically.
 
 ### `pipe()` logic (Phase 6)
 
 After analysing tool calls (phases 2-4), before forwarding:
 
 ```
-if TOOL_ALLOWLIST:
-    allowed = {name.strip() for name in TOOL_ALLOWLIST.split(",")}
-    body["tools"] = [
-        t for t in body.get("tools", [])
-        if t.get("function", {}).get("name") in allowed
-    ]
-elif TOOL_BLOCKLIST:
-    blocked = {name.strip() for name in TOOL_BLOCKLIST.split(",")}
-    body["tools"] = [
-        t for t in body.get("tools", [])
-        if t.get("function", {}).get("name") not in blocked
-    ]
+blocked = _parse_tool_list(TOOL_BLOCKLIST)
+
+# Warn about names that don't match any available tool
+actual_names = {t["function"]["name"] for t in body["tools"]}
+unknown = blocked - actual_names
+if unknown:
+    log.warning("TOOL_BLOCKLIST unknown: %s", sorted(unknown))
+
+body["tools"] = [
+    t for t in body["tools"]
+    if t["function"]["name"] not in blocked
+]
+
+if tool_choice targets a blocked tool → reset tool_choice
 ```
 
-Additionally, if `tool_choice` targets a blocked tool, reset it:
+### Error handling
 
-```
-# If tool_choice forces a now-removed tool, let the LLM decide
-if "tool_choice" in body:
-    tc_name = body["tool_choice"]
-    if isinstance(tc_name, str) and tc_name not in allowed:
-        body.pop("tool_choice", None)
-```
-
-### Example
-
-| Allowlist | Blocklist | Result |
-|-----------|-----------|--------|
-| `""` | `""` | All tools pass through |
-| `""` | `"delete_file,terminal_execute"` | Everything except those two |
-| `"search_web,calculator"` | `""` | Only search_web and calculator |
-| `"search_web"` | `"fetch_url"` | Allowlist wins: only search_web |
+- If the user writes a tool name that doesn't exist among the available
+  tools, it's logged as a **warning** but doesn't break execution.
+  The unknown names are simply ignored; the known ones are blocked.
+- Matching is **exact** (`==`) — `fetch_url` does not match `smart_fetch_url`.
 
 ### Soft-block interaction
 
-Phase 2's runaway soft-block (`body.pop("tools", None)`) happens **after**
-the allowlist/blocklist filter. Phase 3's loop soft-block removes only
-the looping tool **after** the allowlist/blocklist filter. Phase 6 runs
-only when no soft-block is active.
+The blocklist filter runs **before** soft-block logic. If the runaway
+or loop soft-block fires afterwards, it operates on the already-filtered
+tool list (removing all tools or just the looping one, respectively).
 
 ### Validation
 
-- Blocklist: set `TOOL_BLOCKLIST="search_web"`. Agent cannot call
-  `search_web` but can call `fetch_url`, `calculator`, etc.
-- Allowlist: set `TOOL_ALLOWLIST="calculator"`. Agent sees only
-  `calculator`.
-- Both empty: no change, all tools visible.
+- Set `TOOL_BLOCKLIST="fetch_url"`. Agent cannot call `fetch_url`;
+  `smart_fetch_url`, `search_web`, etc. remain available.
+- Set `TOOL_BLOCKLIST=""` (empty). All tools pass through unchanged.
+- Typo `TOOL_BLOCKLIST="fech_url"` → warning in logs, nothing blocked.
 - `tool_choice` targeting a blocked tool → gracefully reset.
 - Loop soft-block still removes only the specific looping tool.
 - Runaway soft-block still removes all tools regardless.
@@ -401,7 +405,7 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 
                        │
                        └── Phase 5 adds logging, hardening, no new logic
                             │
-                            └── Phase 6 adds allowlist/blocklist filtering
+                            └── Phase 6 adds tool blocklist filtering
 ```
 
 Each phase's code is an **additive diff** on the previous phase — never a

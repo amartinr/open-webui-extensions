@@ -34,7 +34,6 @@ the UI and your LLM gateway (e.g. Bifrost, LiteLLM). It:
    receives all collected results but cannot call more tools, forcing it
    to summarise
 4. **Prevents runaway** loops with a configurable tool-call limit per turn
-5. **Reminds** agents periodically to self-evaluate (preventive reminders)
 
 ### Soft-block vs Force-terminate
 
@@ -63,8 +62,6 @@ User message → Open WebUI → Agent Loop Guard pipe()
                                │     ├─ Escalation ≥ max? → Soft-block
                                │     ├─ Escalation = 1? → FINAL WARNING
                                │     └─ Escalation = 0? → WARNING
-                               │
-                               ├─ Preventive reminder due? → Inject REMINDER
                                │
                                └─ Forward to gateway (tools untouched)
                                      → LLM responds normally
@@ -112,8 +109,6 @@ SOFT-BLOCK: tools removed from body, gateway forwarded
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before soft-block. `0` = disabled |
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | `2` | Identical consecutive calls before first warning. `0` = disabled |
 | `MAX_WARNINGS_BEFORE_TERMINATE` | `2` | Warnings before soft-block. `0` = soft-block on first detection |
-| `ENABLE_PREVENTIVE_REMINDER` | `True` | Periodic self-evaluation reminders |
-| `REMINDER_INTERVAL` | `3` | Inject reminder every N user messages |
 | `INJECTION_POSITION` | `"append_system"` | Where to inject: `"prepend"`, `"append_system"`, or `"append_user"` |
 
 ### Custom headers with templates

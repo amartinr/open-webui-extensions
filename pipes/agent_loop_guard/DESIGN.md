@@ -190,8 +190,7 @@ proxy), or a dict (non-streaming proxy).
 | `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls in a turn before tools are removed (soft-block). Set to 0 to disable. |
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning. Set to 0 to disable. |
 | `MAX_WARNINGS_BEFORE_TERMINATE` | int | 2 | Warnings before tools are removed (soft-block). Set to 0 to soft-block immediately on first loop detection. |
-| `ENABLE_PREVENTIVE_REMINDER` | bool | True | Inject periodic self-evaluation reminders |
-| `REMINDER_INTERVAL` | int | 3 | Inject preventive reminder every N user messages |
+
 | `INJECTION_POSITION` | Literal["prepend","append_system","append_user"] | `"prepend"` | Where to inject the warning message |
 
 ---
@@ -338,13 +337,6 @@ FORCE TERMINATE → plain string, no LLM call
     f"final answer."}
 ```
 
-**Preventive Reminder:**
-```python
-{"role": "system", "content": "REMINDER: Periodically evaluate whether "
-    "your tool calls are making progress. If you detect repetition, "
-    "stop and provide a summary."}
-```
-
 ### 8.3 Injection Position
 
 | Value | Behaviour |
@@ -407,9 +399,16 @@ additive on the previous:
   - Level 1 → inject FINAL WARNING (tools still available)
   - Level 2 → soft-block (tools removed)
 
-### Phase 4 — Preventive Reminders
-- `_last_system_contains()` checks for existing guard markers
-- Every `REMINDER_INTERVAL` user messages, injects a REMINDER message
+### Phase 6 — Tool Blocklist
+- `TOOL_BLOCKLIST` valve: comma/newline-separated list of tool names to **remove**
+- `_parse_tool_list()` splits on commas, newlines, or mixed input
+  using `re.split(r"[,\n\r]+", raw)`
+- `_apply_tool_blocklist()` mutates `body['tools']` before forwarding;
+  logs a warning for names that don't match any available tool;
+  resets `tool_choice` if it targets a removed tool
+- Matching is exact (`==`); `fetch_url` does not match `smart_fetch_url`
+- Runs on every normal forward before reaching the gateway;
+  soft-block modifications happen after the filter
 
 ### Gateway proxy
 - `_stream()` forwards SSE lines from the gateway back to Open WebUI
@@ -494,7 +493,6 @@ pipe()  ← continuation
 | Normal operation | 0 | Pipe forwards body as-is |
 | Loop warning | ~60-80 | Injected system message |
 | Final warning | ~70-90 | Second injection |
-| Preventive reminder | ~50-70 | Every N user messages |
 | Soft-block (runaway limit) | ~60-80 (system msg) + LLM response | Pipe removes tools, injects instruction, forwards |
 | Soft-block (loop) | ~60-80 (system msg) + LLM response | Same — all results preserved, LLM summarises |
 
@@ -505,7 +503,7 @@ pipe()  ← continuation
 | Case | Handling |
 |------|----------|
 | No tool calls in current turn | No loop detection. Forward unchanged. |
-| First user message of conversation | Only preventive reminder check. |
+
 | Gateway unreachable during `pipes()` | Returns cached model list. Selector still works. |
 | Gateway unreachable during `pipe()` | Exception caught → error string. |
 | Warning already present from earlier | Escalate, don't re-inject. |
@@ -547,5 +545,22 @@ pipe()  ← continuation
 
 10. **Single set of credentials**: Only `GATEWAY_BASE_URL` and
     `GATEWAY_AUTH_VALUE` are needed — all models share the same gateway.
+
+11. **Tool blocklist**: Setting `TOOL_BLOCKLIST` to `"delete_file, terminal_execute"`
+    removes only those tools. Everything else remains visible.
+
+12. **Flexible input format**: The valve accepts commas, newlines, or
+    mixed input. `"delete_file, terminal_execute"` and
+    `"delete_file\nterminal_execute"` produce the same set.
+
+13. **Unknown name detection**: If a name in `TOOL_BLOCKLIST` does not
+    match any available tool, a warning is logged and the name is ignored.
+    The pipe does not break.
+
+14. **Exact match**: `fetch_url` blocks only `fetch_url`, not
+    `smart_fetch_url`. Matching is done with `==` via set membership.
+
+15. **tool_choice cleanup**: If `tool_choice` targets a blocked tool,
+    it is reset so the LLM can choose freely.
 
 

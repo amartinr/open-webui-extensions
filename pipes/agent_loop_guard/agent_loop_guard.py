@@ -2,16 +2,17 @@
 title: Agent Loop Guard
 author: open-webui-tools
 author_url: https://github.com/your-org/open-webui-tools
-version: 1.0.0
+version: 1.1.0
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
 """
 
 from pydantic import BaseModel, Field
-from typing import AsyncGenerator, Awaitable, Callable, Optional
+from typing import AsyncGenerator, Awaitable, Callable, Literal, Optional
 import httpx
 import json
 import logging
+import re
 
 log = logging.getLogger(__name__)
 
@@ -76,13 +77,18 @@ class Pipe:
             description="Warnings before tools are removed (soft-block). Set to 0 to soft-block immediately on first loop detection.",
         )
 
-        INJECTION_POSITION: str = Field(
+        INJECTION_POSITION: Literal["append_user", "merge_last_tool"] = Field(
             default="append_user",
-            description="Where to inject guard messages: 'append_user' (before last user msg) or 'merge_last_tool' (append to last tool result, after a separator).",
+            description="Where to inject guard messages: 'append_user' (before last user msg) or 'merge_last_tool' (append to last tool result).",
         )
         SHOW_TOOL_COUNTER: bool = Field(
             default=True,
             description="Append 'remaining tool calls: N' to the last tool result in each turn.",
+        )
+        TOOL_BLOCKLIST: str = Field(
+            default="",
+            description="Comma-separated (or newline-separated) tool names to REMOVE from the agent's tool list. "
+            'Example: "delete_file, terminal_execute".',
         )
 
     def __init__(self):
@@ -178,6 +184,63 @@ class Pipe:
             {k: ("<redacted>" if k == self.valves.GATEWAY_AUTH_HEADER else v) for k, v in headers.items()},
         )
         return headers
+
+    # ------------------------------------------------------------------
+    # Tool blocklist helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_tool_list(raw: str) -> set[str]:
+        """Parse a string that may be comma-separated and/or newline-separated
+        into a set of non-empty, stripped tool names.
+
+        Accepts any combination:
+          "search_web, calculator"
+          "search_web\ncalculator"
+          "search_web, calculator\ndelete_file"
+        """
+        if not raw or not raw.strip():
+            return set()
+        return {
+            t.strip() for t in re.split(r"[,\n\r]+", raw)
+            if t.strip()
+        }
+
+    def _apply_tool_blocklist(self, body: dict) -> None:
+        """Remove tools from body['tools'] whose names appear in TOOL_BLOCKLIST.
+
+        Mutates body['tools'] in-place.
+        - Returns immediately if TOOL_BLOCKLIST is empty.
+        - If tool_choice targets a blocked tool, it is reset so the LLM can choose freely.
+        """
+        raw = getattr(self.valves, "TOOL_BLOCKLIST", "")
+        if not raw or not raw.strip():
+            return
+
+        tools = body.get("tools", [])
+        if not tools:
+            return
+
+        blocked = self._parse_tool_list(raw)
+        actual_names = {t.get("function", {}).get("name") for t in tools if t.get("function", {})}
+
+        unknown = blocked - actual_names
+        if unknown:
+            log.warning(
+                "TOOL_BLOCKLIST contains names not found among available tools: %s",
+                sorted(unknown),
+            )
+
+        body["tools"] = [
+            t for t in tools
+            if t.get("function", {}).get("name") not in blocked
+        ]
+
+        # If tool_choice targets a blocked tool, reset it so the LLM can choose freely
+        tool_choice = body.get("tool_choice")
+        if isinstance(tool_choice, str) and tool_choice in blocked:
+            body.pop("tool_choice", None)
+            log.info("tool_choice '%s' targets a blocked tool — reset", tool_choice)
 
     # ------------------------------------------------------------------
     # Tool-call analysis
@@ -453,6 +516,9 @@ class Pipe:
                     "content": _warning_msg(bad_tool, total),
                 })
                 self._warnings_injected = 1
+
+        # --- Tool blocklist ---------------------------------------------
+        self._apply_tool_blocklist(body)
 
         # --- Tool counter ----------------------------------------------
         if (
