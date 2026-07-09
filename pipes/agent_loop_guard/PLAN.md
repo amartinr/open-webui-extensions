@@ -6,7 +6,7 @@ is strictly more capable than the last.
 ## Progress
 
 - [x] Phase 1 — Transparent Manifold Proxy
-- [ ] Phase 2 — Runaway Protection
+- [x] Phase 2 — Runaway Protection
 - [ ] Phase 3 — Loop Detection & Escalation
 - [ ] Phase 4 — Preventive Reminders
 - [ ] Phase 5 — Polish & Production Readiness
@@ -16,7 +16,7 @@ is strictly more capable than the last.
 | Phase | What it does | Status |
 |-------|-------------|:------:|
 | 1 | Transparent manifold proxy | ✅ Done |
-| 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) | ⬜ Pending |
+| 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) | ✅ Done |
 | 3 | + Consecutive duplicate detection + escalation | ⬜ Pending |
 | 4 | + Preventive reminders | ⬜ Pending |
 | 5 | Polish: logging, hardening, tests | ⬜ Pending |
@@ -74,7 +74,7 @@ pipe(body)
 
 ---
 
-## Phase 2 — Runaway Protection  [ ]
+## Phase 2 — Runaway Protection  [x]
 
 **Goal**: add `MAX_TOOL_CALLS_PER_TURN` — force-terminate when the agent
 makes too many tool calls in one turn. Simplest protection, highest ROI.

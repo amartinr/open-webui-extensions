@@ -10,6 +10,7 @@ requirements: httpx, pydantic
 from pydantic import BaseModel, Field
 from typing import AsyncGenerator, Optional
 import httpx
+import json
 import logging
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,10 @@ class Pipe:
         GATEWAY_HOST_VALUE: str = Field(
             default="",
             description="Value sent in the host routing header (e.g. Bifrost dimension). Leave empty if not needed.",
+        )
+        MAX_TOOL_CALLS_PER_TURN: int = Field(
+            default=15,
+            description="Max tool calls in a turn before force-termination. Set to 0 to disable.",
         )
 
     def __init__(self):
@@ -96,6 +101,28 @@ class Pipe:
         return headers
 
     # ------------------------------------------------------------------
+    # Tool-call analysis
+    # ------------------------------------------------------------------
+
+    def _extract_tool_calls_in_turn(self, messages: list[dict]) -> list[dict]:
+        """Scan backwards from the end until the last user message.
+        Collect every assistant tool_call in the current turn."""
+        history: list[dict] = []
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.get("role") == "user":
+                break
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    try:
+                        args = json.loads(tc["function"]["arguments"])
+                    except (json.JSONDecodeError, KeyError):
+                        args = {}
+                    history.append({"name": tc["function"]["name"], "args": args})
+        history.reverse()
+        return history
+
+    # ------------------------------------------------------------------
     # Gateway proxy
     # ------------------------------------------------------------------
 
@@ -150,6 +177,24 @@ class Pipe:
             bool(self.valves.GATEWAY_AUTH_VALUE),
             bool(self.valves.GATEWAY_HOST_VALUE),
         )
+
+        # --- Runaway prevention ---------------------------------------
+        max_tool_calls = self.valves.MAX_TOOL_CALLS_PER_TURN
+        if max_tool_calls > 0:
+            history = self._extract_tool_calls_in_turn(messages)
+            if len(history) >= max_tool_calls:
+                log.warning(
+                    "Force-terminate: %d tool calls in turn (limit=%d)",
+                    len(history),
+                    max_tool_calls,
+                )
+                return (
+                    f"I've stopped because this turn reached the limit of "
+                    f"{max_tool_calls} tool calls without producing a final "
+                    f"answer.\n\n"
+                    f"Please try a more specific query or reduce the scope "
+                    f"of your request."
+                )
 
         # Forward to gateway with the real model ID.
         payload = {**body, "model": real_model}
