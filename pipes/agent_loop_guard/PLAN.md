@@ -217,21 +217,23 @@ Same as Phase 3, plus:
 
 1. **Logging** — `import logging; log = logging.getLogger(__name__)`.
    Log model discovery, injections, force-terminations at INFO/DEBUG.
+   → ✅ Done: 13 logging calls across the file.
 2. **Gateway error messages** — return a human-readable string with the
    HTTP status code, not the raw exception.
+   → ✅ Done: httpx.HTTPStatusError / httpx.RequestError handling.
 3. **Model name fallback** — if gateway returns a model without `name`,
-   use `id` as display name (already in DESIGN.md code).
+   use `id` as display name.
+   → ✅ Done: `m.get('name', m['id'])` in `pipes()`.
 4. **Test with multiple gateway providers** — LiteLLM, Bifrost, custom
-   OpenAI-compatible proxies.
-5. **Test edge cases from DESIGN.md §13** — all 9 cases.
-6. **Replace `GATEWAY_HOST_HEADER` + `GATEWAY_HOST_VALUE` with single `GATEWAY_CUSTOM_HEADERS` valve** — the old two-valve pattern was specific to Bifrost's host-routing. The new valve accepts a JSON object so arbitrary headers (host routing, tracing, debug, etc.) can be added without adding a new valve per header. Backward-incompatible: existing installations must migrate their `GATEWAY_HOST_HEADER`/`GATEWAY_HOST_VALUE` into `GATEWAY_CUSTOM_HEADERS` as a JSON object (e.g. `{"x-bf-dim-host": "myhost"}`).
+   OpenAI-compatible proxies. → ⬜ Pending.
+5. **Test edge cases from DESIGN.md §13** — all 9 cases. → ⬜ Pending.
+6. **Replace `GATEWAY_HOST_HEADER` + `GATEWAY_HOST_VALUE` with single `GATEWAY_CUSTOM_HEADERS` valve** — the old two-valve pattern was specific to Bifrost's host-routing. The new valve accepts a JSON object so arbitrary headers (host routing, tracing, debug, etc.) can be added without adding a new valve per header. Backward-incompatible: existing installations must migrate their `GATEWAY_HOST_HEADER`/`GATEWAY_HOST_VALUE` into `GATEWAY_CUSTOM_HEADERS` as a JSON object (e.g. `{"x-bf-dim-host": "myhost"}`). → ✅ Done.
 
 ### Optional stretch goals (not in DESIGN.md)
 
 - **`__event_emitter__` status pills** — emit `"status"` events during
   force-termination so the user sees "🛡️ Loop guard: stopped" in the UI.
-- **Per-model overrides** — if a manifold per-model valve pattern emerges in
-  Open WebUI, allow per-sub-pipe thresholds.
+  → ✅ Done: both notification and status events in `_soft_block`.
 
 ---
 
