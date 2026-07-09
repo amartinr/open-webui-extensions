@@ -3,19 +3,27 @@
 Phased delivery — each phase produces a **working, uploadable pipe** that
 is strictly more capable than the last.
 
+## Progress
+
+- [ ] Phase 1 — Transparent Manifold Proxy
+- [ ] Phase 2 — Runaway Protection
+- [ ] Phase 3 — Loop Detection & Escalation
+- [ ] Phase 4 — Preventive Reminders
+- [ ] Phase 5 — Polish & Production Readiness
+
 ## Phase overview
 
-| Phase | What it does | Can it ship? |
-|-------|-------------|:-----------:|
-| 1 | Transparent manifold proxy | ✅ Usable immediately (protected models in selector) |
-| 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) | ✅ Single safety net |
-| 3 | + Consecutive duplicate detection + escalation | ✅ Full loop guard |
-| 4 | + Preventive reminders | ✅ All DESIGN.md features |
-| 5 | Polish: logging, hardening, tests | ✅ Production-ready |
+| Phase | What it does | Status |
+|-------|-------------|:------:|
+| 1 | Transparent manifold proxy | ⬜ Pending |
+| 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) | ⬜ Pending |
+| 3 | + Consecutive duplicate detection + escalation | ⬜ Pending |
+| 4 | + Preventive reminders | ⬜ Pending |
+| 5 | Polish: logging, hardening, tests | ⬜ Pending |
 
 ---
 
-## Phase 1 — Transparent Manifold Proxy
+## Phase 1 — Transparent Manifold Proxy  [ ]
 
 **Goal**: a pipe that queries the gateway, creates one sub-pipe per model,
 and forwards requests transparently. Zero analysis — pure proxy.
@@ -66,7 +74,7 @@ pipe(body)
 
 ---
 
-## Phase 2 — Runaway Protection
+## Phase 2 — Runaway Protection  [ ]
 
 **Goal**: add `MAX_TOOL_CALLS_PER_TURN` — force-terminate when the agent
 makes too many tool calls in one turn. Simplest protection, highest ROI.
@@ -100,7 +108,7 @@ pipe(body)
 
 ---
 
-## Phase 3 — Loop Detection & Escalation
+## Phase 3 — Loop Detection & Escalation  [ ]
 
 **Goal**: detect consecutive identical tool calls, escalate through
 `WARNING` → `FINAL WARNING` → force-terminate.
@@ -153,7 +161,7 @@ pipe(body)
 
 ---
 
-## Phase 4 — Preventive Reminders
+## Phase 4 — Preventive Reminders  [ ]
 
 **Goal**: inject a "REMINDER: Periodically evaluate…" message every N
 user messages, so the agent self-checks even before looping.
@@ -183,7 +191,7 @@ Same as Phase 3, plus:
 
 ---
 
-## Phase 5 — Polish & Production Readiness
+## Phase 5 — Polish & Production Readiness  [ ]
 
 ### Tasks
 
