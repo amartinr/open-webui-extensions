@@ -41,7 +41,27 @@ class Pipe:
         )
         MAX_TOOL_CALLS_PER_TURN: int = Field(
             default=15,
-            description="Max tool calls in a turn before force-termination. Set to 0 to disable.",
+            description="Max tool calls in a turn before tools are removed (soft-block). Set to 0 to disable.",
+        )
+        MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING: int = Field(
+            default=2,
+            description="Consecutive identical tool calls before first warning. Set to 0 to disable.",
+        )
+        MAX_WARNINGS_BEFORE_TERMINATE: int = Field(
+            default=2,
+            description="Warnings before tools are removed (soft-block). Set to 0 to soft-block immediately on first loop detection.",
+        )
+        ENABLE_PREVENTIVE_REMINDER: bool = Field(
+            default=True,
+            description="Inject periodic self-evaluation reminders.",
+        )
+        REMINDER_INTERVAL: int = Field(
+            default=3,
+            description="Inject preventive reminder every N user messages.",
+        )
+        INJECTION_POSITION: str = Field(
+            default="append_system",
+            description="Where to inject warning messages: 'prepend', 'append_system', or 'append_user'.",
         )
 
     def __init__(self):
@@ -121,6 +141,40 @@ class Pipe:
                     history.append({"name": tc["function"]["name"], "args": args})
         history.reverse()
         return history
+
+    def _has_consecutive_duplicates(
+        self, history: list[dict], threshold: int
+    ) -> bool:
+        """Check if the last N tool calls are identical (same name + same args)."""
+        if len(history) < threshold:
+            return False
+        recent = history[-threshold:]
+        first = recent[0]
+        return all(
+            c["name"] == first["name"] and c["args"] == first["args"]
+            for c in recent
+        )
+
+    def _escalation_level(self, messages: list[dict]) -> int:
+        """Deduce escalation level from injected system messages.
+        0 = clean, 1 = warning, 2 = final warning."""
+        for msg in reversed(messages):
+            if msg.get("role") != "system":
+                continue
+            content = msg.get("content", "")
+            if "FINAL WARNING:" in content:
+                return 2
+            if "WARNING:" in content:
+                return 1
+        return 0
+
+    def _last_system_contains(self, messages: list[dict], text: str) -> bool:
+        """Check if any system message contains the given text (case-insensitive)."""
+        return any(
+            msg.get("role") == "system"
+            and text.lower() in msg.get("content", "").lower()
+            for msg in messages
+        )
 
     # ------------------------------------------------------------------
     # Injection helper
@@ -209,19 +263,21 @@ class Pipe:
         )
 
         # --- Analyse tool calls in current turn -----------------------
-        max_tool_calls = self.valves.MAX_TOOL_CALLS_PER_TURN
-        history = self._extract_tool_calls_in_turn(messages) if max_tool_calls > 0 else []
+        history = self._extract_tool_calls_in_turn(messages)
+        total = len(history)
+        escalation = self._escalation_level(messages)
+        max_esc = self.valves.MAX_WARNINGS_BEFORE_TERMINATE
 
-        # --- Runaway prevention ---------------------------------------
-        if max_tool_calls > 0 and len(history) >= max_tool_calls:
-            log.warning(
-                "Force-terminate: %d tool calls in turn (limit=%d)",
-                len(history),
-                max_tool_calls,
-            )
+        # --- Helper: soft-block (remove tools + inject + forward) -----
+        async def _soft_block(
+            reason: str,
+            instruction: str,
+        ):
+            """Remove tools from body so the LLM cannot call more, inject
+            a system message instructing it to summarise, then forward to
+            the gateway. All tool results already in messages are preserved."""
+            log.warning("Soft-block: %s (%d tool calls in turn)", reason, total)
 
-            # Notify the user via UI toast + status indicator.
-            # Wrap in try/except — if event_emitter fails, we still block.
             if __event_emitter__:
                 try:
                     await __event_emitter__(
@@ -230,8 +286,7 @@ class Pipe:
                             "data": {
                                 "type": "error",
                                 "content": (
-                                    f"🛡️ Agent Loop Guard stopped the agent after "
-                                    f"{len(history)} tool calls (limit: {max_tool_calls})."
+                                    f"🛡️ Agent Loop Guard: {reason}"
                                 ),
                             },
                         }
@@ -240,10 +295,7 @@ class Pipe:
                         {
                             "type": "status",
                             "data": {
-                                "description": (
-                                    f"🛡️ Tool call limit reached: "
-                                    f"{len(history)} calls in this turn"
-                                ),
+                                "description": f"🛡️ {reason}",
                                 "done": True,
                                 "hidden": False,
                             },
@@ -252,16 +304,104 @@ class Pipe:
                 except Exception:
                     log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
-            # Do NOT forward to the LLM — it ignores stop instructions.
-            # Return a guard message that gets persisted in the chat.
-            # The agent sees it on the next turn and learns from it.
-            return (
-                f"TOOL CALL LIMIT: {len(history)} calls this turn "
-                f"(max {max_tool_calls}). Further calls blocked."
+            # Remove tools so the LLM cannot call more
+            body.pop("tools", None)
+            body.pop("tool_choice", None)
+
+            # Inject instruction to summarise
+            self._inject(messages, {
+                "role": "system",
+                "content": instruction,
+            })
+
+            # Forward to gateway — LLM sees all tool results but has no tools.
+            # Streaming: return the async generator; non-streaming: return dict.
+            payload = {**body, "model": real_model, "messages": messages}
+            if body.get("stream", False):
+                return self._stream(payload, headers, url)
+            else:
+                return await self._call(payload, headers, url)
+
+        # --- Runaway soft-block ---------------------------------------
+        runaway = (
+            self.valves.MAX_TOOL_CALLS_PER_TURN > 0
+            and total >= self.valves.MAX_TOOL_CALLS_PER_TURN
+        )
+        if runaway:
+            return await _soft_block(
+                reason=(
+                    f"Tool call limit reached: {total} calls in this turn "
+                    f"(max {self.valves.MAX_TOOL_CALLS_PER_TURN})"
+                ),
+                instruction=(
+                    f"TOOL CALL LIMIT REACHED: You have used {total} tool calls "
+                    f"(max {self.valves.MAX_TOOL_CALLS_PER_TURN}). You must stop "
+                    f"calling tools and provide your final answer using the "
+                    f"information you have already gathered."
+                ),
             )
 
+        # --- Loop detection (consecutive identical tool calls) ---------
+        loop_detected = (
+            history
+            and self.valves.MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING > 0
+            and self._has_consecutive_duplicates(
+                history,
+                self.valves.MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING,
+            )
+        )
+
+        if loop_detected:
+            if escalation >= max_esc:
+                # Already warned enough → soft-block (remove tools)
+                return await _soft_block(
+                    reason=(
+                        f"Repeated tool call detected: {total} calls in this turn"
+                    ),
+                    instruction=(
+                        f"FINAL WARNING: You have made {total} identical tool calls "
+                        f"without making progress. All tool access has been revoked "
+                        f"for this turn. Provide your final answer now with what you "
+                        f"have gathered."
+                    ),
+                )
+            elif escalation == 1:
+                # Final warning — inject and forward normally (tools still available)
+                self._inject(messages, {
+                    "role": "system",
+                    "content": (
+                        "FINAL WARNING: You are still repeating tool calls despite "
+                        "receiving a warning. You MUST stop calling tools immediately. "
+                        "Provide a summary of everything you have gathered."
+                    ),
+                })
+            else:
+                # First warning — inject and forward normally
+                self._inject(messages, {
+                    "role": "system",
+                    "content": (
+                        "WARNING: In this turn you called the same tool with the "
+                        "same arguments multiple times without achieving a different "
+                        "result. Stop and change strategy, or provide a summary."
+                    ),
+                })
+
+        # --- Preventive reminder --------------------------------------
+        if self.valves.ENABLE_PREVENTIVE_REMINDER and not loop_detected and not runaway:
+            user_count = sum(1 for m in messages if m.get("role") == "user")
+            if user_count > 0 and user_count % self.valves.REMINDER_INTERVAL == 0:
+                if not self._last_system_contains(messages, "REMINDER:"):
+                    self._inject(messages, {
+                        "role": "system",
+                        "content": (
+                            "REMINDER: Periodically evaluate whether your tool calls "
+                            "are making progress. If you detect repetition without "
+                            "results, stop and provide a summary."
+                        ),
+                    })
+
         # --- Forward to gateway ---------------------------------------
-        payload = {**body, "model": real_model}
+        payload = {**body, "model": real_model, "messages": messages}
 
         try:
             if body.get("stream", False):

@@ -26,13 +26,21 @@ request path:
 | | Filter Function (`inlet`) | Pipe Function (`pipe`) |
 |---|---|---|
 | Called on initial user request | ✅ Yes | ✅ Yes |
-| Called on tool-call continuations | ❌ **No** ([issue #18222](https://github.com/open-webui/open-webui/issues/18222)) | ✅ **Yes** — every iteration |
-| Can detect loops inside a turn | ❌ No — only between turns | ✅ Yes — real-time |
-| Can force-terminate a runaway turn | ❌ No | ✅ Yes |
+| Called on tool-call continuations | ✅ **Yes** — since [commit 5064506](https://github.com/open-webui/open-webui/commit/5064506de4eb6c0aae560c82b79fcf8f1a56c123) (fixes [#18222](https://github.com/open-webui/open-webui/issues/18222)) | ✅ **Yes** — every iteration |
+| Can detect loops inside a turn | ✅ Yes — real-time | ✅ Yes — real-time |
+| Can force-terminate a runaway turn | ❌ No — `inlet()` must return the body | ✅ Yes — returns plain string |
 
-A **Filter** is not invoked during the tool-calling loop. A **Pipe** is
-invoked on **every** request: the initial user message *and* every
-continuation with tool results.
+Since [commit 5064506](https://github.com/open-webui/open-webui/commit/5064506de4eb6c0aae560c82b79fcf8f1a56c123)
+(`"refac/fix: inherit request form data"`), Open WebUI spreads `**form_data`
+into the `new_form_data` of every tool-call iteration. This means **both**
+the Pipe `pipe()` and the Filter `inlet()` are invoked on every iteration
+of the tool-calling loop — the fix carries the original model ID (with
+pipe prefix) and all filter modifications forward.
+
+A **Pipe** is still the right choice for this project because it alone can
+**force-terminate**: return a plain string to skip the LLM call entirely,
+saving tokens. A Filter must always return the body, so the LLM call
+happens regardless.
 
 ---
 
@@ -803,18 +811,4 @@ pipe()  ← continuation
 10. **Single set of credentials**: Only `GATEWAY_BASE_URL` and
     `GATEWAY_AUTH_VALUE` are needed — all models share the same gateway.
 
----
 
-## 15. TODO
-
-### Force-termination: avoid hardcoded guard message impersonating agent
-
-Currently on runaway the pipe returns a hardcoded string that appears in
-chat as if the agent said it. Options to explore:
-
-- **A** — Hardcoded string (current). Pipe impersonates agent. Confusing.
-- **B** — Return empty string `""`. Shows blank assistant message; toast
-  already informs the user.
-- **C** — Raise an exception so Open WebUI handles the error natively
-  (e.g. generic error message in chat, or silent turn abort). Unknown
-  how OWUI behaves in this case — needs testing.

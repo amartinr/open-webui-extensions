@@ -7,8 +7,8 @@ is strictly more capable than the last.
 
 - [x] Phase 1 — Transparent Manifold Proxy
 - [x] Phase 2 — Runaway Protection
-- [ ] Phase 3 — Loop Detection & Escalation
-- [ ] Phase 4 — Preventive Reminders
+- [x] Phase 3 — Loop Detection & Escalation
+- [x] Phase 4 — Preventive Reminders
 - [ ] Phase 5 — Polish & Production Readiness
 
 ## Phase overview
@@ -17,8 +17,8 @@ is strictly more capable than the last.
 |-------|-------------|:------:|
 | 1 | Transparent manifold proxy | ✅ Done |
 | 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) | ✅ Done |
-| 3 | + Consecutive duplicate detection + escalation | ⬜ Pending |
-| 4 | + Preventive reminders | ⬜ Pending |
+| 3 | + Consecutive duplicate detection + escalation | ✅ Done |
+| 4 | + Preventive reminders | ✅ Done |
 | 5 | Polish: logging, hardening, tests | ⬜ Pending |
 
 ---
@@ -99,19 +99,39 @@ pipe(body)
   5. Forward to gateway as before
 ```
 
+### Soft-block strategy
+
+The pipe cannot prevent tool calls that the LLM schedules in batch (e.g.
+5 calls in one response). But once the limit is reached, it can remove
+`tools` from the body so the LLM cannot call more — this is **soft-block**.
+
+| Opt | Behaviour | Agent sees it? | UX | Status |
+|:---:|-----------|:--------------:|----|:------:|
+| **A** | Hardcoded string (force-terminate) | ✅ Yes — learns next turn | Impersonates agent, wastes tool results | ❌ Replaced |
+| **B** | Empty string `""` | ❌ No feedback | Blank msg; toast informs user | ❌ Discarded |
+| **C** | Raise exception | Depends on OWUI | Unknown | ❌ Discarded |
+| **D** | **Soft-block**: remove `tools` from body, inject system msg, forward to gateway | ✅ Yes — sees results + instruction, forced to summarise | All results preserved, LLM responds with text | ✅ **Current** |
+
+**Decision**: soft-block (D). All tool results already in messages are
+preserved. The LLM receives them plus a system instruction to summarise,
+but has no tools available — forced to respond with text.
+
 ### Validation
 
 - Set `MAX_TOOL_CALLS_PER_TURN=3`. Run a tool-using agent.
-- ≤3 tool calls → normal forward.
-- 4th tool call → pipe returns force-terminate string. No LLM call made.
+- ≤3 tool calls → normal forward with tools.
+- 4th+ tool call → body has `tools` removed, system msg injected,
+  forward to gateway. LLM responds with text, no more tool calls.
 - Set `MAX_TOOL_CALLS_PER_TURN=0` → feature disabled, no limit.
+- With `__event_emitter__`: toast notification + status indicator.
+- Without `__event_emitter__`: soft-block still works (no crash).
 
 ---
 
-## Phase 3 — Loop Detection & Escalation  [ ]
+## Phase 3 — Loop Detection & Escalation  [x]
 
 **Goal**: detect consecutive identical tool calls, escalate through
-`WARNING` → `FINAL WARNING` → force-terminate.
+`WARNING` → `FINAL WARNING` → soft-block (remove tools).
 
 ### New code
 
@@ -121,8 +141,6 @@ pipe(body)
   `FINAL WARNING:` to deduce current level.
 - `_last_system_contains()` — checks any system message for a substring
   (prevents duplicate injections).
-- `_inject()` — inserts a system message at the configured position
-  (`prepend` / `append_system` / `append_user`).
 - Warning/final-warning message templates.
 
 ### `pipe()` logic (Phase 3)
@@ -136,14 +154,14 @@ pipe(body)
   5. max_esc      = MAX_WARNINGS_BEFORE_TERMINATE
 
   6. if len(history) >= MAX_TOOL_CALLS_PER_TURN > 0:
-       return force-terminate (runaway)
+       _soft_block(reason, instruction)  ← remove tools, inject, forward
 
   7. loop = _has_consecutive_duplicates(history, MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING)
 
   8. if loop:
-       if escalation >= max_esc    → return force-terminate (loop)
-       elif escalation == 1        → inject FINAL WARNING
-       else                        → inject WARNING
+       if escalation >= max_esc    → _soft_block(reason, instruction)
+       elif escalation == 1        → inject FINAL WARNING (tools still available)
+       else                        → inject WARNING (tools still available)
 
   9. Forward to gateway
 ```
@@ -153,15 +171,15 @@ pipe(body)
 - `threshold=2, max_warnings=2, max_tool_calls=15`
 - Turn: `[search("X"), search("X")]` → loop detected, escalate=0 → inject WARNING
 - Turn: `[search("X")×3]` → loop detected, escalate=1 → inject FINAL WARNING
-- Turn: `[search("X")×4]` → loop detected, escalate=2 ≥ max_warnings → force-terminate
+- Turn: `[search("X")×4]` → loop detected, escalate=2 ≥ max_warnings → **soft-block** (tools removed, forward to gateway)
 - Turn: `[search("X"), search("Y")]` → **no** loop (different args).
 - Turn: `[search("X"), fetch("X")]` → **no** loop (different tool).
-- `MAX_WARNINGS_BEFORE_TERMINATE=0` → force-terminate on first loop.
+- `MAX_WARNINGS_BEFORE_TERMINATE=0` → soft-block on first loop.
 - WARNING already in messages from earlier turn → escalate to FINAL, don't re-inject.
 
 ---
 
-## Phase 4 — Preventive Reminders  [ ]
+## Phase 4 — Preventive Reminders  [x]
 
 **Goal**: inject a "REMINDER: Periodically evaluate…" message every N
 user messages, so the agent self-checks even before looping.
