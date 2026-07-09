@@ -117,7 +117,7 @@ Open WebUI detects model["pipe"] → calls pipe()
 |  1. Strip pipe prefix from body["model"] |
 |     → "deepseek/deepseek-v4-flash"       |
 |  2. Analyse messages for loops           |
-|  3. Inject warnings or force-terminate   |
+|  3. Inject warnings or soft-block        |
 |  4. Forward to Bifrost with real model   |
 +------------------------------------------+
      │
@@ -133,7 +133,7 @@ the pipe runs. The pipe receives a body with the system prompt already
 injected and the model ID already set, then does three things:
 
 1. **Strips the pipe prefix** from `body["model"]` to get the real model ID
-2. **Analyses messages** and injects warnings / force-terminates if needed
+2. **Analyses messages** and injects warnings / soft-blocks if needed
 3. **Forwards** to the gateway with the real model ID
 
 Tus workspace models conservan **todo**: system prompts, tools,
@@ -174,8 +174,11 @@ async def pipe(self, body: dict, __user__: Optional[dict] = None, __metadata__: 
     ...
 ```
 
-Returns a plain string (force-termination), an async generator (streaming
-proxy), or a dict (non-streaming proxy).
+Returns an async generator (streaming proxy), a dict (non-streaming proxy),
+or the result of `_soft_block()` (forwards to gateway with tools removed).
+Unlike a traditional force-termination (which returns a plain string to skip
+the LLM call), soft-block sends an instruction to summarise while keeping
+tools unavailable.
 
 ---
 
@@ -191,7 +194,9 @@ proxy), or a dict (non-streaming proxy).
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning. Set to 0 to disable. |
 | `MAX_WARNINGS_BEFORE_TERMINATE` | int | 2 | Warnings before tools are removed (soft-block). Set to 0 to soft-block immediately on first loop detection. |
 
-| `INJECTION_POSITION` | Literal["prepend","append_system","append_user"] | `"prepend"` | Where to inject the warning message |
+| `INJECTION_POSITION` | Literal["append_user","merge_last_tool"] | `"append_user"` | Where to inject guard messages: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |
+| `SHOW_TOOL_COUNTER` | bool | `True` | Append descending counter (`remaining tool calls: N`) to every tool result |
+| `TOOL_BLOCKLIST` | str | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
 
 ---
 
@@ -273,22 +278,19 @@ def _has_consecutive_duplicates(self, history: list[dict], threshold: int) -> bo
     )
 ```
 
-### 7.3 Escalation Level from History
+### 7.3 Escalation Tracking via Instance Variable
 
-Deduced from already-injected messages — no external state.
+Rather than scanning messages for markers, the pipe uses an instance variable
+that is reset at the start of each user turn. This avoids stale markers and
+keeps the detection decoupled from message content.
 
 ```python
-def _escalation_level(self, messages: list[dict]) -> int:
-    """0 = clean, 1 = warning, 2 = final warning."""
-    for msg in reversed(messages):
-        if msg.get("role") != "system":
-            continue
-        content = msg.get("content", "")
-        if "FINAL WARNING:" in content:
-            return 2
-        if "WARNING:" in content:
-            return 1
-    return 0
+# Reset at start of each user turn
+if total == 0:
+    self._warnings_injected = 0
+
+# Counter incremented on each warning injection
+# 0 = clean, 1 = warning injected, 2 = final warning injected
 ```
 
 ---
@@ -301,62 +303,80 @@ def _escalation_level(self, messages: list[dict]) -> int:
 Level 0: Silent monitoring
   │  Consecutive duplicate tool calls detected
   ▼
-Level 1: WARNING
-  "WARNING: You called the same tool with the same arguments
-   multiple times. Stop and change strategy, or summarize."
+Level 1: WARNING (tools still available)
+  "{tool_name} called {total}x with same args. Change approach or summarize."
   │  Agent ignores → continues looping
   ▼
-Level 2: FINAL WARNING
-  "FINAL WARNING: You are still repeating tool calls. You MUST
-   stop and provide a summary NOW."
+Level 2: FINAL WARNING (tools still available)
+  "{tool_name} called {total}x. Still repeating. Stop now and summarize."
   │  Agent still ignores
   ▼
-FORCE TERMINATE → plain string, no LLM call
+SOFT-BLOCK: only the looping tool removed from body["tools"]
+  Agent receives instruction + all collected results, can use other tools
+  "TOOL REMOVED: {tool_name} blocked after {total} identical calls."
+  → Agent has other tools available or can summarise.
 ```
 
 ### 8.2 Injection Messages
 
 **Loop Warning (level 1):**
 ```python
-{"role": "system", "content": "WARNING: In this turn you called the same "
-    "tool with the same arguments multiple times without achieving a "
-    "different result. Stop and change strategy, or provide a summary."}
+def _warning_msg(tool_name: str, total: int) -> str:
+    return f"{tool_name} called {total}x with same args. Change approach or summarize."
 ```
 
 **Final Warning (level 2):**
 ```python
-{"role": "system", "content": "FINAL WARNING: You are still repeating "
-    "tool calls despite receiving a warning. You MUST stop calling tools "
-    "immediately. Provide a summary of everything you have gathered."}
+def _final_warning_msg(tool_name: str, total: int) -> str:
+    return f"{tool_name} called {total}x. Still repeating. Stop now and summarize."
 ```
 
-**Runaway Prevention (skip escalation, immediate force-terminate):**
+**Runaway Prevention (skip escalation, immediate soft-block):**
 ```python
-{"role": "system", "content": f"LIMIT EXCEEDED: You have made {N} tool "
-    f"calls in this turn (max {MAX}). You must stop now and provide a "
-    f"final answer."}
+def _runaway_instruction(total: int, max_calls: int) -> str:
+    return (
+        f"TOOL LIMIT: {total}/{max_calls} used. "
+        f"No more tools this turn. Summarize now."
+    )
+```
+
+**Loop soft-block (only the offending tool removed):**
+```python
+def _loop_blocked_tool_instruction(tool_name: str, total: int) -> str:
+    return (
+        f"TOOL REMOVED: {tool_name} blocked after {total} identical calls. "
+        f"Other tools still available. Summarize or continue."
+    )
 ```
 
 ### 8.3 Injection Position
 
 | Value | Behaviour |
 |-------|-----------|
-| `"prepend"` | Insert at position 0 (before all messages) |
-| `"append_system"` | Insert after the last existing system message |
-| `"append_user"` | Insert before the last user message |
+| `"append_user"` (default) | Insert a new `system` message before the last user message |
+| `"merge_last_tool"` | Append the guard message content to the last tool result in the current turn, after a clear separator |
 
 ### 8.4 Avoiding Stale Injections
 
-The pipe scans the last system messages. If a warning level is already
-present, it escalates rather than re-injecting.
+The pipe uses `self._warnings_injected` (an instance variable) to track
+how many warnings have been injected. It is reset to 0 at the start of
+each user turn. This avoids re-scanning messages for markers and prevents
+stale injections from earlier turns from affecting the current one.
 
 ```python
-def _last_system_contains(self, messages: list[dict], text: str) -> bool:
-    return any(
-        msg.get("role") == "system"
-        and text.lower() in msg.get("content", "").lower()
-        for msg in messages
-    )
+# Reset warning counter at the start of a new user turn
+if total == 0:
+    self._warnings_injected = 0
+
+# Compare against MAX_WARNINGS_BEFORE_TERMINATE
+if self._warnings_injected >= max_esc:
+    # → soft-block (remove looping tool)
+elif self._warnings_injected == 1:
+    # → inject FINAL WARNING (tools still available)
+    self._warnings_injected = 2
+else:
+    # → inject WARNING (tools still available)
+    self._warnings_injected = 1
 ```
 
 ---
@@ -392,12 +412,11 @@ additive on the previous:
 
 ### Phase 3 — Loop Detection & Escalation
 - `_has_consecutive_duplicates()` detects N identical consecutive calls
-- `_escalation_level()` scans existing system messages for guard markers
-  (`[GUARD_WARN]`, `[GUARD_FINAL]`) to determine current escalation level
+- `self._warnings_injected` tracks escalation level (resets at each user turn)
 - Escalation ladder:
-  - Level 0 → inject WARNING (tools still available)
-  - Level 1 → inject FINAL WARNING (tools still available)
-  - Level 2 → soft-block (tools removed)
+  - `self._warnings_injected == 0` → inject WARNING (tools still available)
+  - `self._warnings_injected == 1` → inject FINAL WARNING (tools still available)
+  - `self._warnings_injected >= max_esc` → soft-block (only the looping tool removed)
 
 ### Phase 6 — Tool Blocklist
 - `TOOL_BLOCKLIST` valve: comma/newline-separated list of tool names to **remove**
@@ -481,7 +500,8 @@ pipe()  ← continuation
   ├─ escalation=2 ≥ MAX_WARNINGS(2)
   └─ Return plain string — NO LLM call
 
-🛑 Soft-blocked. LLM forced to summarise with results already gathered.
+🛑 Soft-blocked: only `get_weather` removed from tools, instruction injected,
+    forwarded to gateway. LLM receives all results but cannot call `get_weather`.
 ```
 
 ---
@@ -506,10 +526,10 @@ pipe()  ← continuation
 
 | Gateway unreachable during `pipes()` | Returns cached model list. Selector still works. |
 | Gateway unreachable during `pipe()` | Exception caught → error string. |
-| Warning already present from earlier | Escalate, don't re-inject. |
+| Warning already present from earlier | `self._warnings_injected` tracks it; escalate, don't re-inject. |
 | Bifrost adds a new model | Appears automatically on next model refresh. |
-| `MAX_WARNINGS_BEFORE_TERMINATE = 0` | Force-terminate on first loop detection. |
-| `MAX_WARNINGS_BEFORE_TERMINATE = 1` | Warn once, then terminate on next duplicate. |
+| `MAX_WARNINGS_BEFORE_TERMINATE = 0` | Soft-block on first loop detection (only the looping tool removed). |
+| `MAX_WARNINGS_BEFORE_TERMINATE = 1` | Warn once, then soft-block on next duplicate. |
 | Workspace model has no system prompt | Open WebUI skips system prompt injection. Pipe unaffected. |
 
 ---
@@ -529,12 +549,16 @@ pipe()  ← continuation
    within the same turn, a warning is injected before the next LLM call.
 
 5. **Escalation**: If the agent ignores the warning, the pipe escalates to
-   final warning → force-termination.
+   final warning → soft-block (only the looping tool removed from `body["tools"]`,
+   instruction injected, forwarded to gateway).
 
 6. **Runaway limit**: When tool calls in a turn exceed
-   `MAX_TOOL_CALLS_PER_TURN`, the pipe force-terminates immediately.
+   `MAX_TOOL_CALLS_PER_TURN`, the pipe soft-blocks immediately (all tools removed,
+   instruction injected, forwarded to gateway).
 
-7. **Force-termination skips LLM**: No HTTP call to the gateway is made.
+7. **Soft-block preserves LLM call**: Unlike force-termination, soft-block
+   forwards to the gateway with all tool results preserved and an instruction
+   to summarise. The LLM call still happens, but no tools are available.
 
 8. **Respects workspace model config**: System prompts, tools, and
    parameters from the workspace model are applied by Open WebUI before
