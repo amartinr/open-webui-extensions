@@ -7,7 +7,7 @@ required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import AsyncGenerator, Awaitable, Callable, Literal, Optional
 import httpx
 import json
@@ -88,6 +88,20 @@ class Pipe:
             description="Comma-separated (or newline-separated) tool names to REMOVE from the agent's tool list. "
             'Example: "delete_file, terminal_execute".',
         )
+
+        @model_validator(mode="after")
+        def _check_runaway_gt_loop(self):
+            """Ensure MAX_TOOL_CALLS_PER_TURN > MAX_CONSECUTIVE_BEFORE_BLOCK
+            when both are enabled, so runaway doesn't fire before loop detection."""
+            runaway = self.MAX_TOOL_CALLS_PER_TURN
+            loop = self.MAX_CONSECUTIVE_BEFORE_BLOCK
+            if runaway > 0 and loop >= runaway:
+                raise ValueError(
+                    f"MAX_TOOL_CALLS_PER_TURN ({runaway}) must be greater than "
+                    f"MAX_CONSECUTIVE_BEFORE_BLOCK ({loop}), otherwise runaway "
+                    f"triggers before loop detection."
+                )
+            return self
 
     def __init__(self):
         self.valves = self.Valves()
