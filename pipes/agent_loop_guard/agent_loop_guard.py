@@ -30,20 +30,12 @@ _GUARD_MESSAGES = {
     "warning": {
         "marker": "[GUARD_WARN]",
         "level": 1,
-        "text": (
-            "You are repeating the same tool call without making progress. "
-            "If you are stuck, stop calling tools and summarise what you"
-            " have so far."
-        ),
+        "text": "Tool call repeated. No progress. Summarize or change approach.",
     },
     "final": {
         "marker": "[GUARD_FINAL]",
         "level": 2,
-        "text": (
-            "You are still repeating tool calls after the previous warning. "
-            "Stop calling tools now and provide a summary of everything you"
-            " have gathered."
-        ),
+        "text": "Still repeating. Stop now and summarize what you have.",
     },
 }
 
@@ -55,17 +47,15 @@ def _compose(msg: dict) -> str:
 
 def _runaway_instruction(total: int, max_calls: int) -> str:
     return (
-        f"TOOL CALL LIMIT REACHED: You have used {total} tool calls "
-        f"(max {max_calls}). You cannot call more tools this turn. "
-        f"Provide your final answer using the information you have gathered."
+        f"TOOL LIMIT: {total}/{max_calls} used. "
+        f"No more tools this turn. Summarize now."
     )
 
 
-def _loop_soft_block_instruction(total: int) -> str:
+def _loop_blocked_tool_instruction(tool_name: str) -> str:
     return (
-        f"TOOL ACCESS REVOKED: You made {total} identical tool calls without "
-        f"making progress. All tool access has been removed for this turn. "
-        f"Provide your final answer now."
+        f"TOOL REMOVED: {tool_name} blocked after repeated identical calls. "
+        f"Other tools still available. Summarize or continue."
     )
 
 
@@ -377,10 +367,15 @@ class Pipe:
         async def _soft_block(
             reason: str,
             instruction: str,
+            blocked_tool: str | None = None,
         ):
             """Remove tools from body so the LLM cannot call more, inject
             a system message instructing it to summarise, then forward to
-            the gateway. All tool results already in messages are preserved."""
+            the gateway. All tool results already in messages are preserved.
+
+            If blocked_tool is set, only that tool is removed (loop case).
+            If None, all tools are removed (runaway case).
+            """
             log.warning("Soft-block: %s (%d tool calls in turn)", reason, total)
 
             if __event_emitter__:
@@ -409,9 +404,19 @@ class Pipe:
                 except Exception:
                     log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
-            # Remove tools so the LLM cannot call more
-            body.pop("tools", None)
-            body.pop("tool_choice", None)
+            if blocked_tool:
+                # Loop case: remove only the offending tool
+                body["tools"] = [
+                    t for t in body.get("tools", [])
+                    if t.get("function", {}).get("name") != blocked_tool
+                ]
+                # If tool_choice targets the blocked tool, reset it
+                if isinstance(body.get("tool_choice"), str) and blocked_tool in body["tool_choice"]:
+                    body.pop("tool_choice", None)
+            else:
+                # Runaway case: remove all tools
+                body.pop("tools", None)
+                body.pop("tool_choice", None)
 
             # Inject instruction to summarise
             self._inject(messages, {
@@ -453,12 +458,14 @@ class Pipe:
 
         if loop_detected:
             if escalation >= max_esc:
-                # Already warned enough → soft-block (remove tools)
+                # Already warned enough → remove only the looping tool
+                bad_tool = history[-1]["name"]
                 return await _soft_block(
                     reason=(
                         f"Repeated tool call detected: {total} calls in this turn"
                     ),
-                    instruction=_loop_soft_block_instruction(total),
+                    instruction=_loop_blocked_tool_instruction(bad_tool),
+                    blocked_tool=bad_tool,
                 )
             elif escalation == 1:
                 # Final warning — inject and forward normally (tools still available)
