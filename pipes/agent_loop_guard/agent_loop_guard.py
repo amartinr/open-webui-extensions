@@ -422,6 +422,9 @@ class Pipe:
             If blocked_tool is set, only that tool is removed (loop case).
             If None, all tools are removed (runaway case).
             """
+            # Loop soft-block is error (same severity as runaway) so the user
+            # sees a clear progression: info → warning → error
+            notification_type = "error"
             log.warning("Soft-block: %s (%d tool calls in turn)", reason, total)
 
             if __event_emitter__:
@@ -430,7 +433,7 @@ class Pipe:
                         {
                             "type": "notification",
                             "data": {
-                                "type": "error",
+                                "type": notification_type,
                                 "content": (
                                     f"🛡️ Agent Loop Guard: {reason}"
                                 ),
@@ -520,6 +523,22 @@ class Pipe:
                     "content": _final_warning_msg(bad_tool, total),
                 })
                 self._warnings_injected = 2
+                if __event_emitter__:
+                    try:
+                        await __event_emitter__(
+                            {
+                                "type": "notification",
+                                "data": {
+                                    "type": "warning",
+                                    "content": (
+                                        f"🛡️ Agent Loop Guard: {bad_tool} called {total}x. "
+                                        f"Still repeating. Final warning."
+                                    ),
+                                },
+                            }
+                        )
+                    except Exception:
+                        log.warning("Failed to emit FINAL WARNING event (non-fatal)", exc_info=True)
             else:
                 # First warning — inject and forward normally
                 self._inject(messages, {
@@ -527,6 +546,22 @@ class Pipe:
                     "content": _warning_msg(bad_tool, total),
                 })
                 self._warnings_injected = 1
+                if __event_emitter__:
+                    try:
+                        await __event_emitter__(
+                            {
+                                "type": "notification",
+                                "data": {
+                                    "type": "info",
+                                    "content": (
+                                        f"🛡️ Agent Loop Guard: {bad_tool} called {total}x "
+                                        f"with same args."
+                                    ),
+                                },
+                            }
+                        )
+                    except Exception:
+                        log.warning("Failed to emit WARNING event (non-fatal)", exc_info=True)
 
         # --- Tool blocklist ---------------------------------------------
         self._apply_tool_blocklist(body)
