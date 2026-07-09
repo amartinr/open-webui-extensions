@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 # Each entry has:
 #   marker — stable token for detection (_escalation_level, etc.)
 #   text   — human-readable message sent to the LLM
-#   level  — 0=reminder, 1=warning, 2=final
+#   level  — 1=warning, 2=final
 #
 # The composed string sent to the LLM is: marker + " " + text
 
@@ -45,29 +45,12 @@ _GUARD_MESSAGES = {
             " have gathered."
         ),
     },
-    "reminder": {
-        "marker": "[GUARD_REMIND]",
-        "level": 0,
-        "text": (
-            "Periodically check whether your tool calls are producing new"
-            " results. If you detect repetition, stop and provide a"
-            " summary."
-        ),
-    },
 }
 
 
 def _compose(msg: dict) -> str:
     """Compose a guard message string for the LLM: marker + text."""
     return f"{msg['marker']} {msg['text']}"
-
-
-def _guard_by_marker(marker: str) -> dict | None:
-    """Look up a guard message entry by its marker string."""
-    for entry in _GUARD_MESSAGES.values():
-        if entry["marker"] == marker:
-            return entry
-    return None
 
 
 def _runaway_instruction(total: int, max_calls: int) -> str:
@@ -119,17 +102,10 @@ class Pipe:
             default=2,
             description="Warnings before tools are removed (soft-block). Set to 0 to soft-block immediately on first loop detection.",
         )
-        ENABLE_PREVENTIVE_REMINDER: bool = Field(
-            default=True,
-            description="Inject periodic self-evaluation reminders.",
-        )
-        REMINDER_INTERVAL: int = Field(
-            default=3,
-            description="Inject preventive reminder every N user messages.",
-        )
+
         INJECTION_POSITION: str = Field(
-            default="append_system",
-            description="Where to inject warning messages: 'prepend', 'append_system', or 'append_user'.",
+            default="append_user",
+            description="Where to inject guard messages: 'append_user' (before last user msg) or 'merge_last_tool' (append to last tool result, after a separator).",
         )
 
     def __init__(self):
@@ -262,11 +238,12 @@ class Pipe:
 
     def _escalation_level(self, messages: list[dict]) -> int:
         """Deduce escalation level from injected guard markers.
+        Scans system AND tool messages (merge_last_tool injects into tool results).
         0 = clean, 1 = warning, 2 = final warning."""
         msg_final = _GUARD_MESSAGES["final"]
         msg_warn = _GUARD_MESSAGES["warning"]
         for m in reversed(messages):
-            if m.get("role") != "system":
+            if m.get("role") not in ("system", "tool"):
                 continue
             content = m.get("content", "")
             if msg_final["marker"] in content:
@@ -275,42 +252,40 @@ class Pipe:
                 return 1
         return 0
 
-    def _last_system_contains(self, messages: list[dict], text: str) -> bool:
-        """Check if any system message contains the given text (case-insensitive)."""
-        return any(
-            msg.get("role") == "system"
-            and text.lower() in msg.get("content", "").lower()
-            for msg in messages
-        )
-
     # ------------------------------------------------------------------
     # Injection helper
     # ------------------------------------------------------------------
 
     def _inject(self, messages: list[dict], message: dict) -> None:
-        """Insert a message into the conversation at the configured position.
+        """Insert a guard message into the conversation at the configured position.
 
-        Supports three positions:
-          - prepend:      insert at index 0
-          - append_user:  insert before the last user message
-          - append_system: insert after the last system message
-        Defaults to 'prepend' when valve is not set or unrecognised.
+        Supports two positions:
+          - append_user:      insert before the last user message (default)
+          - merge_last_tool:  append the message content to the end of the last
+                              tool result of the current turn, after a clear
+                              separator (no new message added).
         """
-        pos = getattr(self.valves, "INJECTION_POSITION", "append_system")
-        if pos == "append_user":
+        pos = getattr(self.valves, "INJECTION_POSITION", "append_user")
+        if pos == "merge_last_tool":
+            # Append the guard message to the last tool result of the current turn.
+            # Scan backwards until we hit a user message (start of turn).
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    break
+                if messages[i].get("role") == "tool":
+                    original = messages[i].get("content", "")
+                    suffix = message.get("content", "")
+                    if suffix:
+                        messages[i]["content"] = f"{original}\n\n---\n{suffix}"
+                    return
+            # Fallback: no tool message found, append as system message
+            messages.append({"role": "system", "content": message.get("content", "")})
+        else:  # append_user (default)
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user":
                     messages.insert(i, message)
                     return
             messages.append(message)
-        elif pos == "append_system":
-            idx = -1
-            for i, m in enumerate(messages):
-                if m.get("role") == "system":
-                    idx = i
-            messages.insert(idx + 1, message)
-        else:  # prepend (default)
-            messages.insert(0, message)
 
     # ------------------------------------------------------------------
     # Gateway proxy
@@ -474,16 +449,6 @@ class Pipe:
                     "role": "system",
                     "content": _compose(_GUARD_MESSAGES["warning"]),
                 })
-
-        # --- Preventive reminder --------------------------------------
-        if self.valves.ENABLE_PREVENTIVE_REMINDER and not loop_detected and not runaway:
-            user_count = sum(1 for m in messages if m.get("role") == "user")
-            if user_count > 0 and user_count % self.valves.REMINDER_INTERVAL == 0:
-                if not self._last_system_contains(messages, _GUARD_MESSAGES["reminder"]["marker"]):
-                    self._inject(messages, {
-                        "role": "system",
-                        "content": _compose(_GUARD_MESSAGES["reminder"]),
-                    })
 
         # --- Forward to gateway ---------------------------------------
         payload = {**body, "model": real_model, "messages": messages}
