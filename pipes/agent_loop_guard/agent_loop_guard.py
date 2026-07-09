@@ -419,9 +419,30 @@ class Pipe:
         history = self._extract_tool_calls_in_turn(messages)
         total = len(history)
 
+        # --- Debug: summary of received request -----------------------
+        log.debug(
+            "pipe() called | model=%s | stream=%s | tools=%s | tool_choice=%s | messages=%d",
+            real_model,
+            body.get("stream", False),
+            [t.get("function", {}).get("name") for t in body.get("tools", [])],
+            body.get("tool_choice", "auto"),
+            len(messages),
+        )
+        log.debug(
+            "Gateway headers: %s",
+            {k: ("<redacted>" if k == self.valves.GATEWAY_AUTH_HEADER else v) for k, v in headers.items()},
+        )
+
         # Reset per-turn state at the start of a new user turn
         if total == 0:
             self._merge_injected = False
+
+        # --- Debug: tool calls extracted -------------------------------
+        log.debug(
+            "Tool calls in turn: %d | history: %s",
+            total,
+            json.dumps(history, indent=2),
+        )
 
         # --- Helper: soft-block (remove tools + inject + forward) -----
         async def _soft_block(
@@ -476,10 +497,22 @@ class Pipe:
                 # If tool_choice targets the blocked tool, reset it
                 if isinstance(body.get("tool_choice"), str) and blocked_tool in body["tool_choice"]:
                     body.pop("tool_choice", None)
+                log.debug(
+                    "Soft-block (loop) | tool removed: %s | remaining tools: %s",
+                    blocked_tool,
+                    [t.get("function", {}).get("name") for t in body.get("tools", [])],
+                )
             else:
                 # Runaway case: remove all tools
                 body.pop("tools", None)
                 body.pop("tool_choice", None)
+                log.debug("Soft-block (runaway) | all tools removed")
+
+            log.debug(
+                "Soft-block | instruction: %s | injection_pos: %s",
+                instruction,
+                getattr(self.valves, "INJECTION_POSITION", "append_user"),
+            )
 
             # Inject instruction to summarise
             self._inject(messages, {
@@ -512,6 +545,17 @@ class Pipe:
         # --- Loop detection (consecutive identical tool calls) ---------
         consecutive, bad_tool, _ = self._count_consecutive_duplicates(history)
         block_threshold = self.valves.MAX_CONSECUTIVE_BEFORE_BLOCK
+
+        # --- Debug: loop analysis -------------------------------------
+        if total > 0:
+            log.debug(
+                "Loop analysis | consecutive=%s | bad_tool=%s | block_threshold=%s | final_pos=%s | total=%s",
+                consecutive,
+                bad_tool,
+                block_threshold,
+                2 + (block_threshold - 2) * 3 // 5 if block_threshold >= 2 else None,
+                total,
+            )
 
         if consecutive >= 2:
             # Formula-based escalation: each level fires exactly once.
@@ -579,7 +623,13 @@ class Pipe:
                         log.warning("Failed to emit WARNING event (non-fatal)", exc_info=True)
 
         # --- Tool blocklist ---------------------------------------------
+        before_blocklist = [t.get("function", {}).get("name") for t in body.get("tools", [])]
         self._apply_tool_blocklist(body)
+        if self.valves.TOOL_BLOCKLIST.strip():
+            after_blocklist = [t.get("function", {}).get("name") for t in body.get("tools", [])]
+            removed = set(before_blocklist) - set(after_blocklist)
+            if removed:
+                log.debug("Tool blocklist | removed: %s", sorted(removed))
 
         # --- Tool counter ----------------------------------------------
         if (
@@ -588,6 +638,14 @@ class Pipe:
             and self.valves.MAX_TOOL_CALLS_PER_TURN > 0
         ):
             self._append_tool_counter(messages, total, self.valves.MAX_TOOL_CALLS_PER_TURN)
+            remaining = max(0, self.valves.MAX_TOOL_CALLS_PER_TURN - total)
+            log.debug(
+                "Tool counter appended | total=%d | max=%d | remaining=%d | merge_injected=%s",
+                total,
+                self.valves.MAX_TOOL_CALLS_PER_TURN,
+                remaining,
+                self._merge_injected,
+            )
 
             if __event_emitter__:
                 remaining = max(0, self.valves.MAX_TOOL_CALLS_PER_TURN - total)
@@ -605,14 +663,39 @@ class Pipe:
                 except Exception:
                     log.warning("Failed to emit counter status (non-fatal)", exc_info=True)
 
+        # --- Debug: final payload before forwarding --------------------
+        payload_preview = {
+            "model": real_model,
+            "stream": body.get("stream", False),
+            "tools": [t.get("function", {}).get("name") for t in body.get("tools", [])],
+            "tool_choice": body.get("tool_choice", "auto"),
+            "messages": [
+                {
+                    "role": m.get("role"),
+                    "content": (m.get("content", "")[:200] + "...") if len(m.get("content", "")) > 200 else m.get("content", ""),
+                    "tool_calls": bool(m.get("tool_calls")),
+                }
+                for m in messages
+            ],
+        }
+        log.debug(
+            "Forwarding to gateway | payload summary: %s",
+            json.dumps(payload_preview, indent=2),
+        )
+
         # --- Forward to gateway ---------------------------------------
         payload = {**body, "model": real_model, "messages": messages}
 
         try:
             if body.get("stream", False):
+                log.debug("Streaming request started")
                 return self._stream(payload, headers, url)
             else:
-                return await self._call(payload, headers, url)
+                response = await self._call(payload, headers, url)
+                # Only log first 500 chars of response to avoid flooding
+                response_preview = json.dumps(response, indent=2)[:500]
+                log.debug("Non-streaming response (truncated): %s", response_preview)
+                return response
         except httpx.HTTPStatusError as e:
             log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
             return (
