@@ -41,7 +41,7 @@ pipes/agent_loop_guard/
 
 | Concern | Included | Deferred |
 |---------|:--------:|:--------:|
-| `Valves` with `GATEWAY_BASE_URL` + `GATEWAY_API_KEY` | ✅ | |
+| `Valves` with `GATEWAY_BASE_URL` + `GATEWAY_AUTH_VALUE` | ✅ | |
 | `pipes()` — dynamic model discovery via `GET /models` | ✅ | |
 | Cache with fallback on gateway failure | ✅ | |
 | `pipe()` — strip prefix, forward to gateway | ✅ | |

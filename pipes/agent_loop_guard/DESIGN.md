@@ -62,7 +62,7 @@ sub-pipe per model. **Nothing is hardcoded.**
 
 **Step 1 — Upload the pipe once.** Configure two valves:
 - `GATEWAY_BASE_URL` → Bifrost endpoint
-- `GATEWAY_API_KEY` → Bifrost API key
+- `GATEWAY_AUTH_VALUE` → gateway credential
 
 **Step 2 — The selector populates automatically.** Open WebUI calls
 `pipes()` during model discovery, which queries Bifrost's `/models` endpoint
@@ -180,7 +180,7 @@ configuration.
 |-------|------|---------|-------------|
 | `GATEWAY_BASE_URL` | str | `""` | Base URL for the OpenAI-compatible gateway |
 | `GATEWAY_AUTH_HEADER` | str | `"x-bf-vk"` | HTTP header name for the API key |
-| `GATEWAY_API_KEY` | str (password) | `""` | API key value sent in the configured auth header |
+| `GATEWAY_AUTH_VALUE` | str (password) | `""` | Credential value sent in the configured auth header |
 | `GATEWAY_HOST_HEADER` | str | `"x-bf-dim-host"` | HTTP header name for the host routing value |
 | `GATEWAY_HOST_VALUE` | str | `""` | Value sent in the host routing header (e.g. Bifrost dimension) |
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning |
@@ -397,9 +397,9 @@ class Pipe:
             default="x-bf-vk",
             description="HTTP header name for the API key.",
         )
-        GATEWAY_API_KEY: str = Field(
+        GATEWAY_AUTH_VALUE: str = Field(
             default="",
-            description="API key value sent in the configured auth header.",
+            description="Credential value sent in the configured auth header.",
             json_schema_extra={"input": {"type": "password"}},
         )
         GATEWAY_HOST_HEADER: str = Field(
@@ -545,8 +545,8 @@ class Pipe:
     def _build_gateway_headers(self) -> dict:
         """Build the headers dict for gateway requests."""
         headers = {}
-        if self.valves.GATEWAY_API_KEY:
-            headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_API_KEY
+        if self.valves.GATEWAY_AUTH_VALUE:
+            headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_AUTH_VALUE
         if self.valves.GATEWAY_HOST_VALUE:
             headers[self.valves.GATEWAY_HOST_HEADER] = self.valves.GATEWAY_HOST_VALUE
         return headers
@@ -801,4 +801,4 @@ pipe()  ← continuation
    Bifrost adds a protected sub-pipe automatically.
 
 10. **Single set of credentials**: Only `GATEWAY_BASE_URL` and
-    `GATEWAY_API_KEY` are needed — all models share the same gateway.
+    `GATEWAY_AUTH_VALUE` are needed — all models share the same gateway.

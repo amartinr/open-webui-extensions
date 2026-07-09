@@ -25,9 +25,9 @@ class Pipe:
             default="x-bf-vk",
             description="HTTP header name for the API key (e.g. 'Authorization', 'x-bf-vk', 'x-api-key').",
         )
-        GATEWAY_API_KEY: str = Field(
+        GATEWAY_AUTH_VALUE: str = Field(
             default="",
-            description="API key value sent in the configured auth header.",
+            description="Credential value sent in the configured auth header (e.g. 'Bearer sk-...', 'bf-vk-...').",
             json_schema_extra={"input": {"type": "password"}},
         )
         GATEWAY_HOST_HEADER: str = Field(
@@ -80,8 +80,8 @@ class Pipe:
     def _build_gateway_headers(self) -> dict:
         """Build the headers dict for gateway requests."""
         headers = {}
-        if self.valves.GATEWAY_API_KEY:
-            headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_API_KEY
+        if self.valves.GATEWAY_AUTH_VALUE:
+            headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_AUTH_VALUE
         if self.valves.GATEWAY_HOST_VALUE:
             headers[self.valves.GATEWAY_HOST_HEADER] = self.valves.GATEWAY_HOST_VALUE
         return headers
