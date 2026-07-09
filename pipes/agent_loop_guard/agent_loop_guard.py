@@ -95,6 +95,7 @@ class Pipe:
         self.valves = self.Valves()
         self._models_cache: list[dict] = []
         self._warnings_injected = 0
+        self._merge_injected = False
 
     # ------------------------------------------------------------------
     # Model discovery (manifold)
@@ -283,7 +284,11 @@ class Pipe:
 
     def _append_tool_counter(self, messages: list[dict], total: int, max_calls: int) -> None:
         """Append a descending counter to the last tool result in the current turn.
-        The counter tells the agent how many tool calls it has left."""
+        The counter tells the agent how many tool calls it has left.
+
+        If _merge_injected is True (meaning _inject() already appended a guard
+        message to the last tool result), the counter is appended without adding
+        a second separator."""
         if max_calls <= 0:
             return
         remaining = max(0, max_calls - total)
@@ -293,7 +298,11 @@ class Pipe:
                 break
             if messages[i].get("role") == "tool":
                 original = messages[i].get("content", "")
-                messages[i]["content"] = f"{original}\n---\nremaining tool calls: {remaining}"
+                if self._merge_injected:
+                    # Separator already added by _inject() — reuse it
+                    messages[i]["content"] = f"{original}\nremaining tool calls: {remaining}"
+                else:
+                    messages[i]["content"] = f"{original}\n---\nremaining tool calls: {remaining}"
                 return
 
     # ------------------------------------------------------------------
@@ -321,6 +330,7 @@ class Pipe:
                     suffix = message.get("content", "")
                     if suffix:
                         messages[i]["content"] = f"{original}\n\n---\n{suffix}"
+                    self._merge_injected = True
                     return
             # Fallback: no tool message found, append as system message
             messages.append({"role": "system", "content": message.get("content", "")})
@@ -392,9 +402,10 @@ class Pipe:
         history = self._extract_tool_calls_in_turn(messages)
         total = len(history)
 
-        # Reset warning counter at the start of a new user turn
+        # Reset per-turn state at the start of a new user turn
         if total == 0:
             self._warnings_injected = 0
+            self._merge_injected = False
 
         max_esc = self.valves.MAX_WARNINGS_BEFORE_TERMINATE
 
