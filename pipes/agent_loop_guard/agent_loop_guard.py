@@ -135,7 +135,7 @@ class Pipe:
           - append_system: insert after the last system message
         Defaults to 'prepend' when valve is not set or unrecognised.
         """
-        pos = getattr(self.valves, "INJECTION_POSITION", "prepend")
+        pos = getattr(self.valves, "INJECTION_POSITION", "append_system")
         if pos == "append_user":
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user":
@@ -208,19 +208,22 @@ class Pipe:
             bool(self.valves.GATEWAY_HOST_VALUE),
         )
 
-        # --- Runaway prevention ---------------------------------------
+        # --- Analyse tool calls in current turn -----------------------
         max_tool_calls = self.valves.MAX_TOOL_CALLS_PER_TURN
-        if max_tool_calls > 0:
-            history = self._extract_tool_calls_in_turn(messages)
-            if len(history) >= max_tool_calls:
-                log.warning(
-                    "Force-terminate: %d tool calls in turn (limit=%d)",
-                    len(history),
-                    max_tool_calls,
-                )
+        history = self._extract_tool_calls_in_turn(messages) if max_tool_calls > 0 else []
 
-                # Notify the user via UI toast + status indicator
-                if __event_emitter__:
+        # --- Runaway prevention ---------------------------------------
+        if max_tool_calls > 0 and len(history) >= max_tool_calls:
+            log.warning(
+                "Force-terminate: %d tool calls in turn (limit=%d)",
+                len(history),
+                max_tool_calls,
+            )
+
+            # Notify the user via UI toast + status indicator.
+            # Wrap in try/except — if event_emitter fails, we still block.
+            if __event_emitter__:
+                try:
                     await __event_emitter__(
                         {
                             "type": "notification",
@@ -246,49 +249,18 @@ class Pipe:
                             },
                         }
                     )
+                except Exception:
+                    log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
-                # Inject system message so the agent knows it hit the limit
-                # and can learn from this over the conversation.
-                self._inject(
-                    messages,
-                    {
-                        "role": "system",
-                        "content": (
-                            f"LIMIT EXCEEDED: You made {len(history)} tool calls in "
-                            f"this turn (max allowed: {max_tool_calls}). The Agent "
-                            f"Loop Guard has blocked further tool calls. Provide a "
-                            f"final answer with the information you have gathered. "
-                            f"In future turns, be mindful of the tool call limit "
-                            f"and try to achieve your goal with fewer calls."
-                        ),
-                    },
-                )
+            # Do NOT forward to the LLM — it ignores stop instructions.
+            # Return a guard message that gets persisted in the chat.
+            # The agent sees it on the next turn and learns from it.
+            return (
+                f"TOOL CALL LIMIT: {len(history)} calls this turn "
+                f"(max {max_tool_calls}). Further calls blocked."
+            )
 
-                # Forward to the LLM so the agent can wrap up gracefully.
-                # It sees the LIMIT EXCEEDED message and learns from it.
-                payload = {**body, "model": real_model, "messages": messages}
-                try:
-                    if body.get("stream", False):
-                        return self._stream(payload, headers, url)
-                    else:
-                        return await self._call(payload, headers, url)
-                except httpx.HTTPStatusError as e:
-                    log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
-                    return (
-                        f"Gateway error: HTTP {e.response.status_code}. "
-                        f"Please check the gateway configuration."
-                    )
-                except httpx.RequestError as e:
-                    log.error("Gateway unreachable: %s", e)
-                    return (
-                        "Gateway unreachable. Please check that the gateway is running "
-                        "and GATEWAY_BASE_URL is correct."
-                    )
-                except Exception as e:
-                    log.error("Unexpected error calling gateway: %s", e)
-                    return f"Error calling gateway: {e}"
-
-        # Forward to gateway with the real model ID.
+        # --- Forward to gateway ---------------------------------------
         payload = {**body, "model": real_model}
 
         try:
