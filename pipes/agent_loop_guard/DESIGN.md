@@ -189,8 +189,7 @@ configuration.
 | `GATEWAY_BASE_URL` | str | `""` | Base URL for the OpenAI-compatible gateway |
 | `GATEWAY_AUTH_HEADER` | str | `"x-bf-vk"` | HTTP header name for the API key |
 | `GATEWAY_AUTH_VALUE` | str (password) | `""` | Credential value sent in the configured auth header |
-| `GATEWAY_HOST_HEADER` | str | `"x-bf-dim-host"` | HTTP header name for the host routing value |
-| `GATEWAY_HOST_VALUE` | str | `""` | Value sent in the host routing header (e.g. Bifrost dimension) |
+| `GATEWAY_CUSTOM_HEADERS` | str (JSON) | `""` | JSON object of extra HTTP headers (e.g. `{"x-bf-dim-host": "myhost"}`) |
 | `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning |
 | `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls per turn before force-termination |
 | `ENABLE_PREVENTIVE_REMINDER` | bool | True | Periodic self-evaluation reminder every N messages |
@@ -410,13 +409,10 @@ class Pipe:
             description="Credential value sent in the configured auth header.",
             json_schema_extra={"input": {"type": "password"}},
         )
-        GATEWAY_HOST_HEADER: str = Field(
-            default="x-bf-dim-host",
-            description="HTTP header name for the host routing value.",
-        )
-        GATEWAY_HOST_VALUE: str = Field(
+        GATEWAY_CUSTOM_HEADERS: str = Field(
             default="",
-            description="Value sent in the host routing header.",
+            description='JSON object of extra HTTP headers to send with every gateway request. '
+            'Example: {"x-bf-dim-host": "myhost"}.',
         )
         MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING: int = Field(
             default=2,
@@ -555,8 +551,13 @@ class Pipe:
         headers = {}
         if self.valves.GATEWAY_AUTH_VALUE:
             headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_AUTH_VALUE
-        if self.valves.GATEWAY_HOST_VALUE:
-            headers[self.valves.GATEWAY_HOST_HEADER] = self.valves.GATEWAY_HOST_VALUE
+        if self.valves.GATEWAY_CUSTOM_HEADERS:
+            try:
+                extra = json.loads(self.valves.GATEWAY_CUSTOM_HEADERS)
+                if isinstance(extra, dict):
+                    headers.update(extra)
+            except json.JSONDecodeError:
+                pass
         return headers
 
     # ------------------------------------------------------------------

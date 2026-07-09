@@ -31,13 +31,11 @@ class Pipe:
             description="Credential value sent in the configured auth header (e.g. 'Bearer sk-...', 'bf-vk-...').",
             json_schema_extra={"input": {"type": "password"}},
         )
-        GATEWAY_HOST_HEADER: str = Field(
-            default="x-bf-dim-host",
-            description="HTTP header name for the host routing value (e.g. 'x-bf-dim-host').",
-        )
-        GATEWAY_HOST_VALUE: str = Field(
+        GATEWAY_CUSTOM_HEADERS: str = Field(
             default="",
-            description="Value sent in the host routing header (e.g. Bifrost dimension). Leave empty if not needed.",
+            description="JSON object of extra HTTP headers to send with every gateway request. "
+            'Example: {"x-bf-dim-host": "myhost", "x-trace-id": "abc"}. '
+            "Leave empty if not needed.",
         )
         MAX_TOOL_CALLS_PER_TURN: int = Field(
             default=15,
@@ -114,10 +112,24 @@ class Pipe:
             )
         else:
             log.warning("GATEWAY_AUTH_VALUE is empty — gateway requests will have no auth header.")
-        if self.valves.GATEWAY_HOST_VALUE:
-            headers[self.valves.GATEWAY_HOST_HEADER] = self.valves.GATEWAY_HOST_VALUE
 
-        log.debug("Gateway headers: %s", {k: ("<redacted>" if k == self.valves.GATEWAY_AUTH_HEADER else v) for k, v in headers.items()})
+        # Parse custom headers from JSON valve
+        if self.valves.GATEWAY_CUSTOM_HEADERS:
+            try:
+                extra_headers = json.loads(self.valves.GATEWAY_CUSTOM_HEADERS)
+                if isinstance(extra_headers, dict):
+                    for k, v in extra_headers.items():
+                        if k and v:
+                            headers[k] = str(v)
+                else:
+                    log.warning("GATEWAY_CUSTOM_HEADERS is not a JSON object — ignoring")
+            except json.JSONDecodeError as e:
+                log.warning("GATEWAY_CUSTOM_HEADERS is not valid JSON: %s", e)
+
+        log.debug(
+            "Gateway headers: %s",
+            {k: ("<redacted>" if k == self.valves.GATEWAY_AUTH_HEADER else v) for k, v in headers.items()},
+        )
         return headers
 
     # ------------------------------------------------------------------
@@ -254,12 +266,12 @@ class Pipe:
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 
         log.info(
-            "Agent Loop Guard → %s (model=%s, auth_header=%s, has_auth=%s, has_host=%s)",
+            "Agent Loop Guard → %s (model=%s, auth_header=%s, has_auth=%s, custom_headers=%s)",
             url,
             real_model,
             self.valves.GATEWAY_AUTH_HEADER,
             bool(self.valves.GATEWAY_AUTH_VALUE),
-            bool(self.valves.GATEWAY_HOST_VALUE),
+            bool(self.valves.GATEWAY_CUSTOM_HEADERS),
         )
 
         # --- Analyse tool calls in current turn -----------------------

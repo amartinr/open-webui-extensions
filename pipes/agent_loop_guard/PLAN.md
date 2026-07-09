@@ -10,6 +10,7 @@ is strictly more capable than the last.
 - [x] Phase 3 — Loop Detection & Escalation
 - [x] Phase 4 — Preventive Reminders
 - [ ] Phase 5 — Polish & Production Readiness
+- [ ] Phase 6 — Tool Allowlist / Blocklist
 
 ## Phase overview
 
@@ -20,6 +21,7 @@ is strictly more capable than the last.
 | 3 | + Consecutive duplicate detection + escalation | ✅ Done |
 | 4 | + Preventive reminders | ✅ Done |
 | 5 | Polish: logging, hardening, tests | ⬜ Pending |
+| 6 | + Tool allowlist/blocklist (remove tools by name) | ⬜ Pending |
 
 ---
 
@@ -222,6 +224,7 @@ Same as Phase 3, plus:
 4. **Test with multiple gateway providers** — LiteLLM, Bifrost, custom
    OpenAI-compatible proxies.
 5. **Test edge cases from DESIGN.md §13** — all 9 cases.
+6. **Replace `GATEWAY_HOST_HEADER` + `GATEWAY_HOST_VALUE` with single `GATEWAY_CUSTOM_HEADERS` valve** — the old two-valve pattern was specific to Bifrost's host-routing. The new valve accepts a JSON object so arbitrary headers (host routing, tracing, debug, etc.) can be added without adding a new valve per header. Backward-incompatible: existing installations must migrate their `GATEWAY_HOST_HEADER`/`GATEWAY_HOST_VALUE` into `GATEWAY_CUSTOM_HEADERS` as a JSON object (e.g. `{"x-bf-dim-host": "myhost"}`).
 
 ### Optional stretch goals (not in DESIGN.md)
 
@@ -229,6 +232,92 @@ Same as Phase 3, plus:
   force-termination so the user sees "🛡️ Loop guard: stopped" in the UI.
 - **Per-model overrides** — if a manifold per-model valve pattern emerges in
   Open WebUI, allow per-sub-pipe thresholds.
+
+---
+
+## Phase 6 — Tool Allowlist / Blocklist  [ ]
+
+**Goal**: let the admin configure which tools the agent can see by name.
+The pipe filters `body["tools"]` before forwarding, so the LLM never
+knows the removed tools exist.
+
+### Motivation
+
+Open WebUI workspace models inherit all available tools. An admin may
+want to:
+
+- **Block** a dangerous tool (`terminal_execute`, `delete_file`)
+- **Remove** expensive tools (`search_web`, `fetch_url`) from cheap models
+- **Allowlist** only a small subset (e.g. `calculator` + `sql_query`)
+
+A Filter cannot do this reliably — the tool list is reconstructed after
+filter execution (see Bypass schema below). A Pipe can mutate
+`body["tools"]` directly before forwarding, and the change is
+**definitive**.
+
+### New valves
+
+| Valve | Type | Default | Description |
+|-------|------|---------|-------------|
+| `TOOL_BLOCKLIST` | str | `""` | Comma-separated tool names to **remove** from the agent's tool list |
+| `TOOL_ALLOWLIST` | str | `""` | Comma-separated tool names — **only** these are kept, all others removed |
+
+If both are set, allowlist wins (blocklist is ignored).
+If neither is set, all tools pass through unchanged (current behaviour).
+
+### `pipe()` logic (Phase 6)
+
+After analysing tool calls (phases 2-4), before forwarding:
+
+```
+if TOOL_ALLOWLIST:
+    allowed = {name.strip() for name in TOOL_ALLOWLIST.split(",")}
+    body["tools"] = [
+        t for t in body.get("tools", [])
+        if t.get("function", {}).get("name") in allowed
+    ]
+elif TOOL_BLOCKLIST:
+    blocked = {name.strip() for name in TOOL_BLOCKLIST.split(",")}
+    body["tools"] = [
+        t for t in body.get("tools", [])
+        if t.get("function", {}).get("name") not in blocked
+    ]
+```
+
+Additionally, if `tool_choice` targets a blocked tool, reset it:
+
+```
+# If tool_choice forces a now-removed tool, let the LLM decide
+if "tool_choice" in body:
+    tc_name = body["tool_choice"]
+    if isinstance(tc_name, str) and tc_name not in allowed:
+        body.pop("tool_choice", None)
+```
+
+### Example
+
+| Allowlist | Blocklist | Result |
+|-----------|-----------|--------|
+| `""` | `""` | All tools pass through |
+| `""` | `"delete_file,terminal_execute"` | Everything except those two |
+| `"search_web,calculator"` | `""` | Only search_web and calculator |
+| `"search_web"` | `"fetch_url"` | Allowlist wins: only search_web |
+
+### Soft-block interaction
+
+Phase 2's soft-block (`body.pop("tools", None)`) happens **after**
+the allowlist/blocklist filter. The soft-block in Phase 2-3 removes
+*all* tools; Phase 6 runs only when no soft-block is active.
+
+### Validation
+
+- Blocklist: set `TOOL_BLOCKLIST="search_web"`. Agent cannot call
+  `search_web` but can call `fetch_url`, `calculator`, etc.
+- Allowlist: set `TOOL_ALLOWLIST="calculator"`. Agent sees only
+  `calculator`.
+- Both empty: no change, all tools visible.
+- `tool_choice` targeting a blocked tool → gracefully reset.
+- Soft-block (runaway/loop) still removes all tools regardless.
 
 ---
 
@@ -249,7 +338,7 @@ stored as a single source blob in the database. No `__init__.py`, no package.
 ## Implementation order & dependencies
 
 ```
-Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
+Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 ──► Phase 6
    │
    └── Foundation: Valves, pipes(), pipe(), _stream, _call
         │
@@ -260,8 +349,10 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5
                   └── Phase 4 reuses all of the above, adds one if-block
                        │
                        └── Phase 5 adds logging, hardening, no new logic
+                            │
+                            └── Phase 6 adds allowlist/blocklist filtering
 ```
 
 Each phase's code is an **additive diff** on the previous phase — never a
-rewrite. The Phase 1 file is built from scratch. Phases 2–5 are series of
+rewrite. The Phase 1 file is built from scratch. Phases 2–6 are series of
 small, reviewable edits.
