@@ -802,3 +802,19 @@ pipe()  ← continuation
 
 10. **Single set of credentials**: Only `GATEWAY_BASE_URL` and
     `GATEWAY_AUTH_VALUE` are needed — all models share the same gateway.
+
+---
+
+## 15. TODO
+
+### Force-termination: avoid hardcoded guard message impersonating agent
+
+Currently on runaway the pipe returns a hardcoded string that appears in
+chat as if the agent said it. Options to explore:
+
+- **A** — Hardcoded string (current). Pipe impersonates agent. Confusing.
+- **B** — Return empty string `""`. Shows blank assistant message; toast
+  already informs the user.
+- **C** — Raise an exception so Open WebUI handles the error natively
+  (e.g. generic error message in chat, or silent turn abort). Unknown
+  how OWUI behaves in this case — needs testing.
