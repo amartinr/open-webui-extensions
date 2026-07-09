@@ -8,7 +8,7 @@ requirements: httpx, pydantic
 """
 
 from pydantic import BaseModel, Field
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Awaitable, Callable, Optional
 import httpx
 import json
 import logging
@@ -123,6 +123,35 @@ class Pipe:
         return history
 
     # ------------------------------------------------------------------
+    # Injection helper
+    # ------------------------------------------------------------------
+
+    def _inject(self, messages: list[dict], message: dict) -> None:
+        """Insert a message into the conversation at the configured position.
+
+        Supports three positions:
+          - prepend:      insert at index 0
+          - append_user:  insert before the last user message
+          - append_system: insert after the last system message
+        Defaults to 'prepend' when valve is not set or unrecognised.
+        """
+        pos = getattr(self.valves, "INJECTION_POSITION", "prepend")
+        if pos == "append_user":
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    messages.insert(i, message)
+                    return
+            messages.append(message)
+        elif pos == "append_system":
+            idx = -1
+            for i, m in enumerate(messages):
+                if m.get("role") == "system":
+                    idx = i
+            messages.insert(idx + 1, message)
+        else:  # prepend (default)
+            messages.insert(0, message)
+
+    # ------------------------------------------------------------------
     # Gateway proxy
     # ------------------------------------------------------------------
 
@@ -155,6 +184,7 @@ class Pipe:
         body: dict,
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
+        __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ):
         messages = body.get("messages", [])
         if not messages:
@@ -188,13 +218,75 @@ class Pipe:
                     len(history),
                     max_tool_calls,
                 )
-                return (
-                    f"I've stopped because this turn reached the limit of "
-                    f"{max_tool_calls} tool calls without producing a final "
-                    f"answer.\n\n"
-                    f"Please try a more specific query or reduce the scope "
-                    f"of your request."
+
+                # Notify the user via UI toast + status indicator
+                if __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "notification",
+                            "data": {
+                                "type": "error",
+                                "content": (
+                                    f"🛡️ Agent Loop Guard stopped the agent after "
+                                    f"{len(history)} tool calls (limit: {max_tool_calls})."
+                                ),
+                            },
+                        }
+                    )
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": (
+                                    f"🛡️ Tool call limit reached: "
+                                    f"{len(history)} calls in this turn"
+                                ),
+                                "done": True,
+                                "hidden": False,
+                            },
+                        }
+                    )
+
+                # Inject system message so the agent knows it hit the limit
+                # and can learn from this over the conversation.
+                self._inject(
+                    messages,
+                    {
+                        "role": "system",
+                        "content": (
+                            f"LIMIT EXCEEDED: You made {len(history)} tool calls in "
+                            f"this turn (max allowed: {max_tool_calls}). The Agent "
+                            f"Loop Guard has blocked further tool calls. Provide a "
+                            f"final answer with the information you have gathered. "
+                            f"In future turns, be mindful of the tool call limit "
+                            f"and try to achieve your goal with fewer calls."
+                        ),
+                    },
                 )
+
+                # Forward to the LLM so the agent can wrap up gracefully.
+                # It sees the LIMIT EXCEEDED message and learns from it.
+                payload = {**body, "model": real_model, "messages": messages}
+                try:
+                    if body.get("stream", False):
+                        return self._stream(payload, headers, url)
+                    else:
+                        return await self._call(payload, headers, url)
+                except httpx.HTTPStatusError as e:
+                    log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
+                    return (
+                        f"Gateway error: HTTP {e.response.status_code}. "
+                        f"Please check the gateway configuration."
+                    )
+                except httpx.RequestError as e:
+                    log.error("Gateway unreachable: %s", e)
+                    return (
+                        "Gateway unreachable. Please check that the gateway is running "
+                        "and GATEWAY_BASE_URL is correct."
+                    )
+                except Exception as e:
+                    log.error("Unexpected error calling gateway: %s", e)
+                    return f"Error calling gateway: {e}"
 
         # Forward to gateway with the real model ID.
         payload = {**body, "model": real_model}
