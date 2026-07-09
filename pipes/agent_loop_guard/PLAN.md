@@ -8,7 +8,7 @@ is strictly more capable than the last.
 - [x] Phase 1 — Transparent Manifold Proxy
 - [x] Phase 2 — Runaway Protection
 - [x] Phase 3 — Loop Detection & Escalation
-- [x] Phase 4 — Preventive Reminders
+- [x] Phase 4 — Tool Counter & Injection Options
 - [ ] Phase 5 — Polish & Production Readiness
 - [ ] Phase 6 — Tool Allowlist / Blocklist
 
@@ -17,9 +17,9 @@ is strictly more capable than the last.
 | Phase | What it does | Status |
 |-------|-------------|:------:|
 | 1 | Transparent manifold proxy | ✅ Done |
-| 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) | ✅ Done |
-| 3 | + Consecutive duplicate detection + escalation | ✅ Done |
-| 4 | + Preventive reminders | ✅ Done |
+| 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) + soft-block | ✅ Done |
+| 3 | + Consecutive duplicate detection + escalation + selective tool removal | ✅ Done |
+| 4 | + Descending tool counter + `merge_last_tool` injection + shortened messages | ✅ Done |
 | 5 | Polish: logging, hardening, tests | ⬜ Pending |
 | 6 | + Tool allowlist/blocklist (remove tools by name) | ⬜ Pending |
 
@@ -52,8 +52,8 @@ pipes/agent_loop_guard/
 | Error handling on gateway calls | ✅ | |
 | Frontmatter with metadata + requirements | ✅ | |
 | Tool-call analysis | | Phase 2–3 |
-| Warnings / escalation / force-terminate | | Phase 2–3 |
-| Preventive reminders | | Phase 4 |
+| Warnings / escalation / soft-block | | Phase 2–3 |
+| Tool counter / injection options | | Phase 4 |
 
 ### `pipe()` logic (Phase 1)
 
@@ -78,16 +78,16 @@ pipe(body)
 
 ## Phase 2 — Runaway Protection  [x]
 
-**Goal**: add `MAX_TOOL_CALLS_PER_TURN` — force-terminate when the agent
+**Goal**: add `MAX_TOOL_CALLS_PER_TURN` — soft-block when the agent
 makes too many tool calls in one turn. Simplest protection, highest ROI.
 
 ### New code
 
-- `MAX_TOOL_CALLS_PER_TURN` valve (already in `Valves`, just wire up).
+- `MAX_TOOL_CALLS_PER_TURN` valve.
 - `_extract_tool_calls_in_turn()` — scan backwards from end of messages
   until the last `role: "user"`, collect all `tool_calls`.
-- In `pipe()`: if `len(history) >= MAX_TOOL_CALLS_PER_TURN`, return
-  a plain string → force-terminate.
+- In `pipe()`: if `len(history) >= MAX_TOOL_CALLS_PER_TURN`, soft-block
+  (remove all tools, inject instruction, forward to gateway).
 
 ### `pipe()` logic (Phase 2)
 
@@ -97,26 +97,21 @@ pipe(body)
   2. real_model = body["model"].split(".", 1)[-1]
   3. history = _extract_tool_calls_in_turn(messages)
   4. if len(history) >= MAX_TOOL_CALLS_PER_TURN > 0:
-       return "I've stopped because this turn reached the limit…"
+       _soft_block(all tools removed, instruction)
   5. Forward to gateway as before
 ```
 
 ### Soft-block strategy
 
-The pipe cannot prevent tool calls that the LLM schedules in batch (e.g.
-5 calls in one response). But once the limit is reached, it can remove
-`tools` from the body so the LLM cannot call more — this is **soft-block**.
+Soft-block removes `tools` from the request body and injects a system
+message instructing the LLM to summarise. All tool results already in
+messages are preserved. The LLM receives them plus the instruction, but
+has no tools available — forced to respond with text.
 
-| Opt | Behaviour | Agent sees it? | UX | Status |
-|:---:|-----------|:--------------:|----|:------:|
-| **A** | Hardcoded string (force-terminate) | ✅ Yes — learns next turn | Impersonates agent, wastes tool results | ❌ Replaced |
-| **B** | Empty string `""` | ❌ No feedback | Blank msg; toast informs user | ❌ Discarded |
-| **C** | Raise exception | Depends on OWUI | Unknown | ❌ Discarded |
-| **D** | **Soft-block**: remove `tools` from body, inject system msg, forward to gateway | ✅ Yes — sees results + instruction, forced to summarise | All results preserved, LLM responds with text | ✅ **Current** |
-
-**Decision**: soft-block (D). All tool results already in messages are
-preserved. The LLM receives them plus a system instruction to summarise,
-but has no tools available — forced to respond with text.
+| Case | What is removed | Behaviour |
+|:----:|:---------------:|-----------|
+| **Runaway** (total ≥ MAX) | All tools | `body.pop("tools", None)` |
+| **Loop** (escalation ≥ max) | Only the looping tool | Filter `body["tools"]` by name |
 
 ### Validation
 
@@ -133,17 +128,41 @@ but has no tools available — forced to respond with text.
 ## Phase 3 — Loop Detection & Escalation  [x]
 
 **Goal**: detect consecutive identical tool calls, escalate through
-`WARNING` → `FINAL WARNING` → soft-block (remove tools).
+`WARNING` → `FINAL WARNING` → selective tool removal (only the looping
+tool is removed, others remain available).
 
 ### New code
 
 - `_has_consecutive_duplicates()` — checks if the last N tool calls in
   the turn are identical (same name + same args).
-- `_escalation_level()` — scans system messages for `WARNING:` /
-  `FINAL WARNING:` to deduce current level.
-- `_last_system_contains()` — checks any system message for a substring
-  (prevents duplicate injections).
-- Warning/final-warning message templates.
+- `_escalation_level()` — scans system and tool messages for
+  `[GUARD_WARN]` / `[GUARD_FINAL]` markers to deduce current level.
+- `_inject()` — inserts guard messages at configured position
+  (see Phase 4 for injection options).
+- Warning/final-warning message templates (short, concise).
+
+### Guard messages
+
+```
+[GUARD_WARN] Tool call repeated. No progress. Summarize or change approach.
+[GUARD_FINAL] Still repeating. Stop now and summarize what you have.
+```
+
+### Escalation ladder
+
+```
+Level 0: Silent monitoring
+  │  Consecutive duplicate tool calls detected
+  ▼
+Level 1: [GUARD_WARN] (tools still available)
+  │  Agent ignores → continues looping
+  ▼
+Level 2: [GUARD_FINAL] (tools still available)
+  │  Agent still ignores
+  ▼
+LOOP SOFT-BLOCK: only the offending tool removed from body["tools"]
+  Agent can still use other tools or summarise.
+```
 
 ### `pipe()` logic (Phase 3)
 
@@ -156,14 +175,14 @@ pipe(body)
   5. max_esc      = MAX_WARNINGS_BEFORE_TERMINATE
 
   6. if len(history) >= MAX_TOOL_CALLS_PER_TURN > 0:
-       _soft_block(reason, instruction)  ← remove tools, inject, forward
+       _soft_block(None)       ← removal all tools (runaway)
 
   7. loop = _has_consecutive_duplicates(history, MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING)
 
   8. if loop:
-       if escalation >= max_esc    → _soft_block(reason, instruction)
-       elif escalation == 1        → inject FINAL WARNING (tools still available)
-       else                        → inject WARNING (tools still available)
+       if escalation >= max_esc → _soft_block(bad_tool)  ← remove only looping tool
+       elif escalation == 1     → inject FINAL WARNING (tools still available)
+       else                     → inject WARNING (tools still available)
 
   9. Forward to gateway
 ```
@@ -173,41 +192,69 @@ pipe(body)
 - `threshold=2, max_warnings=2, max_tool_calls=15`
 - Turn: `[search("X"), search("X")]` → loop detected, escalate=0 → inject WARNING
 - Turn: `[search("X")×3]` → loop detected, escalate=1 → inject FINAL WARNING
-- Turn: `[search("X")×4]` → loop detected, escalate=2 ≥ max_warnings → **soft-block** (tools removed, forward to gateway)
+- Turn: `[search("X")×4]` → loop detected, escalate=2 ≥ max_warnings → **soft-block** (only `search` removed from tools, forward to gateway)
 - Turn: `[search("X"), search("Y")]` → **no** loop (different args).
 - Turn: `[search("X"), fetch("X")]` → **no** loop (different tool).
-- `MAX_WARNINGS_BEFORE_TERMINATE=0` → soft-block on first loop.
-- WARNING already in messages from earlier turn → escalate to FINAL, don't re-inject.
+- `MAX_WARNINGS_BEFORE_TERMINATE=0` → soft-block on first loop detection.
+- `MAX_WARNINGS_BEFORE_TERMINATE=1` → warn once, then soft-block on next duplicate.
 
 ---
 
-## Phase 4 — Preventive Reminders  [x]
+## Phase 4 — Tool Counter & Injection Options  [x]
 
-**Goal**: inject a "REMINDER: Periodically evaluate…" message every N
-user messages, so the agent self-checks even before looping.
+**Goal**: add a descending tool call counter to every tool result so the
+agent always knows its remaining budget. Provide configurable injection
+positions for guard messages.
 
 ### New code
 
-Already wired in Phase 3 (`_last_system_contains`, `_inject`). Just add the
-`if ENABLE_PREVENTIVE_REMINDER and not loop_detected` block in `pipe()`.
+- `SHOW_TOOL_COUNTER` valve (default `True`) — append
+  `remaining tool calls: N` to every tool result.
+- `_append_tool_counter()` — finds the last tool result in the current
+  turn and appends the counter after a `---` separator.
+- `INJECTION_POSITION` valve (default `"append_user"`):
+  - `"append_user"`: inject guard message as a new `system` message
+    before the last `user` message.
+  - `"merge_last_tool"`: append guard message to the last tool result
+    in the current turn, after a `---` separator and the counter.
+- `_escalation_level()` updated to scan both `system` and `tool`
+  messages for markers (needed for `merge_last_tool`).
 
-### `pipe()` logic (Phase 4)
+### Tool counter format
 
-Same as Phase 3, plus:
 ```
-  8.5. if ENABLE_PREVENTIVE_REMINDER and not loop
-         user_count = count of role=="user" in messages
-         if user_count > 0 and user_count % REMINDER_INTERVAL == 0
-           if not _last_system_contains(messages, "REMINDER:")
-             inject REMINDER
+result of web_search...
+
+---
+remaining tool calls: 14
 ```
+
+### Example with counter + warning (merge_last_tool)
+
+```
+result of web_search...
+
+---
+remaining tool calls: 12
+
+[GUARD_WARN] Tool call repeated. No progress. Summarize or change approach.
+```
+
+### Soft-block messages (short)
+
+| Type | Message |
+|:----:|---------|
+| Runaway | `TOOL LIMIT: {total}/{max} used. No more tools this turn. Summarize now.` |
+| Loop (tool removed) | `TOOL REMOVED: {tool_name} blocked after repeated identical calls. Other tools still available. Summarize or continue.` |
 
 ### Validation
 
-- `INTERVAL=3`: reminder injected on 3rd, 6th, 9th, … user message.
-- Loop detected in same turn → reminder is **suppressed** (warning takes priority).
-- REMINDER already present from earlier turn → not re-injected.
-- `ENABLE_PREVENTIVE_REMINDER=false` → never injected.
+- `SHOW_TOOL_COUNTER=True` → counter appended to every tool result.
+- `SHOW_TOOL_COUNTER=False` → no counter.
+- `MAX_TOOL_CALLS_PER_TURN=0` → counter not shown (no limit).
+- `INJECTION_POSITION=append_user` → warning is a new `system` message.
+- `INJECTION_POSITION=merge_last_tool` → warning appended to last tool result.
+- Both counter and warning can coexist in the same tool result.
 
 ---
 
@@ -307,9 +354,10 @@ if "tool_choice" in body:
 
 ### Soft-block interaction
 
-Phase 2's soft-block (`body.pop("tools", None)`) happens **after**
-the allowlist/blocklist filter. The soft-block in Phase 2-3 removes
-*all* tools; Phase 6 runs only when no soft-block is active.
+Phase 2's runaway soft-block (`body.pop("tools", None)`) happens **after**
+the allowlist/blocklist filter. Phase 3's loop soft-block removes only
+the looping tool **after** the allowlist/blocklist filter. Phase 6 runs
+only when no soft-block is active.
 
 ### Validation
 
@@ -319,7 +367,8 @@ the allowlist/blocklist filter. The soft-block in Phase 2-3 removes
   `calculator`.
 - Both empty: no change, all tools visible.
 - `tool_choice` targeting a blocked tool → gracefully reset.
-- Soft-block (runaway/loop) still removes all tools regardless.
+- Loop soft-block still removes only the specific looping tool.
+- Runaway soft-block still removes all tools regardless.
 
 ---
 
@@ -346,9 +395,9 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 
         │
         └── Phase 2 adds one method (_extract_tool_calls_in_turn)
              │
-             └── Phase 3 adds three methods + inject helper
+             └── Phase 3 adds _has_consecutive_duplicates, _escalation_level, _inject
                   │
-                  └── Phase 4 reuses all of the above, adds one if-block
+                  └── Phase 4 adds _append_tool_counter, INJECTION_POSITION options
                        │
                        └── Phase 5 adds logging, hardening, no new logic
                             │
@@ -356,5 +405,4 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 
 ```
 
 Each phase's code is an **additive diff** on the previous phase — never a
-rewrite. The Phase 1 file is built from scratch. Phases 2–6 are series of
-small, reviewable edits.
+rewrite.
