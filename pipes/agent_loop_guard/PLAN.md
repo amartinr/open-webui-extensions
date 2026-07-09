@@ -133,10 +133,10 @@ tool is removed, others remain available).
 
 ### New code
 
-- `_has_consecutive_duplicates()` — checks if the last N tool calls in
-  the turn are identical (same name + same args).
-- `self._warnings_injected` — instance variable tracking escalation level
-  (resets to 0 at the start of each user turn).
+- `_count_consecutive_duplicates()` — counts consecutive identical tool calls
+  from the end of history (returns count, name, args).
+- Formula-based escalation: `consecutive==2` → WARNING, `consecutive==final_pos`
+  → FINAL WARNING, `consecutive >= N` → soft-block.
 - `_inject()` — inserts guard messages at configured position
   (see Phase 4 for injection options).
 - Warning/final-warning message helpers (`_warning_msg`, `_final_warning_msg`).
@@ -153,22 +153,18 @@ def _final_warning_msg(tool_name: str, total: int) -> str:
 
 ### Escalation ladder
 
+Each level fires **exactly once**:
+
 ```
-Level 0: Silent monitoring (_warnings_injected = 0)
-  │  Consecutive duplicate tool calls detected
-  ▼
-Level 1: WARNING injected (_warnings_injected → 1)
-  "{tool_name} called {total}x with same args. Change approach or summarize."
-  │  Agent ignores → continues looping
-  ▼
-Level 2: FINAL WARNING injected (_warnings_injected → 2)
-  "{tool_name} called {total}x. Still repeating. Stop now and summarize."
-  │  Agent still ignores
-  ▼
-LOOP SOFT-BLOCK (_warnings_injected >= MAX_WARNINGS_BEFORE_TERMINATE)
+consecutive == 2                    → WARNING
+consecutive == final_pos (≈60% of N) → FINAL WARNING (if N > 3)
+consecutive >= N                     → SOFT-BLOCK
   Only the offending tool removed from body["tools"].
   Agent can still use other tools or summarise.
+otherwise                           → silent
 ```
+
+Where `final_pos = 2 + (N - 2) * 3 // 5`.
 
 ### `pipe()` logic (Phase 3)
 
@@ -178,34 +174,32 @@ pipe(body)
   2. real_model = body["model"].split(".", 1)[-1]
   3. history      = _extract_tool_calls_in_turn(messages)
   4. total        = len(history)
-  5. max_esc      = MAX_WARNINGS_BEFORE_TERMINATE
+  5. consecutive, bad_tool, _ = _count_consecutive_duplicates(history)
+  6. N            = MAX_CONSECUTIVE_BEFORE_BLOCK
+  7. final_pos    = 2 + (N - 2) * 3 // 5  ← ≈60% of range
 
-  6. if total == 0:
-       self._warnings_injected = 0    ← reset at new user turn
-
-  7. if total >= MAX_TOOL_CALLS_PER_TURN > 0:
+  8. if total >= MAX_TOOL_CALLS_PER_TURN > 0:
        _soft_block(None)              ← remove all tools (runaway)
 
-  8. loop = _has_consecutive_duplicates(history, MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING)
-
-  9. if loop:
-       if self._warnings_injected >= max_esc → _soft_block(bad_tool)  ← remove only looping tool
-       elif self._warnings_injected == 1     → inject FINAL WARNING, _warnings_injected = 2
-       else                                  → inject WARNING, _warnings_injected = 1
+  9. if consecutive >= 2:
+       if consecutive >= N:
+           _soft_block(bad_tool)       ← remove only looping tool
+       elif N > 3 and consecutive == final_pos:
+           inject FINAL WARNING (tools still available)
+       elif consecutive == 2:
+           inject WARNING (tools still available)
 
  10. Forward to gateway (tools still available, unless soft-blocked)
 ```
 
-### Validation
+### Validation (with `MAX_CONSECUTIVE_BEFORE_BLOCK=4`)
 
-- `threshold=2, max_warnings=2, max_tool_calls=15`
-- Turn: `[search("X"), search("X")]` → loop detected, _warnings_injected=0 → inject WARNING
-- Turn: `[search("X")×3]` → loop detected, _warnings_injected=1 → inject FINAL WARNING
-- Turn: `[search("X")×4]` → loop detected, _warnings_injected=2 ≥ max_warnings → **soft-block** (only `search` removed from tools, forward to gateway)
-- Turn: `[search("X"), search("Y")]` → **no** loop (different args).
-- Turn: `[search("X"), fetch("X")]` → **no** loop (different tool).
-- `MAX_WARNINGS_BEFORE_TERMINATE=0` → soft-block on first loop detection.
-- `MAX_WARNINGS_BEFORE_TERMINATE=1` → warn once, then soft-block on next duplicate.
+- Turn: `[search("X"), search("X")]` → consecutive=2, ==2 → inject WARNING
+- Turn: `[search("X")×3]` → consecutive=3, final_pos=3 → inject FINAL WARNING
+- Turn: `[search("X")×4]` → consecutive=4 ≥ N → **soft-block** (only `search` removed)
+- Turn: `[search("X"), search("Y")]` → consecutive=1 (different args) → no loop
+- Turn: `[search("X"), fetch("X")]` → consecutive=1 (different tool) → no loop
+- `MAX_CONSECUTIVE_BEFORE_BLOCK=3` → consecutive=2 → WARNING, consecutive=3 → soft-block (no FINAL WARNING)
 
 ---
 
@@ -409,7 +403,7 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 
         │
         └── Phase 2 adds one method (_extract_tool_calls_in_turn)
              │
-             └── Phase 3 adds _has_consecutive_duplicates, _warnings_injected tracking, _inject
+             └── Phase 3 adds _count_consecutive_duplicates, formula-based escalation, _inject
                   │
                   └── Phase 4 adds _append_tool_counter, INJECTION_POSITION options
                        │

@@ -51,17 +51,18 @@ calls — it must respond with text.
 User message → Open WebUI → Agent Loop Guard pipe()
                                │
                                ├─ Extract tool calls in current turn
-                               ├─ Detect consecutive duplicates
-                               ├─ Check escalation level
+                               ├─ Count consecutive duplicates
+                               ├─ Apply formula-based escalation
                                │
                                ├─ Runaway? (≥ MAX_TOOL_CALLS_PER_TURN)
                                │     └─ Soft-block: remove tools, inject
                                │        system msg, forward to gateway
                                │
                                ├─ Loop detected?
-                               │     ├─ Escalation ≥ max? → Soft-block
-                               │     ├─ Escalation = 1? → FINAL WARNING
-                               │     └─ Escalation = 0? → WARNING
+                               │     ├─ consecutive ≥ N  → Soft-block
+                               │     ├─ consecutive == final_pos → FINAL WARNING
+                               │     ├─ consecutive == 2 → WARNING
+                               │     └─ otherwise → silent
                                │
                                └─ Forward to gateway (tools untouched)
                                      → LLM responds normally
@@ -69,23 +70,25 @@ User message → Open WebUI → Agent Loop Guard pipe()
 
 ### Escalation Ladder
 
+With `MAX_CONSECUTIVE_BEFORE_BLOCK` (default 4):
+
 ```
-Level 0: Silent monitoring
-  │  Consecutive duplicate tool calls detected
-  ▼
-Level 1: WARNING (tools still available)
+consecutive == 2  → WARNING (tools still available)
   "{tool_name} called {total}x with same args. Change approach or summarize."
   │  Agent ignores → continues looping
-  ▼
-Level 2: FINAL WARNING (tools still available)
+
+consecutive == 3  → FINAL WARNING (tools still available)
   "{tool_name} called {total}x. Still repeating. Stop now and summarize."
   │  Agent still ignores
-  ▼
-SOFT-BLOCK: only the looping tool removed from body["tools"]
+
+consecutive >= 4  → SOFT-BLOCK: only the looping tool removed
   Agent receives instruction + all collected results, can use other tools
   "TOOL REMOVED: {tool_name} blocked after {total} identical calls."
   → Agent has other tools available or can summarise.
 ```
+
+Each level fires **exactly once**. Higher thresholds spread FINAL WARNING further
+from the block. For `N=3` there is no FINAL WARNING (WARNING → block directly).
 
 ---
 
@@ -106,8 +109,7 @@ SOFT-BLOCK: only the looping tool removed from body["tools"]
 | `GATEWAY_AUTH_VALUE` | `""` | API key/credential (password field) |
 | `GATEWAY_CUSTOM_HEADERS` | `""` | JSON object of extra headers. Supports `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` |
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before soft-block. `0` = disabled |
-| `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | `2` | Identical consecutive calls before first warning. `0` = disabled |
-| `MAX_WARNINGS_BEFORE_TERMINATE` | `2` | Warnings before soft-block. `0` = soft-block on first detection |
+| `MAX_CONSECUTIVE_BEFORE_BLOCK` | `4` | Consecutive identical tool calls before soft-block (min 3). Warnings spaced automatically: WARNING on first detection, FINAL WARNING at ~60% of threshold |
 | `SHOW_TOOL_COUNTER` | `True` | Append descending counter (`remaining tool calls: N`) to every tool result |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
 | `INJECTION_POSITION` | `"append_user"` | Where to inject: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |

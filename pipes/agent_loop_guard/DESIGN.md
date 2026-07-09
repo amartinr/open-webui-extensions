@@ -191,8 +191,7 @@ tools unavailable.
 | `GATEWAY_AUTH_VALUE` | str (password) | `""` | Credential value sent in the configured auth header |
 | `GATEWAY_CUSTOM_HEADERS` | str (JSON) | `""` | JSON object of extra HTTP headers. Supports template variables: `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` (e.g. `{"x-bf-dim-host": "myhost", "x-user": "{{USER_NAME}}"}`) |
 | `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls in a turn before tools are removed (soft-block). Set to 0 to disable. |
-| `MAX_CONSECUTIVE_SAME_TOOL_BEFORE_WARNING` | int | 2 | Consecutive identical tool calls before first warning. Set to 0 to disable. |
-| `MAX_WARNINGS_BEFORE_TERMINATE` | int | 2 | Warnings before tools are removed (soft-block). Set to 0 to soft-block immediately on first loop detection. |
+| `MAX_CONSECUTIVE_BEFORE_BLOCK` | int | 4 | Consecutive identical tool calls before soft-block (min 3). Warnings are spaced automatically: WARNING on first detection (consecutive=2), FINAL WARNING at ~60% of threshold, soft-block at threshold |
 
 | `INJECTION_POSITION` | Literal["append_user","merge_last_tool"] | `"append_user"` | Where to inject guard messages: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |
 | `SHOW_TOOL_COUNTER` | bool | `True` | Append descending counter (`remaining tool calls: N`) to every tool result |
@@ -264,34 +263,43 @@ def _extract_tool_calls_in_turn(self, messages: list[dict]) -> list[dict]:
     return history
 ```
 
-### 7.2 Detecting Consecutive Duplicates
+### 7.2 Counting Consecutive Duplicates
 
 ```python
-def _has_consecutive_duplicates(self, history: list[dict], threshold: int) -> bool:
-    if len(history) < threshold:
-        return False
-    recent = history[-threshold:]
-    first = recent[0]
-    return all(
-        c["name"] == first["name"] and c["args"] == first["args"]
-        for c in recent
-    )
+def _count_consecutive_duplicates(self, history: list[dict]) -> tuple[int, str | None, dict | None]:
+    """Count consecutive identical tool calls from the end of history.
+
+    Returns (count, name, args) of the repeated tool.
+    count=1 means the last call is unique (no consecutive duplicate).
+    """
+    if not history:
+        return 0, None, None
+    last = history[-1]
+    count = 0
+    for tc in reversed(history):
+        if tc["name"] == last["name"] and tc["args"] == last["args"]:
+            count += 1
+        else:
+            break
+    return count, last["name"], last["args"]
 ```
 
-### 7.3 Escalation Tracking via Instance Variable
+### 7.3 Formula-Based Escalation
 
-Rather than scanning messages for markers, the pipe uses an instance variable
-that is reset at the start of each user turn. This avoids stale markers and
-keeps the detection decoupled from message content.
+Instead of tracking warnings via instance variables, escalation is determined
+by a simple formula that guarantees each level fires exactly once:
 
-```python
-# Reset at start of each user turn
-if total == 0:
-    self._warnings_injected = 0
-
-# Counter incremented on each warning injection
-# 0 = clean, 1 = warning injected, 2 = final warning injected
 ```
+final_pos = 2 + (N - 2) * 3 // 5    # ≈60% of the range [2, N)
+
+consecutive == 2       → WARNING
+consecutive == final_pos → FINAL WARNING (if N > 3)
+consecutive >= N        → soft-block
+otherwise               → silent
+```
+
+For `N=3` there is no room for FINAL WARNING: WARNING at consecutive=2,
+soft-block at consecutive=3.
 
 ---
 
@@ -300,22 +308,21 @@ if total == 0:
 ### 8.1 Escalation Ladder
 
 ```
-Level 0: Silent monitoring
-  │  Consecutive duplicate tool calls detected
-  ▼
-Level 1: WARNING (tools still available)
+consecutive == 2                    → WARNING (tools still available)
   "{tool_name} called {total}x with same args. Change approach or summarize."
   │  Agent ignores → continues looping
-  ▼
-Level 2: FINAL WARNING (tools still available)
+
+consecutive == final_pos (≈60% of N) → FINAL WARNING (if N > 3, tools still available)
   "{tool_name} called {total}x. Still repeating. Stop now and summarize."
   │  Agent still ignores
-  ▼
-SOFT-BLOCK: only the looping tool removed from body["tools"]
+
+consecutive >= N                     → SOFT-BLOCK: only the looping tool removed
   Agent receives instruction + all collected results, can use other tools
   "TOOL REMOVED: {tool_name} blocked after {total} identical calls."
   → Agent has other tools available or can summarise.
 ```
+
+Where `final_pos = 2 + (N - 2) * 3 // 5`. For `N=3` there is no FINAL WARNING.
 
 ### 8.2 Injection Messages
 
@@ -356,28 +363,12 @@ def _loop_blocked_tool_instruction(tool_name: str, total: int) -> str:
 | `"append_user"` (default) | Insert a new `system` message before the last user message |
 | `"merge_last_tool"` | Append the guard message content to the last tool result in the current turn, after a clear separator |
 
-### 8.4 Avoiding Stale Injections
+### 8.4 Formula-Based Injection (No Stale State)
 
-The pipe uses `self._warnings_injected` (an instance variable) to track
-how many warnings have been injected. It is reset to 0 at the start of
-each user turn. This avoids re-scanning messages for markers and prevents
-stale injections from earlier turns from affecting the current one.
-
-```python
-# Reset warning counter at the start of a new user turn
-if total == 0:
-    self._warnings_injected = 0
-
-# Compare against MAX_WARNINGS_BEFORE_TERMINATE
-if self._warnings_injected >= max_esc:
-    # → soft-block (remove looping tool)
-elif self._warnings_injected == 1:
-    # → inject FINAL WARNING (tools still available)
-    self._warnings_injected = 2
-else:
-    # → inject WARNING (tools still available)
-    self._warnings_injected = 1
-```
+Because escalation is purely formula-based (`consecutive` count determines
+the action), there is no instance state to reset. Each `pipe()` invocation
+is stateless with respect to escalation. The `_merge_injected` flag is the
+only per-turn state, reset when `total == 0`.
 
 ---
 
@@ -411,12 +402,11 @@ additive on the previous:
   (removes tools, injects instruction, forwards)
 
 ### Phase 3 — Loop Detection & Escalation
-- `_has_consecutive_duplicates()` detects N identical consecutive calls
-- `self._warnings_injected` tracks escalation level (resets at each user turn)
-- Escalation ladder:
-  - `self._warnings_injected == 0` → inject WARNING (tools still available)
-  - `self._warnings_injected == 1` → inject FINAL WARNING (tools still available)
-  - `self._warnings_injected >= max_esc` → soft-block (only the looping tool removed)
+- `_count_consecutive_duplicates()` counts consecutive identical calls from end of history
+- Formula-based escalation (each level fires exactly once):
+  - `consecutive == 2` → inject WARNING (tools still available)
+  - `consecutive == final_pos` (≈60% of N, if N > 3) → inject FINAL WARNING (tools still available)
+  - `consecutive >= N` → soft-block (only the looping tool removed)
 
 ### Phase 6 — Tool Blocklist
 - `TOOL_BLOCKLIST` valve: comma/newline-separated list of tool names to **remove**
@@ -481,7 +471,7 @@ OWUI executes tool
 pipe()  ← continuation
   ├─ history = [get_weather("Paris") × 2]
   ├─ duplicates detected (threshold=2)
-  ├─ escalation=0 → inject WARNING
+  ├─ consecutive=2 → inject WARNING
   └─ Forward to Bifrost (with warning)
 
 LLM: tool_calls [get_weather("Paris")]  ← ignores warning
@@ -489,7 +479,7 @@ OWUI executes tool
 
 pipe()  ← continuation
   ├─ history = [get_weather("Paris") × 3]
-  ├─ escalation=1 → inject FINAL WARNING
+  ├─ consecutive=3, final_pos=3 → inject FINAL WARNING
   └─ Forward to Bifrost (with final warning)
 
 LLM: tool_calls [get_weather("Paris")]  ← still ignores
@@ -497,7 +487,7 @@ OWUI executes tool
 
 pipe()  ← continuation
   ├─ history = [get_weather("Paris") × 4]
-  ├─ _warnings_injected=2 ≥ MAX_WARNINGS(2)
+  ├─ consecutive=4 ≥ N(=4)
   └─ _soft_block(bad_tool="get_weather")
 
 🛑 Soft-blocked: only `get_weather` removed from body["tools"], instruction
@@ -527,10 +517,10 @@ pipe()  ← continuation
 
 | Gateway unreachable during `pipes()` | Returns cached model list. Selector still works. |
 | Gateway unreachable during `pipe()` | Exception caught → error string. |
-| Warning already present from earlier | `self._warnings_injected` tracks it; escalate, don't re-inject. |
+| Warning already present from earlier | Formula-based: consecutive count determines action, no repeated injections. |
 | Bifrost adds a new model | Appears automatically on next model refresh. |
-| `MAX_WARNINGS_BEFORE_TERMINATE = 0` | Soft-block on first loop detection (only the looping tool removed). |
-| `MAX_WARNINGS_BEFORE_TERMINATE = 1` | Warn once, then soft-block on next duplicate. |
+| `MAX_CONSECUTIVE_BEFORE_BLOCK = 3` | WARNING on consecutive=2, soft-block at consecutive=3 (no FINAL WARNING). |
+| `MAX_CONSECUTIVE_BEFORE_BLOCK = 6` | WARNING at 2, FINAL WARNING at 4 (≈60%), soft-block at 6. |
 | Workspace model has no system prompt | Open WebUI skips system prompt injection. Pipe unaffected. |
 
 ---
@@ -546,12 +536,12 @@ pipe()  ← continuation
 3. **Transparent proxy**: When no loop is detected, the pipe forwards
    `body` to the gateway and streams the response back unchanged.
 
-4. **Loop detection in real time**: After N consecutive identical tool calls
-   within the same turn, a warning is injected before the next LLM call.
+4. **Loop detection in real time**: When consecutive identical tool calls are
+   detected, a warning is injected before the next LLM call.
 
-5. **Escalation**: If the agent ignores the warning, the pipe escalates to
-   final warning → soft-block (only the looping tool removed from `body["tools"]`,
-   instruction injected, forwarded to gateway).
+5. **Escalation**: Formula-based: WARNING at consecutive=2, FINAL WARNING at
+   ≈60% of threshold (if N > 3), soft-block at threshold (only the looping tool
+   removed from `body["tools"]`, instruction injected, forwarded to gateway).
 
 6. **Runaway limit**: When tool calls in a turn exceed
    `MAX_TOOL_CALLS_PER_TURN`, the pipe soft-blocks immediately (all tools removed,
