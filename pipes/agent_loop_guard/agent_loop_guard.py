@@ -183,14 +183,7 @@ class Pipe:
             "Warnings are spaced automatically: WARNING at 50%, FINAL WARNING at 75%.",
         )
 
-        INJECTION_POSITION: Literal["append_user", "merge_last_tool"] = Field(
-            default="append_user",
-            description="Where to inject guard messages: 'append_user' (before last user msg) or 'merge_last_tool' (append to last tool result).",
-        )
-        SHOW_TOOL_COUNTER: bool = Field(
-            default=True,
-            description="Append 'remaining tool calls: N' to the last tool result in each turn.",
-        )
+
         TOOL_BLOCKLIST: str = Field(
             default="",
             description="Comma-separated (or newline-separated) tool names to REMOVE from the agent's tool list. "
@@ -214,7 +207,6 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self._models_cache: list[dict] = []
-        self._merge_injected = False
 
     # ------------------------------------------------------------------
     # Model discovery (manifold)
@@ -641,10 +633,6 @@ class Pipe:
             {k: ("<redacted>" if k == self.valves.GATEWAY_AUTH_HEADER else v) for k, v in headers.items()},
         )
 
-        # Reset per-turn state at the start of a new user turn
-        if total == 0:
-            self._merge_injected = False
-
         # --- Debug: tool calls extracted -------------------------------
         log.debug(
             "Tool calls in turn: %d | history: %s",
@@ -652,110 +640,11 @@ class Pipe:
             json.dumps(history, indent=2),
         )
 
-        # --- Helper: soft-block (remove tools + inject + forward) -----
-        async def _soft_block(
-            reason: str,
-            instruction: str,
-            blocked_tool: str | None = None,
-        ):
-            """Remove tools from body so the LLM cannot call more, inject
-            a system message instructing it to summarise, then forward to
-            the gateway. All tool results already in messages are preserved.
-
-            If blocked_tool is set, only that tool is removed (loop case).
-            If None, all tools are removed (runaway case).
-            """
-            # Loop soft-block is error (same severity as runaway) so the user
-            # sees a clear progression: info → warning → error
-            notification_type = "error"
-            log.warning("Soft-block: %s (%d tool calls in turn)", reason, total)
-
-            if __event_emitter__:
-                try:
-                    await __event_emitter__(
-                        {
-                            "type": "notification",
-                            "data": {
-                                "type": notification_type,
-                                "content": (
-                                    f"🛡️ Agent Loop Guard: {reason}"
-                                ),
-                            },
-                        }
-                    )
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"🛡️ {reason}",
-                                "done": True,
-                                "hidden": False,
-                            },
-                        }
-                    )
-                except Exception:
-                    log.warning("Failed to emit event (non-fatal)", exc_info=True)
-
-            if blocked_tool:
-                # Loop case: remove only the offending tool
-                body["tools"] = [
-                    t for t in body.get("tools", [])
-                    if t.get("function", {}).get("name") != blocked_tool
-                ]
-                # If tool_choice targets the blocked tool, reset it
-                if isinstance(body.get("tool_choice"), str) and blocked_tool in body["tool_choice"]:
-                    body.pop("tool_choice", None)
-                log.debug(
-                    "Soft-block (loop) | tool removed: %s | remaining tools: %s",
-                    blocked_tool,
-                    [t.get("function", {}).get("name") for t in body.get("tools", [])],
-                )
-            else:
-                # Runaway case: remove all tools
-                body.pop("tools", None)
-                body.pop("tool_choice", None)
-                log.debug("Soft-block (runaway) | all tools removed")
-
-            log.debug(
-                "Soft-block | instruction: %s | injection_pos: %s",
-                instruction,
-                getattr(self.valves, "INJECTION_POSITION", "append_user"),
-            )
-
-            # Ensure _guard_status is always available, even after tool removal
-            self._add_guard_status_tool(body)
-
-            # Inject instruction to summarise
-            self._inject(messages, {
-                "role": "system",
-                "content": instruction,
-            })
-
-            # Forward to gateway — LLM sees all tool results but has no tools.
-            # Streaming: return the async generator; non-streaming: return dict.
-            payload = {**body, "model": real_model, "messages": messages}
-            if body.get("stream", False):
-                return self._stream(payload, headers, url)
-            else:
-                return await self._call(payload, headers, url)
-
-        # --- Runaway soft-block ---------------------------------------
-        runaway = (
-            self.valves.MAX_TOOL_CALLS_PER_TURN > 0
-            and total >= self.valves.MAX_TOOL_CALLS_PER_TURN
-        )
-        if runaway:
-            return await _soft_block(
-                reason=(
-                    f"Tool call limit reached: {total} calls in this turn "
-                    f"(max {self.valves.MAX_TOOL_CALLS_PER_TURN})"
-                ),
-                instruction=_runaway_instruction(total, self.valves.MAX_TOOL_CALLS_PER_TURN),
-            )
-
         # --- Loop detection (consecutive identical tool calls) ---------
         consecutive, bad_tool, _ = self._count_consecutive_duplicates(history)
         block_threshold = self.valves.MAX_CONSECUTIVE_BEFORE_BLOCK
+        max_calls = self.valves.MAX_TOOL_CALLS_PER_TURN
+        remaining_calls = max(0, max_calls - total)
 
         # --- Debug: loop analysis -------------------------------------
         if total > 0:
@@ -768,72 +657,145 @@ class Pipe:
                 total,
             )
 
-        if consecutive >= 2:
-            # Formula-based escalation: each level fires exactly once.
-            #   consecutive == 2                                  → WARNING
-            #   consecutive == final_pos (if N > 3)                → FINAL WARNING
-            #   consecutive >= N                                   → soft-block
-            #   otherwise                                         → silent
-            #
-            # final_pos is placed at ~60% of the range [2, N) so FINAL WARNING
-            # has separation from the block when N is large enough.
+        # --- Build guard state dict -----------------------------------
+        state = {
+            "status": "ok",
+            "tool": None,
+            "consecutive": consecutive,
+            "total": total,
+            "max_calls": max_calls,
+            "remaining_calls": remaining_calls,
+        }
+
+        # --- Escalation ladder (no early returns) ---------------------
+        runaway = max_calls > 0 and total >= max_calls
+
+        if runaway:
+            state["status"] = "runaway"
+            log.warning("Soft-block (runaway): %d tool calls in turn", total)
+            body.pop("tools", None)
+            body.pop("tool_choice", None)
+
+        elif consecutive >= 2:
             final_pos = 2 + (block_threshold - 2) * 3 // 5
 
             if consecutive >= block_threshold:
                 # Soft-block: remove only the looping tool
-                return await _soft_block(
-                    reason=(
-                        f"Repeated tool call detected: {total} calls in this turn"
-                    ),
-                    instruction=_loop_blocked_tool_instruction(bad_tool, total),
-                    blocked_tool=bad_tool,
-                )
-            elif block_threshold > 3 and consecutive == final_pos:
-                # Final warning (tools still available)
-                self._inject(messages, {
-                    "role": "system",
-                    "content": _final_warning_msg(bad_tool, total),
-                })
-                if __event_emitter__:
-                    try:
-                        await __event_emitter__(
-                            {
-                                "type": "notification",
-                                "data": {
-                                    "type": "warning",
-                                    "content": (
-                                        f"🛡️ Agent Loop Guard: {bad_tool} called {total}x. "
-                                        f"Still repeating. Final warning."
-                                    ),
-                                },
-                            }
-                        )
-                    except Exception:
-                        log.warning("Failed to emit FINAL WARNING event (non-fatal)", exc_info=True)
-            elif consecutive == 2:
-                # First warning (tools still available)
-                self._inject(messages, {
-                    "role": "system",
-                    "content": _warning_msg(bad_tool, total),
-                })
-                if __event_emitter__:
-                    try:
-                        await __event_emitter__(
-                            {
-                                "type": "notification",
-                                "data": {
-                                    "type": "info",
-                                    "content": (
-                                        f"🛡️ Agent Loop Guard: {bad_tool} called {total}x "
-                                        f"with same args."
-                                    ),
-                                },
-                            }
-                        )
-                    except Exception:
-                        log.warning("Failed to emit WARNING event (non-fatal)", exc_info=True)
+                state["status"] = "blocked_tool"
+                state["tool"] = bad_tool
+                log.warning("Soft-block (loop): %s blocked after %d calls", bad_tool, total)
+                body["tools"] = [
+                    t for t in body.get("tools", [])
+                    if t.get("function", {}).get("name") != bad_tool
+                ]
+                if isinstance(body.get("tool_choice"), str) and bad_tool in body["tool_choice"]:
+                    body.pop("tool_choice", None)
 
-        # --- Tool blocklist ---------------------------------------------
+            elif block_threshold > 3 and consecutive == final_pos:
+                state["status"] = "final_warning"
+                state["tool"] = bad_tool
+                log.debug("Final warning: %s consecutive=%d", bad_tool, consecutive)
+
+            elif consecutive == 2:
+                state["status"] = "warning"
+                state["tool"] = bad_tool
+                log.debug("Warning: %s consecutive=%d", bad_tool, consecutive)
+
+        # --- Event emission -------------------------------------------
+        if __event_emitter__:
+            try:
+                if state["status"] == "runaway":
+                    await __event_emitter__(
+                        {
+                            "type": "notification",
+                            "data": {
+                                "type": "error",
+                                "content": (
+                                    f"🛡️ Agent Loop Guard: Tool call limit reached "
+                                    f"({total}/{max_calls})."
+                                ),
+                            },
+                        }
+                    )
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🛡️ Tool call limit reached: {total}/{max_calls}",
+                                "done": True,
+                                "hidden": False,
+                            },
+                        }
+                    )
+                elif state["status"] == "blocked_tool":
+                    await __event_emitter__(
+                        {
+                            "type": "notification",
+                            "data": {
+                                "type": "error",
+                                "content": (
+                                    f"🛡️ Agent Loop Guard: {bad_tool} blocked "
+                                    f"after {consecutive} identical calls."
+                                ),
+                            },
+                        }
+                    )
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🛡️ {bad_tool} blocked",
+                                "done": True,
+                                "hidden": False,
+                            },
+                        }
+                    )
+                elif state["status"] == "final_warning":
+                    await __event_emitter__(
+                        {
+                            "type": "notification",
+                            "data": {
+                                "type": "warning",
+                                "content": (
+                                    f"🛡️ Agent Loop Guard: {bad_tool} called "
+                                    f"{consecutive}x. Final warning."
+                                ),
+                            },
+                        }
+                    )
+                elif state["status"] == "warning":
+                    await __event_emitter__(
+                        {
+                            "type": "notification",
+                            "data": {
+                                "type": "info",
+                                "content": (
+                                    f"🛡️ Agent Loop Guard: {bad_tool} called "
+                                    f"{consecutive}x with same args."
+                                ),
+                            },
+                        }
+                    )
+
+                # Always emit remaining calls status if a limit is configured
+                if max_calls > 0 and total > 0:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🛡️ Remaining tool calls: {remaining_calls}/{max_calls}",
+                                "done": True,
+                                "hidden": False,
+                            },
+                        }
+                    )
+            except Exception:
+                log.warning("Failed to emit event (non-fatal)", exc_info=True)
+
+        # --- Inject or replace _guard_status pair in messages ---------
+        self._inject_or_replace_guard_status(messages, state)
+
+        # --- Apply tool blocklist -------------------------------------
         before_blocklist = [t.get("function", {}).get("name") for t in body.get("tools", [])]
         self._apply_tool_blocklist(body)
         if self.valves.TOOL_BLOCKLIST.strip():
@@ -841,38 +803,6 @@ class Pipe:
             removed = set(before_blocklist) - set(after_blocklist)
             if removed:
                 log.debug("Tool blocklist | removed: %s", sorted(removed))
-
-        # --- Tool counter ----------------------------------------------
-        if (
-            self.valves.SHOW_TOOL_COUNTER
-            and total > 0
-            and self.valves.MAX_TOOL_CALLS_PER_TURN > 0
-        ):
-            self._append_tool_counter(messages, total, self.valves.MAX_TOOL_CALLS_PER_TURN)
-            remaining = max(0, self.valves.MAX_TOOL_CALLS_PER_TURN - total)
-            log.debug(
-                "Tool counter appended | total=%d | max=%d | remaining=%d | merge_injected=%s",
-                total,
-                self.valves.MAX_TOOL_CALLS_PER_TURN,
-                remaining,
-                self._merge_injected,
-            )
-
-            if __event_emitter__:
-                remaining = max(0, self.valves.MAX_TOOL_CALLS_PER_TURN - total)
-                try:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"🛡️ Remaining tool calls: {remaining}/{self.valves.MAX_TOOL_CALLS_PER_TURN}",
-                                "done": True,
-                                "hidden": False,
-                            },
-                        }
-                    )
-                except Exception:
-                    log.warning("Failed to emit counter status (non-fatal)", exc_info=True)
 
         # --- Ensure _guard_status is available to the LLM ---------------
         self._add_guard_status_tool(body)
