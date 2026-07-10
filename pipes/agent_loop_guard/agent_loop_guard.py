@@ -132,6 +132,7 @@ def _build_guard_status_pair(state: dict) -> tuple[dict, dict]:
     content = _build_guard_status_content(state)
     assistant_msg = {
         "role": "assistant",
+        "reasoning_content": None,
         "tool_calls": [
             {
                 "id": "guard_status",
@@ -805,13 +806,7 @@ class Pipe:
                 log.debug("Tool blocklist | removed: %s", sorted(removed))
 
         # --- Ensure _guard_status is available to the LLM ---------------
-        # During soft-block (runaway or blocked_tool), do NOT add _guard_status
-        # back to body["tools"] — we already communicated the state via the
-        # injected _guard_status pair in messages. Without any available tools,
-        # the LLM is forced to respond with text instead of attempting more
-        # tool calls.
-        if state["status"] not in ("runaway", "blocked_tool"):
-            self._add_guard_status_tool(body)
+        self._add_guard_status_tool(body)
 
         # --- Debug: final payload before forwarding --------------------
         payload_preview = {
