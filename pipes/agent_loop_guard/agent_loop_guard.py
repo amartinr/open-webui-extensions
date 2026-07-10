@@ -43,6 +43,56 @@ def _loop_blocked_tool_instruction(tool_name: str, total: int) -> str:
     )
 
 
+def _build_guard_status_message(state: dict) -> str:
+    """Build a human-readable message string for the _guard_status tool result.
+
+    Args:
+        state: dict with keys:
+            - status: str ('ok'|'warning'|'final_warning'|'blocked_tool'|'runaway')
+            - tool: str | None
+            - consecutive: int
+            - total: int
+            - max_calls: int
+            - remaining_calls: int
+
+    Returns:
+        A single, self-contained message string.
+    """
+    remaining = state.get("remaining_calls", 0)
+    max_calls = state.get("max_calls", 0)
+    tool = state.get("tool")
+    consecutive = state.get("consecutive", 0)
+    total = state.get("total", 0)
+    status = state.get("status", "ok")
+
+    if status == "ok":
+        return f"{remaining}/{max_calls} tool calls remaining."
+    elif status == "warning":
+        return (
+            f"{tool} called {consecutive}x with the same arguments. "
+            f"{remaining}/{max_calls} tool calls remaining. "
+            f"Change your approach or summarise."
+        )
+    elif status == "final_warning":
+        return (
+            f"{tool} called {consecutive}x with the same arguments. "
+            f"{remaining}/{max_calls} tool calls remaining. "
+            f"This is your final warning. Stop repeating and summarise."
+        )
+    elif status == "blocked_tool":
+        return (
+            f"TOOL REMOVED: {tool} blocked after {consecutive} identical calls. "
+            f"{remaining}/{max_calls} tool calls remaining. "
+            f"Other tools are still available or you may summarise now."
+        )
+    elif status == "runaway":
+        return (
+            f"Tool call limit reached: {total}/{max_calls}. "
+            f"No more tool calls this turn. Summarise now."
+        )
+    return ""
+
+
 class Pipe:
     class Valves(BaseModel):
         GATEWAY_BASE_URL: str = Field(
