@@ -9,7 +9,9 @@
 
 ## 1. Purpose
 
-Replace the current system of injecting system messages and plain text appended to tool results with a **unified mechanism based on a dummy tool managed entirely by the pipe**. This allows the agent to receive all control information (warnings, counters, blocks) through the native tool call / tool result channel, without contaminating real tool results.
+Replace the current system of injecting system messages and plain text appended to tool results with a **mechanism based on a dummy tool managed by the pipe** for warnings, complemented by direct system messages for soft-blocks. This hybrid allows warnings to travel through the native tool call / tool result channel without contaminating real tool results, while soft-blocks retain the authoritative directiveness of system messages.
+
+**Implementation note:** The original design envisioned a fully unified mechanism. In practice, a hybrid emerged: warnings use `_guard_status` pairs, while soft-blocks (runaway, blocked_tool) use early-return with system messages — matching the tried-and-tested master branch behaviour for the critical stop-the-agent case. See §5.2 and §6.5.
 
 ---
 
@@ -97,6 +99,8 @@ pipe() → gateway → LLM responds with tool_calls (incl. _guard_status)
 **Key insight:** `_guard_status` lives in `body["tools"]` (what the LLM sees) but is **never registered** in Open WebUI's internal tool callable registry (`get_tools()` / `get_builtin_tools()`). When the middleware's `chat_completion_tools_handler` tries to look it up, it logs `Tool "_guard_status" not found` and returns silently — no error, no tool result. The `sanitize_tool_pairs()` function then removes the orphaned assistant message (tool_call without matching tool result).
 
 **Conclusion:** Voluntary calls to `_guard_status` are harmless. The agent loses at most one iteration (the middleware skips the call, the pipe auto-injects normally on the next iteration). No special interception logic is needed — the design does not attempt to intercept or shortcut these calls. This is a deliberate simplification: the added complexity of intercepting voluntary calls is not justified for an edge case that is both improbable (the LLM has no reason to call a tool marked "Internal read‑only" unprompted) and self‑resolving.
+
+**Implementation note:** When `_guard_status` is voluntarily called, the error `"Tool _guard_status not found"` is returned as a tool result with a random UUID `tool_call_id`. This error message survives the `clean_messages` filter (which only strips pairs with `tool_call_id == "guard_status"`). This is harmless — the LLM learns that calling `_guard_status` fails and stops attempting it.
 
 ---
 
@@ -280,6 +284,8 @@ During each invocation of `pipe()` by the middleware's tool‑call loop:
 4. If not found and `total > 0`, the pipe **appends** a new assistant + tool pair at the end of `messages`.
 5. The modified `body` is forwarded to the gateway.
 
+> **Important:** The `_guard_status` pair is **stripped from the forwarded payload** via `clean_messages` before reaching the gateway. This is necessary because fabricated assistant messages trigger `reasoning_content` validation errors on DeepSeek (thinking mode). The pair remains in `body["messages"]` (modified in-place) for the middleware loop to carry forward between iterations.
+
 **Fabricated message IDs:** both the auto‑injected assistant message and tool result use a fixed, deterministic `tool_call_id` of `"guard_status"`. The assistant message's own `id` field is also set to `"guard_status"`. These fixed IDs make the pair trivially discoverable for the replacement mechanism and ensure `sanitize_tool_pairs()` in the middleware does not strip the pair (the fabricated `tool` message carries a `tool_call_id` that matches the assistant's `tool_calls[0].id`).
 
 ---
@@ -297,18 +303,21 @@ If the agent decides to invoke `_guard_status` on its own initiative, the middle
 When the consecutive identical call threshold is exceeded:
 
 1. The pipe removes from `body["tools"]` **only** the tool that is looping.
-2. The `_guard_status` tool **remains** in `body["tools"]`.
-3. The previous `_guard_status` pair is **replaced** with a new one carrying `status: "blocked_tool"` and a clear message.
-4. The agent receives the request: it can use other real tools, query `_guard_status`, or summarise with the data it already has.
+2. The pipe takes an **early return** — it does NOT continue to `_add_guard_status_tool()`, so `_guard_status` does NOT appear in `body["tools"]` for this request. This matches the original master branch behaviour where no tools were re-added after removal.
+3. A **system message** with the block instruction is appended to messages.
+4. The `_guard_status` pair in messages is stripped before forwarding (via `clean_messages`).
+5. The agent receives the request: it can use other real tools or summarise.
 
 ### 8.2 Runaway block (turn limit reached)
 
 When the total tool call limit per turn is exceeded:
 
-1. The pipe removes from `body["tools"]` **all real tools**.
-2. The `_guard_status` tool **remains** in `body["tools"]`.
-3. The previous `_guard_status` pair is **replaced** with a new one carrying `status: "runaway"` and a clear message.
-4. The agent receives the request with no real tools: it can only query `_guard_status` or summarise.
+1. The pipe removes from `body["tools"]` **all real tools** (`body.pop("tools", None)`).
+2. The pipe takes an **early return** — no `_guard_status` tool is added back.
+3. A **system message** with the runaway instruction is appended to messages.
+4. The agent receives the request with no tools available at all, forcing it to summarise.
+
+> **Implementation note:** The original design specified that `_guard_status` should remain available during soft-blocks so the agent could query guard state. However, during testing with DeepSeek, the presence of any tool in `body["tools"]` led the LLM to attempt further tool calls, preventing it from summarising. The early-return approach (removing all tools + system message) proved more reliable for stopping runaway agents.
 
 ---
 
@@ -396,13 +405,15 @@ The notification and status events emitted by the pipe (`__event_emitter__`) are
 |---|------|------------|:-----:|
 | R1 | `_extract_tool_calls_in_turn()` counts the auto‑injected `_guard_status` pair as a real tool call, inflating `total` and triggering runaway too early | Skip any `tool_calls` entry where `function.name == "_guard_status"` during extraction | ~1 |
 | R2 | The remaining‑calls counter in the `_guard_status` response is off by one because the injected pair counts itself in `total` | Same mitigation as R1 — the pair is excluded from `total`, so `remaining = max - total` is accurate | ~0 (same line) |
-| R3 | `_soft_block()` in runaway mode calls `body.pop("tools", None)`, which would also remove `_guard_status` — the one tool that must survive | Change `_soft_block()` to filter instead of pop: keep only tools where `function.name == "_guard_status"` | ~3 |
+| R3 | `_soft_block()` in runaway mode calls `body.pop("tools", None)`, which would also remove `_guard_status` | **Resolution:** The early-return approach (see §8.2) avoids re-adding `_guard_status` after `pop`. The agent receives a system message instead of a `_guard_status` pair, and the absence of tools forces it to summarise. This proved more effective than keeping `_guard_status` visible. | ~1 |
 
 ---
 
 ## 15. Guarding `_guard_status` Against Removal
 
-The `_guard_status` tool is **never removable** by the tool blocklist (`TOOL_BLOCKLIST`). Even if an administrator accidentally adds `_guard_status` to the blocklist, `_apply_tool_blocklist()` explicitly preserves it — the filter skips any tool whose `function.name == "_guard_status"`. `_guard_status` is also the only tool that survives a runaway soft‑block (all real tools are removed, `_guard_status` remains — see §8.2).
+The `_guard_status` tool is **never removable** by the tool blocklist (`TOOL_BLOCKLIST`). Even if an administrator accidentally adds `_guard_status` to the blocklist, `_apply_tool_blocklist()` explicitly preserves it — the filter skips any tool whose `function.name == "_guard_status"`.
+
+> **Note:** During soft-block (runaway or loop block), `_guard_status` is NOT re-added to `body["tools"]` because the early return skips `_add_guard_status_tool()`. This is a deliberate trade-off: the agent receives a system message instead, and the absence of tools forces summarisation. See §8 for details.
 
 ---
 

@@ -54,7 +54,7 @@ Phase 6 ────────────────────────
 | **3** | Phase 2 (needs the tool name/definition) | Yes | ✅ Done |
 | **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 | ✅ Done (4.3 only; 4.1/4.2 deferred to Phase 5) |
 | **5** | Phases 1, 3, 4 | Yes — all three must exist. Includes `_inject_or_replace_guard_status` (moved from Phase 3.3) because it only makes sense when integrated with removal of the old mechanism | ✅ Done |
-| **6** | Phase 5 | Yes — only after old mechanism is gone | ⬜ Pending |
+| **6** | Phase 5 | Yes — only after old mechanism is gone | ⬜ Pending (code dead, Phase 5 hybrid design adopted) |
 
 Phases 1, 2, and 4 are **fully independent** and can be implemented in any
 order (or in parallel). Phase 5 is the integration point where everything
@@ -280,10 +280,22 @@ if isinstance(tool_choice, str) and tool_choice in blocked and tool_choice != "_
 
 ---
 
-## Phase 5 — Main Flow Integration [✅ Done — commit `e74bced`]
+## Phase 5 — Main Flow Integration [✅ Done — commits `e74bced`, `8adf1fc`, `57af344`, `2fbd514`]
 
 **Goal:** Wire everything together in `pipe()` and remove the old
 injection mechanism. This is the integration phase.
+
+**Key decision — hybrid approach:** Unlike the original design, soft-block
+states (blocked_tool, runaway) use an **early return with system messages**
+identical to master, while warning/final_warning states use the new
+`_guard_status` pair mechanism. This proved necessary because:
+- The `_guard_status` pair must be stripped from forwarded messages
+  (DeepSeek's thinking mode rejects fabricated assistant messages)
+- Without a system message, the agent ignores the soft-block instruction
+  and keeps calling tools
+- The early return prevents `_add_guard_status_tool` from re-adding
+  `_guard_status` to `body["tools"]`, which would give the LLM an
+  available tool to attempt calling
 
 | # | Change | File |
 |:-:|--------|:----:|
@@ -399,7 +411,7 @@ Remove from `Valves` class:
 |:----:|-----------|:-----:|
 | R1 — `_extract_tool_calls_in_turn` counts `_guard_status` as real call | Skip entries where `function.name == "_guard_status"` | 1 |
 | R2 — Counter off by one from injected pair | Same as R1 | 1 |
-| R3 — `_soft_block(runaway)` calls `body.pop("tools")`, removing `_guard_status` | Filter instead of pop; keep `_guard_status` | 4 |
+| R3 — `_soft_block(runaway)` calls `body.pop("tools")`, removing `_guard_status` | Early return skips re-adding `_guard_status`; system message used instead. Resolved differently than originally planned, but effective. | 5 |
 | R4 — `TOOL_BLOCKLIST` could remove `_guard_status` | Skip `_guard_status` in blocklist filter | 4 |
 
 ---
