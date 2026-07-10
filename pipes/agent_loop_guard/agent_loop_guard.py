@@ -667,7 +667,10 @@ class Pipe:
             "remaining_calls": remaining_calls,
         }
 
-        # --- Escalation ladder (no early returns) ---------------------
+        # --- Escalation ladder ----------------------------------------
+        # Soft-block states (runaway, blocked_tool) do early return
+        # to prevent any downstream modifications to body/messages after
+        # the block decision, exactly like the original master branch.
         runaway = max_calls > 0 and total >= max_calls
 
         if runaway:
@@ -676,32 +679,252 @@ class Pipe:
             body.pop("tools", None)
             body.pop("tool_choice", None)
 
+
         elif consecutive >= 2:
+
             final_pos = 2 + (block_threshold - 2) * 3 // 5
 
             if consecutive >= block_threshold:
+
                 # Soft-block: remove only the looping tool
+
                 state["status"] = "blocked_tool"
+
                 state["tool"] = bad_tool
+
                 log.warning("Soft-block (loop): %s blocked after %d calls", bad_tool, total)
+
                 body["tools"] = [
+
                     t for t in body.get("tools", [])
+
                     if t.get("function", {}).get("name") != bad_tool
+
                 ]
+
                 if isinstance(body.get("tool_choice"), str) and bad_tool in body["tool_choice"]:
+
                     body.pop("tool_choice", None)
 
+
+
             elif block_threshold > 3 and consecutive == final_pos:
+
                 state["status"] = "final_warning"
+
                 state["tool"] = bad_tool
+
                 log.debug("Final warning: %s consecutive=%d", bad_tool, consecutive)
 
+
+
             elif consecutive == 2:
+
                 state["status"] = "warning"
+
                 state["tool"] = bad_tool
+
                 log.debug("Warning: %s consecutive=%d", bad_tool, consecutive)
 
-        # --- Event emission -------------------------------------------
+
+
+        # --- Soft-block: early return ----------------------------------
+
+        if state["status"] in ("runaway", "blocked_tool"):
+
+            if __event_emitter__:
+
+                try:
+
+                    if state["status"] == "runaway":
+
+                        await __event_emitter__(
+
+                            {
+
+                                "type": "notification",
+
+                                "data": {
+
+                                    "type": "error",
+
+                                    "content": (
+
+                                        f"\U0001f6e1\ufe0f Agent Loop Guard: Tool call limit reached "
+
+                                        f"({total}/{max_calls})."
+
+                                    ),
+
+                                },
+
+                            }
+
+                        )
+
+                        await __event_emitter__(
+
+                            {
+
+                                "type": "status",
+
+                                "data": {
+
+                                    "description": f"\U0001f6e1\ufe0f Tool call limit reached: {total}/{max_calls}",
+
+                                    "done": True,
+
+                                    "hidden": False,
+
+                                },
+
+                            }
+
+                        )
+
+                    elif state["status"] == "blocked_tool":
+
+                        await __event_emitter__(
+
+                            {
+
+                                "type": "notification",
+
+                                "data": {
+
+                                    "type": "error",
+
+                                    "content": (
+
+                                        f"\U0001f6e1\ufe0f Agent Loop Guard: {bad_tool} blocked "
+
+                                        f"after {consecutive} identical calls."
+
+                                    ),
+
+                                },
+
+                            }
+
+                        )
+
+                        await __event_emitter__(
+
+                            {
+
+                                "type": "status",
+
+                                "data": {
+
+                                    "description": f"\U0001f6e1\ufe0f {bad_tool} blocked",
+
+                                    "done": True,
+
+                                    "hidden": False,
+
+                                },
+
+                            }
+
+                        )
+
+                except Exception:
+
+                    log.warning("Failed to emit event (non-fatal)", exc_info=True)
+
+
+
+            # Inject system message instructing the agent to stop
+
+            system_msg = _build_guard_status_message(state)
+
+            messages.append({"role": "system", "content": system_msg})
+
+
+
+            # Strip _guard_status pairs from messages before forwarding
+
+            clean = [
+
+                m for m in messages
+
+                if not (
+
+                    m.get("role") == "assistant"
+
+                    and any(
+
+                        tc.get("id") == "guard_status"
+
+                        for tc in m.get("tool_calls", [])
+
+                    )
+
+                )
+
+                and not (
+
+                    m.get("role") == "tool"
+
+                    and m.get("tool_call_id") == "guard_status"
+
+                )
+
+            ]
+
+
+
+            payload = {**body, "model": real_model, "messages": clean}
+
+
+
+            try:
+
+                if body.get("stream", False):
+
+                    log.debug("Streaming request started (soft-block)")
+
+                    return self._stream(payload, headers, url)
+
+                else:
+
+                    response = await self._call(payload, headers, url)
+
+                    return response
+
+            except httpx.HTTPStatusError as e:
+
+                log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
+
+                return (
+
+                    f"Gateway error: HTTP {e.response.status_code}. "
+
+                    f"Please check the gateway configuration."
+
+                )
+
+            except httpx.RequestError as e:
+
+                log.error("Gateway unreachable: %s", e)
+
+                return (
+
+                    "Gateway unreachable. Please check that the gateway is running "
+
+                    "and GATEWAY_BASE_URL is correct."
+
+                )
+
+            except Exception as e:
+
+                log.error("Unexpected error calling gateway: %s", e)
+
+                return f"Error calling gateway: {e}"
+
+
+
+        # --- Non-soft-block: event emission ----------------------------
         if __event_emitter__:
             try:
                 if state["status"] == "runaway":
