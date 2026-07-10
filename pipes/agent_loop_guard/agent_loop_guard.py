@@ -805,7 +805,13 @@ class Pipe:
                 log.debug("Tool blocklist | removed: %s", sorted(removed))
 
         # --- Ensure _guard_status is available to the LLM ---------------
-        self._add_guard_status_tool(body)
+        # During soft-block (runaway or blocked_tool), do NOT add _guard_status
+        # back to body["tools"] — we already communicated the state via the
+        # injected _guard_status pair in messages. Without any available tools,
+        # the LLM is forced to respond with text instead of attempting more
+        # tool calls.
+        if state["status"] not in ("runaway", "blocked_tool"):
+            self._add_guard_status_tool(body)
 
         # --- Debug: final payload before forwarding --------------------
         payload_preview = {
