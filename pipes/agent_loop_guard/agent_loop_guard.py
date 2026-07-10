@@ -817,6 +817,21 @@ class Pipe:
         self._add_guard_status_tool(body)
 
         # --- Debug: final payload before forwarding --------------------
+        # Verify that the fabricated _guard_status assistant has reasoning_content
+        # (required by DeepSeek thinking mode)
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    if tc.get("id") == "guard_status":
+                        rc = m.get("reasoning_content")
+                        log.debug(
+                            "_guard_status pair | has_reasoning_content=%s | rc_len=%d",
+                            bool(rc),
+                            len(rc) if rc else 0,
+                        )
+                        break
+                break
+
         payload_preview = {
             "model": real_model,
             "stream": body.get("stream", False),
