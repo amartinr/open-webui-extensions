@@ -110,9 +110,7 @@ from the block. For `N=3` there is no FINAL WARNING (WARNING → block directly)
 | `GATEWAY_CUSTOM_HEADERS` | `""` | JSON object of extra headers. Supports `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` |
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before soft-block. `0` = disabled |
 | `MAX_CONSECUTIVE_BEFORE_BLOCK` | `4` | Consecutive identical tool calls before soft-block (min 3). Warnings spaced automatically: WARNING on first detection, FINAL WARNING at ~60% of threshold |
-| `SHOW_TOOL_COUNTER` | `True` | Append descending counter (`remaining tool calls: N`) to every tool result |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
-| `INJECTION_POSITION` | `"append_user"` | Where to inject: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |
 
 > **Note**: `MAX_TOOL_CALLS_PER_TURN` must be greater than `MAX_CONSECUTIVE_BEFORE_BLOCK`
 > when both are enabled. The pipe validates this at config time — if runaway's threshold

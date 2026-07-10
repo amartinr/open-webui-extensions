@@ -1,6 +1,6 @@
 # Implementation Plan: `_guard_status` — Agent Loop Guard Refactor
 
-**Version:** 1.0  
+**Version:** 2.0  
 **Based on:** [GUARD_STATUS.md](./GUARD_STATUS.md) (design document)
 **Target:** `agent_loop_guard.py` v1.1.0 → v2.0.0
 
@@ -9,399 +9,158 @@
 ## Overview
 
 Replace the current system of injecting system messages and appending plain
-text to tool results with a **unified mechanism based on a dummy tool
-`_guard_status`** managed entirely by the pipe.
+text to tool results with a **hybrid mechanism based on a dummy tool
+`_guard_status` + system messages**, managed entirely by the pipe.  Key
+architectural discoveries made during implementation:
 
-The design doc (GUARD_STATUS.md) identifies three real risks (R1–R3) and lays
-out the full architecture. This plan breaks the implementation into **6 phases**
-with clear dependency ordering.
-
----
-
-## Dependency Graph
-
-```
-Phase 1 ✅ ─────────────────────────────────────────────┐
-  (extraction filter — R1/R2)                          │
-      │                                                │
-      ▼                                                │
-Phase 2 ✅                                              │
-  (tool registration + definition)                     │
-      │                                                │
-      ▼                                                │
-Phase 3 ✅ ─────────────────────────────────┐            │
-  (pair fabrication — pure functions)     │            │
-      │                                   │            │
-      ▼                                   ▼            ▼
-Phase 4 ✅ ─────────────────────────────────────────────────┐
-  (blocklist protection — 4.3 only)                      │
-      │                                                    │
-      ▼                                                    ▼
-Phase 5 ✅ ─────────────────────────────────────────────────────┐
-  (main pipe() flow — integrated _guard_status + old mech gone) │
-      │                                                        │
-      ▼                                                        ▼
-Phase 6 ──────────────────────────────────────────────────────────┐
-  (cleanup: remove unused methods/valves, update docs, finalise)  │
-```
-
-### Dependency rules
-
-| Phase | Depends on | Wait for? |
-|:-----:|-----------|:---------:|
-| **1** | Nothing | No | ✅ Done |
-| **2** | Nothing | No — independent of Phase 1 | ✅ Done |
-| **3** | Phase 2 (needs the tool name/definition) | Yes | ✅ Done |
-| **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 | ✅ Done (4.3 only; 4.1/4.2 deferred to Phase 5) |
-| **5** | Phases 1, 3, 4 | Yes — all three must exist. Includes `_inject_or_replace_guard_status` (moved from Phase 3.3) because it only makes sense when integrated with removal of the old mechanism | ✅ Done |
-| **6** | Phase 5 | Yes — only after old mechanism is gone | ⬜ Pending (code dead, Phase 5 hybrid design adopted) |
-
-Phases 1, 2, and 4 are **fully independent** and can be implemented in any
-order (or in parallel). Phase 5 is the integration point where everything
-comes together.
+1. **`new_form_data = {**form_data, ...}`** is a shallow copy — list mutations
+   must be **in-place** (`list[:] = [...]`) to survive across iterations.
+2. **`metadata["tools"]`** is the middleware's execution registry — clearing only
+   `body["tools"]` is insufficient; `__metadata__["tools"]` must also be purged.
+3. **System messages are essential** — the `_guard_status` pair gets stripped
+   before forwarding, so warnings/block instructions must also flow via system
+   messages for the LLM to receive them.
+4. **No early return for soft-block** — both soft-block and normal states now
+   fall through to a single, shared forwarding path, eliminating duplication.
 
 ---
 
-## Phase 1 — Safe Extraction (R1/R2) [✅ Done — commit `551afb6`]
+## Phases
+
+| Phase | Description | Status |
+|:-----:|:------------|:------:|
+| **1** | Safe extraction — filter `_guard_status` from turn analysis | ✅ Done |
+| **2** | Tool registration — `_add_guard_status_tool()` | ✅ Done |
+| **3** | Pair fabrication — `_build_guard_status_*()` pure functions | ✅ Done |
+| **4** | Blocklist protection — preserve `_guard_status` in `TOOL_BLOCKLIST` | ✅ Done |
+| **5** | Main flow integration — full `pipe()` rewired | ✅ Done |
+| **6** | Cleanup — dead code removal, docs, version bump | ⬜ Pending |
+
+---
+
+## Phase 1 — Safe Extraction [✅ Done]
 
 **Goal:** Prevent `_guard_status` pairs from being counted in tool-call
-analysis **before** the new mechanism is active. This is a pure defensive
-change — it adds filtering logic that has no effect until `_guard_status`
-pairs appear in the message history.
-
-Even though the pipe does not yet inject `_guard_status` pairs, the filter
-is harmless: `_guard_status` never appears in `function.name` at this
-stage, so the filter is a no-op. When Phase 3 starts injecting, the filter
-is already in place — no risk of inflating the counter.
+analysis.
 
 | # | Change | File |
 |:-:|--------|:----:|
 | 1.1 | `_extract_tool_calls_in_turn()`: skip any `tool_calls` entry where `function.name == "_guard_status"` | agent_loop_guard.py |
-| 1.2 | `_count_consecutive_duplicates()`: inherently fixed by 1.1 — only real calls reach it | agent_loop_guard.py |
+| 1.2 | `_count_consecutive_duplicates()`: inherently fixed by 1.1 | agent_loop_guard.py |
 
 **Risks mitigated:** R1 (inflated total → early runaway), R2 (off-by-one
 in remaining-calls counter).
 
-**Validation:**
-- No `_guard_status` pairs exist yet → function produces identical output
-- No behaviour change observable
+---
+
+## Phase 2 — Tool Registration [✅ Done]
+
+**Goal:** Add the `_guard_status` tool definition to `body["tools"]`.
+
+| # | Change | File |
+|:-:|--------|:----:|
+| 2.1 | New method `_add_guard_status_tool(body)` | agent_loop_guard.py |
+| 2.2 | Call it in `pipe()` after tool blocklist, **guarded by `state["status"] not in ("runaway", "blocked_tool")`** | agent_loop_guard.py |
+
+**Tool definition:** `{"type": "function", "function": {"name": "_guard_status", ...}}`
 
 ---
 
-## Phase 2 — Tool Registration [✅ Done — commit `964afe4`]
+## Phase 3 — Pair Fabrication [✅ Done]
 
-**Goal:** Add the `_guard_status` tool definition to `body["tools"]` on
-every `pipe()` call. At this stage no pairs are injected, so the tool is
-visible to the LLM but never called and never fabricated.
+**Goal:** Pure functions for the fabricated assistant + tool pair (Option B:
+`status` + `message` fields).
 
 | # | Change | File |
 |:-:|--------|:----:|
-| 2.1 | New method `_add_guard_status_tool(body)`: prepend (or append) `_guard_status` to `body["tools"]` | agent_loop_guard.py |
-| 2.2 | Call `_add_guard_status_tool(body)` in `pipe()` after tool blocklist but before forwarding | agent_loop_guard.py |
-
-**Tool definition:**
-```python
-{
-    "type": "function",
-    "function": {
-        "name": "_guard_status",
-        "description": "Internal read‑only tool. Returns the current state of the agent loop guard: number of tool calls in the turn, consecutive identical calls, block status, and remaining budget.",
-        "parameters": {"type": "object", "properties": {}}
-    }
-}
-```
-
-**Position in `pipe()`:** After tool blocklist filtering, before the
-forward payload is built. This ensures `_guard_status` is always present
-in the final tool list the LLM sees, even after blocklist or soft-block.
-
-**Validation:**
-- `body["tools"]` contains `_guard_status` in the forwarded request
-- No `_guard_status` pairs in messages — no injection yet
-- LLM could theoretically call it, but the middleware will skip it
-  (`tool not found` in its registry, not in body["tools"])
+| 3.1 | `_build_guard_status_message(state)` → human-readable message string | agent_loop_guard.py |
+| 3.2 | `_build_guard_status_content(state)` → JSON with `status` + `message` | agent_loop_guard.py |
+| 3.3 | `_build_guard_status_pair(state)` → `(assistant_msg, tool_msg)` tuple | agent_loop_guard.py |
 
 ---
 
-## Phase 3 — Pair Fabrication [✅ Done — commits `cd5525a`, `2af8803`, `c843821`]
+## Phase 4 — Blocklist Protection [✅ Done]
 
-**Goal:** Build the fabricated assistant + tool pair as pure functions.
-No connection to pipe() flow yet — all code is dead until Phase 5.
-
-| # | Change | File |
-|:-:|--------|:----:|
-| 3.1 | New method `_build_guard_status_message(state)` → returns human-readable message string for the tool result | agent_loop_guard.py |
-| 3.2 | New method `_build_guard_status_content(state)` → returns JSON string with `status` + `message` fields | agent_loop_guard.py |
-| 3.3 | New method `_build_guard_status_pair(state)` → returns `(assistant_msg, tool_msg)` tuple (fixed `tool_call_id = "guard_status"`) | agent_loop_guard.py |
-
-### 3.1 — Human-readable message builder
-
-```python
-def _build_guard_status_message(state: dict) -> str:
-    if state["status"] == "ok":
-        return f"{state['remaining_calls']}/{state['max_calls']} tool calls remaining."
-    elif state["status"] == "warning":
-        return (f"{state['tool']} called {state['consecutive']}x with the same arguments. "
-                f"{state['remaining_calls']}/{state['max_calls']} tool calls remaining. "
-                f"Change your approach or summarise.")
-    elif state["status"] == "final_warning":
-        return (f"{state['tool']} called {state['consecutive']}x with the same arguments. "
-                f"{state['remaining_calls']}/{state['max_calls']} tool calls remaining. "
-                f"This is your final warning. Stop repeating and summarise.")
-    elif state["status"] == "blocked_tool":
-        return (f"TOOL REMOVED: {state['tool']} blocked after {state['consecutive']} identical calls. "
-                f"{state['remaining_calls']}/{state['max_calls']} tool calls remaining. "
-                f"Other tools are still available or you may summarise now.")
-    elif state["status"] == "runaway":
-        return (f"Tool call limit reached: {state['total']}/{state['max_calls']}. "
-                f"No more tool calls this turn. Summarise now.")
-    return ""
-```
-
-**Validation:**
-- `_build_guard_status_message`, `_build_guard_status_content`, and `_build_guard_status_pair` are pure functions, no side effects.
-- The pair uses fixed `tool_call_id = "guard_status"` so `sanitize_tool_pairs()` in the middleware preserves it.
-
----
-### 3.2 — Tool result content format (Option B from GUARD_STATUS.md)
-
-Minimal two-field format for token efficiency:
-
-```python
-def _build_guard_status_content(state: dict) -> str:
-    """Build the content for the _guard_status tool result.
-
-    state keys:
-      - status: str ('ok'|'warning'|'final_warning'|'blocked_tool'|'runaway')
-      - tool: str | None  — tool name involved
-      - consecutive: int
-      - total: int
-      - max_calls: int
-      - blocked: bool
-      - blocked_tools: list[str]
-    """
-    return json.dumps({
-        "status": state["status"],
-        "message": _build_guard_status_message(state),
-    })
-```
-
-### 3.3 — Fabricated message pair
-
-```python
-def _build_guard_status_pair(state: dict) -> tuple[dict, dict]:
-    content = _build_guard_status_content(state)
-    assistant_msg = {
-        "role": "assistant",
-        "tool_calls": [{
-            "id": "guard_status",
-            "type": "function",
-            "function": {
-                "name": "_guard_status",
-                "arguments": "{}"
-            }
-        }]
-    }
-    tool_msg = {
-        "role": "tool",
-        "tool_call_id": "guard_status",
-        "content": content,
-    }
-    return assistant_msg, tool_msg
-```
-
-
-## Phase 4 — Soft-Block Hardening (R3) + Blocklist Protection [✅ Done — commit `dca9b8c`]
-
-**Goal:** Ensure `_guard_status` survives all soft-block and blocklist
-operations. This phase is independent of Phases 1–3.
-
-**Note:** Only 4.3 (blocklist protection) was implemented. Items 4.1 and 4.2
-are deferred to Phase 5 — they are naturally resolved by the soft-block
-rewrite that replaces system message injection with `_guard_status` pairs.
+**Goal:** Protect `_guard_status` from `TOOL_BLOCKLIST`.
 
 | # | Change | File |
 |:-:|--------|:----:|
-| 4.1 | In `_soft_block` (runaway case): replace `body.pop("tools", None)` with filter that keeps only `_guard_status` | agent_loop_guard.py |
-| 4.2 | In `_soft_block` (loop case): ensure `_guard_status` is never removed (it already only removes the offending tool, but add explicit guard) | agent_loop_guard.py |
-| 4.3 | In `_apply_tool_blocklist()`: skip any tool where `function.name == "_guard_status"` | agent_loop_guard.py |
+| 4.3 | `_apply_tool_blocklist()`: skip any tool where `function.name == "_guard_status"` | agent_loop_guard.py |
 
-### 4.1 — Runaway soft-block
-
-**Before:**
-```python
-body.pop("tools", None)
-body.pop("tool_choice", None)
-```
-
-**After:**
-```python
-# Keep only _guard_status so the LLM can still read guard state
-body["tools"] = [
-    t for t in body.get("tools", [])
-    if t.get("function", {}).get("name") == "_guard_status"
-]
-body.pop("tool_choice", None)
-```
-
-### 4.2 — Loop soft-block
-
-The loop case already filters by name, so `_guard_status` naturally
-survives. Add an explicit comment/assertion for clarity:
-
-```python
-# Keep _guard_status (it should never be the offending tool,
-# but guard explicitly for safety)
-```
-
-### 4.3 — Blocklist protection
-
-```python
-# Never remove _guard_status, even if accidentally blocklisted
-body["tools"] = [
-    t for t in tools
-    if t.get("function", {}).get("name") not in blocked
-    or t.get("function", {}).get("name") == "_guard_status"
-]
-```
-
-Also update the `tool_choice` reset to ignore `_guard_status`:
-```python
-if isinstance(tool_choice, str) and tool_choice in blocked and tool_choice != "_guard_status":
-    body.pop("tool_choice", None)
-```
-
-**Validation:**
-- Runaway soft-block: `_guard_status` remains in `body["tools"]`, all
-  real tools removed
-- Loop soft-block: offending tool removed, `_guard_status` stays
-- `TOOL_BLOCKLIST` containing `_guard_status` → silently ignored
-- `_guard_status` never appears in `blocked_tools` list
+Also protects `tool_choice` reset from targeting `_guard_status`.
 
 ---
 
-## Phase 5 — Main Flow Integration [✅ Done — commits `e74bced`, `8adf1fc`, `57af344`, `2fbd514`]
+## Phase 5 — Main Flow Integration [✅ Done]
 
-**Goal:** Wire everything together in `pipe()` and remove the old
-injection mechanism. This is the integration phase.
+**Goal:** Wire everything together in `pipe()` and remove the old injection
+mechanism.
 
-**Key decision — hybrid approach:** Unlike the original design, soft-block
-states (blocked_tool, runaway) use an **early return with system messages**
-identical to master, while warning/final_warning states use the new
-`_guard_status` pair mechanism. This proved necessary because:
-- The `_guard_status` pair must be stripped from forwarded messages
-  (DeepSeek's thinking mode rejects fabricated assistant messages)
-- Without a system message, the agent ignores the soft-block instruction
-  and keeps calling tools
-- The early return prevents `_add_guard_status_tool` from re-adding
-  `_guard_status` to `body["tools"]`, which would give the LLM an
-  available tool to attempt calling
+### Key design decisions reached during this phase
+
+| Decision | Rationale |
+|:---------|:----------|
+| **Hybrid approach** | Warnings use `_guard_status` pair + system message; soft-blocks use system message + tool removal (no early return) |
+| **Loop detection wins over runaway** | `runaway = total >= max and consecutive < threshold` — an agent in a loop gets `blocked_tool` even if also at the turn limit |
+| **In-place slice assignment** | `tools[:] = [...]` mutates the shared list object, surviving `{**form_data}` shallow copy |
+| **`__metadata__["tools"]` clearing** | The middleware executes tools from `metadata["tools"]`, not `body["tools"]` |
+| **No `tool_choice: "none"`** | Bifrost needs to stay in tool-calling mode so it parses DSML; `"none"` would leak raw DSML as text |
+| **No DSML buffer in `_stream()`** | Any buffer that merges `reasoning_content` with `content` breaks Open WebUI's collapsible reasoning display |
+| **No early return for soft-block** | Both soft-block and normal states fall through to a single forward path, eliminating ~30 lines of duplicated error handling |
+
+### Changes
 
 | # | Change | File |
 |:-:|--------|:----:|
-| # | Change | File |
-|:-:|--------|:----:|
-| 5.1 | In `pipe()`: after computing `total`, `consecutive`, etc., build state dict | agent_loop_guard.py |
-| 5.2 | New method `_inject_or_replace_guard_status(messages, state)`: scan backwards, replace if found, append if not. Call it from `pipe()`. (Moved from Phase 3.3) | agent_loop_guard.py |
-| 5.3 | Remove calls to `_inject()` (old system message injection) | agent_loop_guard.py |
-| 5.4 | Remove call to `_append_tool_counter()` | agent_loop_guard.py |
+| 5.1 | Build `state` dict from `total`, `consecutive`, `remaining_calls` | agent_loop_guard.py |
+| 5.2 | `_inject_or_replace_guard_status(messages, state)`: scan backwards, replace or append | agent_loop_guard.py |
+| 5.3 | Remove old `_inject()` calls (dead code kept for Phase 6) | agent_loop_guard.py |
+| 5.4 | Remove old `_append_tool_counter()` calls (dead code kept for Phase 6) | agent_loop_guard.py |
 | 5.5 | Remove `INJECTION_POSITION` valve | agent_loop_guard.py |
 | 5.6 | Remove `SHOW_TOOL_COUNTER` valve | agent_loop_guard.py |
 | 5.7 | Update `__event_emitter__` calls to use `_guard_status` terminology | agent_loop_guard.py |
-| 5.8 | Call `_add_guard_status_tool(body)` in the right place in `pipe()` | agent_loop_guard.py |
-| 5.9 | Update the `model_validator` to remove INJECTION_POSITION/SHOW_TOOL_COUNTER references (if any) | agent_loop_guard.py |
+| 5.8 | Call `_add_guard_status_tool(body)` guarded by state check | agent_loop_guard.py |
+| 5.9 | `model_validator` updated (already clean — no INJECTION/SHOW references) | agent_loop_guard.py |
+| 5.10 | **In-place mutation**: all `body["tools"]` assignments → `tools[:] = [...]` | agent_loop_guard.py |
+| 5.11 | **Metadata clearing**: remove tools from `__metadata__["tools"]` on soft-block | agent_loop_guard.py |
+| 5.12 | **System messages for warnings**: added for `warning`/`final_warning` states | agent_loop_guard.py |
+| 5.13 | **Escalation order**: loop detection evaluated before runaway | agent_loop_guard.py |
+| 5.14 | **Runaway symmetric with loop**: remove only used tools, keep unused ones | agent_loop_guard.py |
+| 5.15 | **Remove early return**: soft-block falls through to shared forward path | agent_loop_guard.py |
 
-### 5.1 — Main flow logic in `pipe()`
+### Soft-block flow (both `blocked_tool` and `runaway`)
 
-```python
-# --- Build guard state ---------------------------------
-blocked_tools_list = []  # populated during soft-block
-state = {
-    "status": "ok",
-    "tool": bad_tool if consecutive >= 2 else None,
-    "consecutive": consecutive,
-    "total": total,
-    "max_calls": self.valves.MAX_TOOL_CALLS_PER_TURN,
-    "remaining_calls": max(0, self.valves.MAX_TOOL_CALLS_PER_TURN - total),
-    "blocked": bool(blocked_tools_list),
-    "blocked_tools": blocked_tools_list,
-}
-
-# --- Determine escalation level ------------------------
-if consecutive >= 2:
-    final_pos = 2 + (block_threshold - 2) * 3 // 5
-    if consecutive >= block_threshold:
-        state["status"] = "blocked_tool"
-        # ... soft-block (set blocked_tools_list) ...
-    elif block_threshold > 3 and consecutive == final_pos:
-        state["status"] = "final_warning"
-    elif consecutive == 2:
-        state["status"] = "warning"
-
-if runaway:
-    state["status"] = "runaway"
-    # ... soft-block ...
-
-# --- Inject/replace guard status pair -----------------
-self._inject_or_replace_guard_status(messages, state)
-
-# --- Add _guard_status to tools -----------------------
-self._add_guard_status_tool(body)
 ```
-
-### 5.2 — Injection/replacement logic
-
-```python
-def _inject_or_replace_guard_status(self, messages: list[dict], state: dict) -> None:
-    """Scan backwards through messages.
-
-    - If an assistant message with tool_calls[0].id == 'guard_status' is found,
-      replace that assistant + its matching tool result in-place.
-    - If not found and state['total'] > 0, append a new pair at the end.
-    - If total == 0, do nothing (no guard state yet).
-    """
-    pair = _build_guard_status_pair(state)
-    ...
+1. Emit __event_emitter__ notifications (error type)
+2. Inject system message: _build_guard_status_message(state)
+3. [tools already cleared in-place in the escalation ladder above]
+4. Fall through to normal path:
+   a. _inject_or_replace_guard_status()  → pair added (will be stripped)
+   b. _apply_tool_blocklist()            → filters body["tools"]
+   c. _add_guard_status_tool()           → SKIPPED (guarded by state check)
+   d. clean_messages                     → strips _guard_status pair
+   e. Forward to gateway                  → LLM sees: system msg + empty tools
 ```
-
-**Safety note:** The fixed `tool_call_id = "guard_status"` ensures
-`sanitize_tool_pairs()` in the middleware preserves the pair (the tool
-message's `tool_call_id` matches the assistant's `tool_calls[0].id`).
-
-### 5.5–5.6 — Valve removals
-
-Remove from `Valves` class:
-```python
-# REMOVED:
-# INJECTION_POSITION: Literal["append_user", "merge_last_tool"] = ...
-# SHOW_TOOL_COUNTER: bool = ...
-```
-
-**Validation:**
-- Old system messages no longer appear in the chat
-- Old `--- remaining tool calls: N` no longer appended to tool results
-- `_guard_status` pair appears at the end of messages with correct state
-- Warnings, final warnings, blocks, and runaway all produce correct status
-- `_guard_status` is present in `body["tools"]`
 
 ---
 
-## Phase 6 — Cleanup & Polish
+## Phase 6 — Cleanup & Polish [⬜ Pending]
 
 **Goal:** Remove all dead code, update documentation, and finalise.
 
-| # | Change | File |
-|:-:|--------|:----:|
-| 6.1 | Remove `_warning_msg()` function | agent_loop_guard.py |
-| 6.2 | Remove `_final_warning_msg()` function | agent_loop_guard.py |
-| 6.3 | Remove `_runaway_instruction()` function | agent_loop_guard.py |
-| 6.4 | Remove `_loop_blocked_tool_instruction()` function | agent_loop_guard.py |
-| 6.5 | Remove `_inject()` method | agent_loop_guard.py |
-| 6.6 | Remove `_append_tool_counter()` method | agent_loop_guard.py |
-| 6.7 | Remove `_merge_injected` instance variable | agent_loop_guard.py |
-| 6.8 | Remove `INJECTION_POSITION` and `SHOW_TOOL_COUNTER` from README.md | README.md |
-| 6.9 | Update version to 2.0.0 in frontmatter | agent_loop_guard.py |
-| 6.10 | Update DESIGN.md or add reference to GUARD_STATUS.md | DESIGN.md (optional) |
+| # | Change | File | Priority |
+|:-:|--------|:----:|:--------:|
+| 6.1 | Remove `_warning_msg()` function | agent_loop_guard.py | Medium |
+| 6.2 | Remove `_final_warning_msg()` function | agent_loop_guard.py | Medium |
+| 6.3 | Remove `_runaway_instruction()` function | agent_loop_guard.py | Medium |
+| 6.4 | Remove `_loop_blocked_tool_instruction()` function | agent_loop_guard.py | Medium |
+| 6.5 | Remove `_inject()` method | agent_loop_guard.py | Medium |
+| 6.6 | Remove `_append_tool_counter()` method | agent_loop_guard.py | Medium |
+| 6.7 | Remove `INJECTION_POSITION` and `SHOW_TOOL_COUNTER` from README.md | README.md | High |
+| 6.8 | Update version to `2.0.0` in frontmatter | agent_loop_guard.py | High |
+| 6.9 | Update DESIGN.md or add reference to GUARD_STATUS.md | DESIGN.md | Low |
+
+These are purely cosmetic — the code is functionally complete.
 
 ---
 
@@ -411,34 +170,25 @@ Remove from `Valves` class:
 |:----:|-----------|:-----:|
 | R1 — `_extract_tool_calls_in_turn` counts `_guard_status` as real call | Skip entries where `function.name == "_guard_status"` | 1 |
 | R2 — Counter off by one from injected pair | Same as R1 | 1 |
-| R3 — `_soft_block(runaway)` calls `body.pop("tools")`, removing `_guard_status` | Early return skips re-adding `_guard_status`; system message used instead. Resolved differently than originally planned, but effective. | 5 |
-| R4 — `TOOL_BLOCKLIST` could remove `_guard_status` | Skip `_guard_status` in blocklist filter | 4 |
+| R3 — Shallow copy `{**form_data}` loses reassigned `body["tools"]` | Use **in-place slice assignment** `tools[:] = [...]` | 5 |
+| R4 — Middleware executes tools from `metadata["tools"]` | Clear `__metadata__["tools"]` alongside `body["tools"]` | 5 |
+| R5 — `tool_choice: "none"` causes raw DSML leakage | Leave `tool_choice` unset; let Bifrost parse DSML into harmless `tool_calls` | 5 |
+| R6 — DSML buffer corrupts `reasoning_content` | Don't buffer in `_stream()` — leave it as transparent SSE proxy | 5 |
+| R7 — `TOOL_BLOCKLIST` could remove `_guard_status` | Skip `_guard_status` in blocklist filter | 4 |
 
 ---
 
-## Files Modified
+## Edge Cases — Current Behaviour
 
-| File | Changes |
-|:----|:--------|
-| `agent_loop_guard.py` | All 6 phases |
-| `PLAN_GUARD_STATUS.md` | This file |
-| `GUARD_STATUS.md` | May need minor corrections after implementation |
-| `README.md` | Remove `INJECTION_POSITION`, `SHOW_TOOL_COUNTER` from valve table (Phase 6) |
-
-No new files are created. The pipe remains a single file.
-
----
-
-## Edge Cases to Verify
-
-| Case | Expected behaviour |
-|:----|:------------------|
+| Case | Behaviour |
+|:----|:----------|
 | Turn with 0 tool calls | No `_guard_status` pair injected (state.total == 0) |
 | First tool call | `_guard_status` pair appears with `status: "ok"` |
-| 2 consecutive identical calls | `_guard_status` shows `status: "warning"` |
-| Final warning threshold | `_guard_status` shows `status: "final_warning"` |
-| Loop block | `_guard_status` shows `status: "blocked_tool"`, tool removed from `body["tools"]`, but `_guard_status` remains |
-| Runaway limit | `_guard_status` shows `status: "runaway"`, all real tools removed, `_guard_status` remains |
-| LLM voluntarily calls `_guard_status` | Middleware skips (`tool not found`), `sanitize_tool_pairs` cleans the orphaned call. Next `pipe()` invocation reinjects normally. See GUARD_STATUS.md §3.5. |
+| 2 consecutive identical calls | `_guard_status` shows `status: "warning"` + **system message** |
+| Final warning threshold | `_guard_status` shows `status: "final_warning"` + **system message** |
+| Loop block (consecutive >= threshold) | Tool removed from `body["tools"]` and `metadata["tools"]`. System message injected. |
+| Runaway (total >= max, no loop) | All tools used this turn removed. Unused tools stay. System message. |
+| Both loop AND total limit reached | **Loop wins** — `blocked_tool` fires instead of `runaway` |
+| LLM voluntarily calls `_guard_status` | Middleware: `"Tool _guard_status not found"`. `sanitize_tool_pairs` cleans orphaned call. Next `pipe()` reinjects normally. |
 | `MAX_TOOL_CALLS_PER_TURN = 0` (disabled) | State shows `remaining_calls: 0`, `max_calls: 0`. No runaway block. |
 | `TOOL_BLOCKLIST` includes `_guard_status` | Silently ignored — `_guard_status` survives |
