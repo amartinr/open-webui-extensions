@@ -37,8 +37,8 @@ Phase 4 ✅ ──────────────────────�
   (blocklist protection — 4.3 only)                      │
       │                                                    │
       ▼                                                    ▼
-Phase 5 ──────────────────────────────────────────────────────┐
-  (main pipe() flow — wire everything, remove old mechanism)  │
+Phase 5 ✅ ─────────────────────────────────────────────────────┐
+  (main pipe() flow — integrated _guard_status + old mech gone) │
       │                                                        │
       ▼                                                        ▼
 Phase 6 ──────────────────────────────────────────────────────────┐
@@ -53,7 +53,7 @@ Phase 6 ────────────────────────
 | **2** | Nothing | No — independent of Phase 1 | ✅ Done |
 | **3** | Phase 2 (needs the tool name/definition) | Yes | ✅ Done |
 | **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 | ✅ Done (4.3 only; 4.1/4.2 deferred to Phase 5) |
-| **5** | Phases 1, 3, 4 | Yes — all three must exist. Includes `_inject_or_replace_guard_status` (moved from Phase 3.3) because it only makes sense when integrated with removal of the old mechanism | ⬜ Pending |
+| **5** | Phases 1, 3, 4 | Yes — all three must exist. Includes `_inject_or_replace_guard_status` (moved from Phase 3.3) because it only makes sense when integrated with removal of the old mechanism | ✅ Done |
 | **6** | Phase 5 | Yes — only after old mechanism is gone | ⬜ Pending |
 
 Phases 1, 2, and 4 are **fully independent** and can be implemented in any
@@ -280,7 +280,7 @@ if isinstance(tool_choice, str) and tool_choice in blocked and tool_choice != "_
 
 ---
 
-## Phase 5 — Main Flow Integration
+## Phase 5 — Main Flow Integration [✅ Done — commit `e74bced`]
 
 **Goal:** Wire everything together in `pipe()` and remove the old
 injection mechanism. This is the integration phase.
