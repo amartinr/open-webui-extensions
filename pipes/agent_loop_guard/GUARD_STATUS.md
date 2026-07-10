@@ -378,13 +378,35 @@ The notification and status events emitted by the pipe (`__event_emitter__`) are
 
 ---
 
-## 14. Guarding `_guard_status` Against Removal
+## 14. Risk Analysis
+
+### 14.1 Risks analysed and dismissed
+
+| Risk | Why it is not a real concern |
+|---|---|
+| `sanitize_tool_pairs()` strips the fabricated pair | The fixed `tool_call_id` (`"guard_status"`) matches the assistant's `tool_calls[0].id` — the sanitizer requires this match and therefore **preserves** the pair. |
+| `process_messages_with_output()` corrupts the pair | This function only touches messages with an `output` field. The fabricated pair has no `output` field — it is **ignored** entirely. |
+| The LLM ignores `_guard_status`, rendering it useless | The escalation ladder is **coercive**, not persuasive. Warnings inform the agent, but soft‑block acts directly on `body["tools"]` — the LLM is forced to stop regardless of whether it understood the warning. `_guard_status` is informative, not critical. |
+| Two `_guard_status` pairs accumulate in history | If the LLM calls `_guard_status` voluntarily, `sanitize_tool_pairs()` cleans the orphaned call **before** the next `pipe()` invocation. The pipe never sees a voluntary `_guard_status` tool_call — only its own fabricated pair. |
+| `_guard_status` is visible to the end user in the chat UI | The pair is injected into `body["messages"]` (the **input** to the LLM). The gateway's SSE stream (the **output** rendered by the frontend) contains only the LLM's own response — the fabricated pair is never emitted. |
+
+### 14.2 Real risks and mitigations
+
+| # | Risk | Mitigation | Lines |
+|---|------|------------|:-----:|
+| R1 | `_extract_tool_calls_in_turn()` counts the auto‑injected `_guard_status` pair as a real tool call, inflating `total` and triggering runaway too early | Skip any `tool_calls` entry where `function.name == "_guard_status"` during extraction | ~1 |
+| R2 | The remaining‑calls counter in the `_guard_status` response is off by one because the injected pair counts itself in `total` | Same mitigation as R1 — the pair is excluded from `total`, so `remaining = max - total` is accurate | ~0 (same line) |
+| R3 | `_soft_block()` in runaway mode calls `body.pop("tools", None)`, which would also remove `_guard_status` — the one tool that must survive | Change `_soft_block()` to filter instead of pop: keep only tools where `function.name == "_guard_status"` | ~3 |
+
+---
+
+## 15. Guarding `_guard_status` Against Removal
 
 The `_guard_status` tool is **never removable** by the tool blocklist (`TOOL_BLOCKLIST`). Even if an administrator accidentally adds `_guard_status` to the blocklist, `_apply_tool_blocklist()` explicitly preserves it — the filter skips any tool whose `function.name == "_guard_status"`. `_guard_status` is also the only tool that survives a runaway soft‑block (all real tools are removed, `_guard_status` remains — see §8.2).
 
 ---
 
-## 15. Future Considerations
+## 16. Future Considerations
 
 - **Customizable name:** Could be exposed as a valve so the administrator can choose the tool name (in case of conflicts with a real tool).
 - **Language localisation:** The `message` field could support different languages through a valve setting.
