@@ -17,13 +17,9 @@ Replace the current system of injecting system messages and plain text appended 
 
 The pipe exposes an additional tool called `_guard_status` that is **always available** in `body["tools"]` alongside the agent's other tools.
 
-The pipe handles two scenarios:
+**Automatic injection:** At every iteration of the turn, the pipe fabricates and injects a complete pair (assistant with tool_call + tool result) into the message history reflecting the current guard state. The agent did **not** call this tool; the pipe inserts it to keep the agent informed.
 
-- **Automatic injection:** At every iteration of the turn, the pipe fabricates and injects a complete pair (assistant with tool_call + tool result) into the message history reflecting the current guard state. The agent did **not** call this tool; the pipe inserts it to keep the agent informed.
-
-- **Voluntary calls:** If the agent chooses to invoke `_guard_status` on its own initiative, the pipe intercepts the call and responds with real current state data.
-
-Under no circumstances do calls to `_guard_status` (automatic or voluntary) count toward the agent's tool budget or toward consecutive duplicate detection.
+Under no circumstances do calls to `_guard_status` count toward the agent's tool budget or toward consecutive duplicate detection.
 
 ---
 
@@ -84,11 +80,23 @@ When the pipe decides to soft‑block:
 
 The LLM receives the request with no real tools (or one fewer tool) but still sees `_guard_status` available. It can call it voluntarily to check state, or summarise with the data it already has.
 
-### 3.5 Voluntary calls are intercepted by the pipe
+### 3.5 What happens if the LLM calls `_guard_status` voluntarily
 
-If the LLM includes `_guard_status` in its `tool_calls`, the middleware's `chat_completion_tools_handler` or the tool‑call loop within `streaming_chat_response_handler` will attempt to execute it. Since `_guard_status` is in `tools`, the tool lookup will find it. The pipe must therefore **also** register a callable for `_guard_status` in the tools dictionary, or handle the interception before the middleware executes tools.
+The pipe is a custom router that forwards requests directly to the gateway via `httpx` — it does **not** go through Open WebUI's tool execution pipeline. The sequence when the LLM decides to call `_guard_status` on its own initiative is:
 
-The simplest approach is to let the pipe handle `_guard_status` **before** forwarding to the gateway: if the pipe detects a tool_call to `_guard_status` in `extract_tool_calls_in_turn`, it removes it from the list and fabricates the result directly, never reaching the middleware's execution path.
+```
+pipe() → gateway → LLM responds with tool_calls (incl. _guard_status)
+→ middleware: _guard_status not found in its tool registry → skip
+   (harmless warning in server logs, no crash)
+→ sanitize_tool_pairs() in the middleware cleans up the orphaned
+   tool_call (no tool result to pair it with)
+→ middleware re‑calls pipe() for the next iteration
+→ pipe() auto‑injects the _guard_status pair as usual
+```
+
+**Key insight:** `_guard_status` lives in `body["tools"]` (what the LLM sees) but is **never registered** in Open WebUI's internal tool callable registry (`get_tools()` / `get_builtin_tools()`). When the middleware's `chat_completion_tools_handler` tries to look it up, it logs `Tool "_guard_status" not found` and returns silently — no error, no tool result. The `sanitize_tool_pairs()` function then removes the orphaned assistant message (tool_call without matching tool result).
+
+**Conclusion:** Voluntary calls to `_guard_status` are harmless. The agent loses at most one iteration (the middleware skips the call, the pipe auto-injects normally on the next iteration). No special interception logic is needed — the design does not attempt to intercept or shortcut these calls. This is a deliberate simplification: the added complexity of intercepting voluntary calls is not justified for an edge case that is both improbable (the LLM has no reason to call a tool marked "Internal read‑only" unprompted) and self‑resolving.
 
 ---
 
@@ -240,7 +248,7 @@ The final choice between Option A and Option B should be informed by empirical t
 
 ### 6.1 When injection happens
 
-Automatic injection occurs **at every iteration of the turn**, regardless of whether there is a warning or not. This ensures the agent always has visibility of the guard state.
+Automatic injection occurs on every iteration of the turn **once at least one real tool call has been made** (`total > 0`). On the very first call of a turn (before any tools run) nothing is injected — there is no guard state to report yet and injecting would add unnecessary tokens to conversations that never use tools.
 
 ### 6.2 Content by state
 
@@ -267,38 +275,18 @@ The injected pair is placed **at the end of the message history**, just before f
 During each invocation of `pipe()` by the middleware's tool‑call loop:
 
 1. The pipe receives `body["messages"]` containing the full conversation history including all prior tool calls and results.
-2. The pipe scans backwards through `messages` to find the last `_guard_status` assistant message (identified by `tool_calls[0].function.name == "_guard_status"`).
-3. If found, the pipe **replaces** that assistant message and its corresponding tool result message in-place with updated data.
-4. If not found, the pipe **appends** a new assistant + tool pair at the end of `messages`.
+2. The pipe scans backwards through `messages` to find the last `_guard_status` assistant message (identified by `tool_calls[0].function.name == "_guard_status"` and `tool_calls[0].id == "guard_status"`).
+3. If found, the pipe **replaces** that assistant message and its corresponding tool result message (identified by `tool_call_id == "guard_status"`) in-place with updated data.
+4. If not found and `total > 0`, the pipe **appends** a new assistant + tool pair at the end of `messages`.
 5. The modified `body` is forwarded to the gateway.
+
+**Fabricated message IDs:** both the auto‑injected assistant message and tool result use a fixed, deterministic `tool_call_id` of `"guard_status"`. The assistant message's own `id` field is also set to `"guard_status"`. These fixed IDs make the pair trivially discoverable for the replacement mechanism and ensure `sanitize_tool_pairs()` in the middleware does not strip the pair (the fabricated `tool` message carries a `tool_call_id` that matches the assistant's `tool_calls[0].id`).
 
 ---
 
-## 7. Voluntary Agent Calls
+## 7. Voluntary Agent Calls (Not Implemented)
 
-If the agent decides to invoke `_guard_status` on its own initiative, the pipe detects it during tool call analysis and **does not forward the call to the gateway**. Instead, the pipe fabricates a tool result directly with real current state data and inserts it into the history.
-
-### 7.1 How interception works
-
-When the pipe calls `_extract_tool_calls_in_turn(messages)`, it scans the assistant messages for tool calls. Any call to `_guard_status` is:
-
-1. Identified by name (`"_guard_status"`).
-2. Excluded from the consecutive duplicate count and total tool call budget.
-3. Responded to immediately by the pipe: it generates a tool result with current state and injects it into `messages`.
-4. Removed from the list of tool calls that will be forwarded to the middleware for execution.
-
-This means the middleware's tool‑call loop never sees `_guard_status` as a tool to execute — it is entirely handled within the pipe.
-
-### 7.2 Differences from automatic injection
-
-| Aspect | Automatic injection | Voluntary call |
-|---|---|---|
-| **Who initiates** | The pipe | The agent (LLM) |
-| **Counts toward budget?** | No | No |
-| **Counts toward consecutive detection?** | No | No |
-| **Tool_call origin** | Fabricated by the pipe | Generated by the LLM |
-| **Response** | Current state + possible warning | Current state only |
-| **Accumulation?** | No — replaces previous pair | No — replaces previous pair |
+If the agent decides to invoke `_guard_status` on its own initiative, the middleware silently skips it (see §3.5). The pipe does **not** attempt to intercept, shortcut, or fabricate results for voluntary calls. The agent loses at most one tool‑call iteration; on the next `pipe()` invocation the normal automatic injection restores the guard state. This is an accepted trade‑off: the added implementation complexity of intercepting voluntary calls is not justified for this low‑probability, self‑resolving edge case.
 
 ---
 
@@ -326,11 +314,11 @@ When the total tool call limit per turn is exceeded:
 
 ## 9. Filtering in Turn Analysis
 
-During tool call extraction from the turn (`_extract_tool_calls_in_turn`), any invocation of `_guard_status` (automatic or voluntary) is **excluded** from computation. This applies to:
+During tool call extraction from the turn (`_extract_tool_calls_in_turn`), the auto‑injected `_guard_status` pair is **excluded** from computation. The assistant message with `tool_calls[0].function.name == "_guard_status"` is skipped entirely — it is not a real tool call, it is a status update injected by the pipe. This applies to:
 
-- **Total tool count per turn** — does not affect the runaway limit.
-- **Consecutive duplicate detection** — does not break or contribute to the chain.
-- **Descending counter** — does not deduct from the budget.
+- **Total tool count per turn** — the auto‑injected pair does not affect the runaway limit.
+- **Consecutive duplicate detection** — the pair does not break or contribute to the chain.
+- **Descending counter** — the counter in the `_guard_status` response reflects real tool calls only.
 
 ---
 
@@ -370,8 +358,7 @@ The notification and status events emitted by the pipe (`__event_emitter__`) are
 | **Agent visibility** | Medium (may ignore system messages) | High (tool result is a priority channel) |
 | **History accumulation** | Yes, the counter was repeatedly appended | No, the previous pair is replaced |
 | **Self‑contained messages** | No — context from previous iterations was needed | Yes — each message contains the full current state |
-| **Dummy tools in the system** | Not applicable | `_guard_status` always available |
-| **Voluntary agent calls** | Not applicable | Supported: the agent can query its state |
+| **Guard visibility** | Warnings buried in system messages or appended text | `_guard_status` always visible as a tool result in the native tool‑call channel |
 | **Transparency** | Warnings visible but in awkward format | Warnings visible in the LLM's native format |
 | **Middleware compatibility** | Unaware of middleware structure | Validated against `middleware.py` — pipe is called on every tool‑call iteration |
 
@@ -385,15 +372,22 @@ The notification and status events emitted by the pipe (`__event_emitter__`) are
 | **Can the pipe modify `body["tools"]`?** | ✅ Yes — the pipe can add `_guard_status` and remove tools on soft-block |
 | **Can the pipe modify `body["messages"]`?** | ✅ Yes — the pipe can scan, inject, and replace messages in the full history |
 | **Is pair replacement safe?** | ✅ Yes — the pipe sees the complete accumulated history on each call |
-| **Can `_guard_status` calls be intercepted before middleware execution?** | ✅ Yes — the pipe extracts tool calls from history and handles `_guard_status` internally, never forwarding it to the middleware's tool executor |
+| **What if the LLM calls `_guard_status` voluntarily?** | ✅ Harmless — the middleware skips it silently (`tool not found`), `sanitize_tool_pairs()` cleans the orphaned call. The pipe auto‑injects normally on the next iteration. No interception needed. |
 | **Does `bypass_system_prompt=True` affect routing?** | ❌ No — it only skips system prompt injection, the pipe still receives the call |
 | **Does the tool‑call loop support dynamic tool removal?** | ✅ Yes — `body["tools"]` is read fresh from the pipe response on each iteration |
 
 ---
 
-## 14. Future Considerations
+## 14. Guarding `_guard_status` Against Removal
+
+The `_guard_status` tool is **never removable** by the tool blocklist (`TOOL_BLOCKLIST`). Even if an administrator accidentally adds `_guard_status` to the blocklist, `_apply_tool_blocklist()` explicitly preserves it — the filter skips any tool whose `function.name == "_guard_status"`. `_guard_status` is also the only tool that survives a runaway soft‑block (all real tools are removed, `_guard_status` remains — see §8.2).
+
+---
+
+## 15. Future Considerations
 
 - **Customizable name:** Could be exposed as a valve so the administrator can choose the tool name (in case of conflicts with a real tool).
 - **Language localisation:** The `message` field could support different languages through a valve setting.
 - **Format selection:** A valve could be added to toggle between Option A (structured fields) and Option B (minimal) without code changes.
 - **State caching:** For extremely long turns, replacing the previous pair avoids context growth; no performance issues are anticipated.
+- **Voluntary call handling:** If future models start calling `_guard_status` frequently, the pipe could detect orphaned `_guard_status` tool_calls (from the middleware's skip) and fabricate tool results for them a posteriori in the next `pipe()` iteration. For now this is deferred — see §7.
