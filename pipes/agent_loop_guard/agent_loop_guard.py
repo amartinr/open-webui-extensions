@@ -504,108 +504,14 @@ class Pipe:
     # Gateway proxy
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _find_dsml_prefix(buffer: str, target: str) -> int:
-        """Find start index of longest suffix of *buffer* that is a non-empty
-        prefix of *target*.  Returns -1 if none.  Used to avoid emitting a
-        partial DSML opening tag that straddles SSE chunks."""
-        max_len = min(len(buffer), len(target) - 1)
-        for length in range(max_len, 0, -1):
-            if target.startswith(buffer[-length:]):
-                return len(buffer) - length
-        return -1
-
     async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
-        """Stream SSE lines from the gateway back to Open WebUI,
-        stripping DSML markup from all text fields in the buffer
-        before emitting."""
-
-        _FF5C = "\uff5c"
-        _DSML_DELIM = rf"(?:{_FF5C}+|\|+)\s*DSML\s*(?:{_FF5C}+|\|+)"
-        _RE_DSML_BLOCK = re.compile(
-            rf"<\s*{_DSML_DELIM}\s*tool_calls[^>]*>.*?<\s*/\s*{_DSML_DELIM}\s*tool_calls[^>]*>",
-            re.DOTALL,
-        )
-        _RE_DSML_TAG = re.compile(
-            rf"<\s*{_DSML_DELIM}\s*[a-z_]\w*(?:\s[^>]*)?>|<\s*/\s*{_DSML_DELIM}\s*[a-z_]\w*(?:\s[^>]*)?>",
-        )
-
-        def clean(text):
-            if not text:
-                return text
-            text = _RE_DSML_BLOCK.sub("", text)
-            text = _RE_DSML_TAG.sub("", text)
-            return text
-
-        # Accumulate ALL incoming text, emit only the clean delta
-        raw_buf = ""
-        clean_buf = ""
-
+        """Stream SSE lines from the gateway back to Open WebUI."""
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
-                    if not line:
-                        continue
-
-                    if not line.startswith("data: "):
+                    if line:
                         yield line
-                        continue
-
-                    try:
-                        data = json.loads(line[len("data: "):])
-                    except json.JSONDecodeError:
-                        yield line
-                        continue
-
-                    modified = False
-
-                    # Collect text from ALL delta text fields (content, reasoning_content, etc.)
-                    for choice in data.get("choices", []):
-                        delta = choice.get("delta", {})
-                        for field in ("content", "reasoning_content", "reasoning"):
-                            text = delta.get(field)
-                            if not text or not isinstance(text, str):
-                                continue
-                            raw_buf += text
-
-                    if not raw_buf or len(raw_buf) <= len(clean_buf):
-                        yield line
-                        continue
-
-                    # Clean the entire raw buffer
-                    new_clean = clean(raw_buf)
-
-                    # Emit only the NEW clean text not yet emitted
-                    delta_text = new_clean[len(clean_buf):]
-                    clean_buf = new_clean
-
-                    if not delta_text:
-                        # Only DSML was added — emit an empty delta so SSE stays alive
-                        for choice in data.get("choices", []):
-                            delta = choice.get("delta", {})
-                            if "content" in delta or "reasoning_content" in delta or "reasoning" in delta:
-                                delta["content"] = ""
-                                delta.pop("reasoning_content", None)
-                                delta.pop("reasoning", None)
-                                break
-                        line = "data: " + json.dumps(data, ensure_ascii=False)
-                        yield line
-                        continue
-
-                    # Distribute delta_text into the first delta.content field
-                    for choice in data.get("choices", []):
-                        delta = choice.get("delta", {})
-                        if "content" in delta or "reasoning_content" in delta or "reasoning" in delta:
-                            delta["content"] = delta_text
-                            delta.pop("reasoning_content", None)
-                            delta.pop("reasoning", None)
-                            modified = True
-                            break
-
-                    if modified:
-                        line = "data: " + json.dumps(data, ensure_ascii=False)
-                    yield line
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
         """Non-streaming call to the gateway."""
