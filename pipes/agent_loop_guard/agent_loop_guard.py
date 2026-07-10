@@ -268,6 +268,9 @@ class Pipe:
                 break
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
+                    # Skip auto-injected _guard_status pairs — they are not real tool calls
+                    if tc["function"]["name"] == "_guard_status":
+                        continue
                     try:
                         args = json.loads(tc["function"]["arguments"])
                     except (json.JSONDecodeError, KeyError):
