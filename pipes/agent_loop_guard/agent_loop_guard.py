@@ -93,6 +93,31 @@ def _build_guard_status_message(state: dict) -> str:
     return ""
 
 
+def _build_guard_status_content(state: dict) -> str:
+    """Build the JSON content for the _guard_status tool result.
+
+    Uses Option B from GUARD_STATUS.md: status + message fields only.
+
+    Args:
+        state: dict with keys:
+            - status: str ('ok'|'warning'|'final_warning'|'blocked_tool'|'runaway')
+            - tool: str | None
+            - consecutive: int
+            - total: int
+            - max_calls: int
+            - remaining_calls: int
+
+    Returns:
+        JSON string with 'status' and 'message' fields.
+    """
+    return json.dumps(
+        {
+            "status": state["status"],
+            "message": _build_guard_status_message(state),
+        }
+    )
+
+
 class Pipe:
     class Valves(BaseModel):
         GATEWAY_BASE_URL: str = Field(
