@@ -601,6 +601,9 @@ class Pipe:
                     t for t in tools_list
                     if t.get("function", {}).get("name") != bad_tool
                 ]
+                # Also remove from metadata so the middleware can't execute it
+                meta_tools = __metadata__.get("tools", {}) if __metadata__ else {}
+                meta_tools.pop(bad_tool, None)
                 if isinstance(body.get("tool_choice"), str) and bad_tool in body["tool_choice"]:
                     body.pop("tool_choice", None)
 
@@ -621,6 +624,9 @@ class Pipe:
             # middleware's ``new_form_data = {**form_data, ...}`` shallow copy
             tools_list = body.get("tools", [])
             tools_list[:] = []
+            # Also clear metadata so the middleware can't execute tools
+            if __metadata__:
+                __metadata__.pop("tools", None)
             body.pop("tool_choice", None)
 
         # --- Soft-block: early return (same pattern as master) -------------
