@@ -795,6 +795,16 @@ class Pipe:
         # --- Inject or replace _guard_status pair in messages ---------
         self._inject_or_replace_guard_status(messages, state)
 
+        # During soft-block, inject a system message instructing the agent
+        # to stop calling tools and summarise. This message is NOT filtered
+        # by clean_messages (it's not a _guard_status pair), so DeepSeek
+        # receives it and the agent obeys.
+        if state["status"] in ("blocked_tool", "runaway"):
+            messages.append({
+                "role": "system",
+                "content": _build_guard_status_message(state),
+            })
+
         # --- Apply tool blocklist -------------------------------------
         before_blocklist = [t.get("function", {}).get("name") for t in body.get("tools", [])]
         self._apply_tool_blocklist(body)
