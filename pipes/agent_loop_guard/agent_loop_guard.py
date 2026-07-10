@@ -651,32 +651,9 @@ class Pipe:
             # Inject system message instructing the agent to stop
             messages.append({"role": "system", "content": _build_guard_status_message(state)})
 
-            # Strip _guard_status pairs before forwarding
-            clean = [
-                m for m in messages
-                if not (
-                    m.get("role") == "assistant"
-                    and any(tc.get("id") == "guard_status" for tc in m.get("tool_calls", []))
-                )
-                and not (m.get("role") == "tool" and m.get("tool_call_id") == "guard_status")
-            ]
-
-            payload = {**body, "model": real_model, "messages": clean}
-            try:
-                if body.get("stream", False):
-                    log.debug("Streaming request started (soft-block)")
-                    return self._stream(payload, headers, url)
-                else:
-                    return await self._call(payload, headers, url)
-            except httpx.HTTPStatusError as e:
-                log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
-                return f"Gateway error: HTTP {e.response.status_code}. Please check the gateway configuration."
-            except httpx.RequestError as e:
-                log.error("Gateway unreachable: %s", e)
-                return "Gateway unreachable. Please check that the gateway is running and GATEWAY_BASE_URL is correct."
-            except Exception as e:
-                log.error("Unexpected error calling gateway: %s", e)
-                return f"Error calling gateway: {e}"
+            # Fall through to the normal forward path.  Tools were already
+            # cleared in-place above (tools[:] = ...) so no further action
+            # is needed here.
 
         # --- Non-soft-block: event emission --------------------------------
         if __event_emitter__:
@@ -714,7 +691,10 @@ class Pipe:
         self._apply_tool_blocklist(body)
 
         # --- Ensure _guard_status is available to the LLM --------------------
-        self._add_guard_status_tool(body)
+        # Do NOT re-add tools during soft-block — tools were intentionally
+        # cleared in-place so the middleware loop sees the empty list.
+        if state["status"] not in ("runaway", "blocked_tool"):
+            self._add_guard_status_tool(body)
 
         # --- Debug: final payload before forwarding --------------------------
         payload_preview = {
