@@ -53,7 +53,7 @@ Phase 6 ────────────────────────
 | **2** | Nothing | No — independent of Phase 1 | ✅ Done |
 | **3** | Phase 2 (needs the tool name/definition) | Yes | 🔜 Pending |
 | **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 | ⬜ Pending |
-| **5** | Phases 1, 3, 4 | Yes — all three must exist | ⬜ Pending |
+| **5** | Phases 1, 3, 4 | Yes — all three must exist. Includes `_inject_or_replace_guard_status` (moved from Phase 3.3) because it only makes sense when integrated with removal of the old mechanism | ⬜ Pending |
 | **6** | Phase 5 | Yes — only after old mechanism is gone | ⬜ Pending |
 
 Phases 1, 2, and 4 are **fully independent** and can be implemented in any
@@ -130,81 +130,11 @@ presence in the message history. This is the core of the new mechanism.
 
 | # | Change | File |
 |:-:|--------|:----:|
-| 3.1 | New method `_build_guard_status_content(state)` → returns tool result dict (status + message) | agent_loop_guard.py |
-| 3.2 | New method `_build_guard_status_pair(state)` → returns `(assistant_msg, tool_msg)` | agent_loop_guard.py |
-| 3.3 | New method `_inject_or_replace_guard_status(messages, state)`: scan backwards, replace if found, append if not | agent_loop_guard.py |
-| 3.4 | New guard message builders that produce the tool result content (not system messages) | agent_loop_guard.py |
+| 3.1 | New method `_build_guard_status_message(state)` → returns human-readable message string for the tool result | agent_loop_guard.py |
+| 3.2 | New method `_build_guard_status_content(state)` → returns JSON string with `status` + `message` fields | agent_loop_guard.py |
+| 3.3 | New method `_build_guard_status_pair(state)` → returns `(assistant_msg, tool_msg)` tuple | agent_loop_guard.py |
 
-### 3.1 — Tool result content format (Option B from GUARD_STATUS.md)
-
-Minimal two-field format for token efficiency:
-
-```python
-def _build_guard_status_content(state: dict) -> str:
-    """Build the content for the _guard_status tool result.
-
-    state keys:
-      - status: str ('ok'|'warning'|'final_warning'|'blocked_tool'|'runaway')
-      - tool: str | None  — tool name involved
-      - consecutive: int
-      - total: int
-      - max_calls: int
-      - blocked: bool
-      - blocked_tools: list[str]
-    """
-    return json.dumps({
-        "status": state["status"],
-        "message": _build_guard_status_message(state),
-    })
-```
-
-### 3.2 — Fabricated message pair
-
-```python
-def _build_guard_status_pair(state: dict) -> tuple[dict, dict]:
-    content = _build_guard_status_content(state)
-    assistant_msg = {
-        "role": "assistant",
-        "tool_calls": [{
-            "id": "guard_status",
-            "type": "function",
-            "function": {
-                "name": "_guard_status",
-                "arguments": "{}"
-            }
-        }]
-    }
-    tool_msg = {
-        "role": "tool",
-        "tool_call_id": "guard_status",
-        "content": content,
-    }
-    return assistant_msg, tool_msg
-```
-
-### 3.3 — Injection/replacement logic
-
-```python
-def _inject_or_replace_guard_status(self, messages: list[dict], state: dict) -> None:
-    """Scan backwards through messages.
-
-    - If an assistant message with tool_calls[0].id == 'guard_status' is found,
-      replace that assistant + its matching tool result in-place.
-    - If not found and state['total'] > 0, append a new pair at the end.
-    - If total == 0, do nothing (no guard state yet).
-    """
-    pair = _build_guard_status_pair(state)
-    ...
-```
-
-**Safety note:** The fixed `tool_call_id = "guard_status"` ensures
-`sanitize_tool_pairs()` in the middleware preserves the pair (the tool
-message's `tool_call_id` matches the assistant's `tool_calls[0].id`).
-
-### 3.4 — Human-readable message builders
-
-These replace the old `_warning_msg`, `_final_warning_msg`, etc. but
-produce text destined for the tool result content, not a system message.
+### 3.1 — Human-readable message builder
 
 ```python
 def _build_guard_status_message(state: dict) -> str:
@@ -229,13 +159,57 @@ def _build_guard_status_message(state: dict) -> str:
 ```
 
 **Validation:**
-- Unit-testable: `_build_guard_status_pair` produces valid messages
-- Calling `_inject_or_replace_guard_status` on empty messages with `total=0`
-  does nothing
-- Calling it on messages with `total>0` appends a new pair
-- Calling it twice replaces the previous pair (no accumulation)
+- `_build_guard_status_message`, `_build_guard_status_content`, and `_build_guard_status_pair` are pure functions, no side effects.
+- The pair uses fixed `tool_call_id = "guard_status"` so `sanitize_tool_pairs()` in the middleware preserves it.
 
 ---
+### 3.2 — Tool result content format (Option B from GUARD_STATUS.md)
+
+Minimal two-field format for token efficiency:
+
+```python
+def _build_guard_status_content(state: dict) -> str:
+    """Build the content for the _guard_status tool result.
+
+    state keys:
+      - status: str ('ok'|'warning'|'final_warning'|'blocked_tool'|'runaway')
+      - tool: str | None  — tool name involved
+      - consecutive: int
+      - total: int
+      - max_calls: int
+      - blocked: bool
+      - blocked_tools: list[str]
+    """
+    return json.dumps({
+        "status": state["status"],
+        "message": _build_guard_status_message(state),
+    })
+```
+
+### 3.3 — Fabricated message pair
+
+```python
+def _build_guard_status_pair(state: dict) -> tuple[dict, dict]:
+    content = _build_guard_status_content(state)
+    assistant_msg = {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "guard_status",
+            "type": "function",
+            "function": {
+                "name": "_guard_status",
+                "arguments": "{}"
+            }
+        }]
+    }
+    tool_msg = {
+        "role": "tool",
+        "tool_call_id": "guard_status",
+        "content": content,
+    }
+    return assistant_msg, tool_msg
+```
+
 
 ## Phase 4 — Soft-Block Hardening (R3) + Blocklist Protection
 
@@ -309,14 +283,17 @@ injection mechanism. This is the integration phase.
 
 | # | Change | File |
 |:-:|--------|:----:|
-| 5.1 | In `pipe()`: after computing `total`, `consecutive`, etc., build state dict and call `_inject_or_replace_guard_status()` | agent_loop_guard.py |
-| 5.2 | Remove calls to `_inject()` (old system message injection) | agent_loop_guard.py |
-| 5.3 | Remove call to `_append_tool_counter()` | agent_loop_guard.py |
-| 5.4 | Remove `INJECTION_POSITION` valve | agent_loop_guard.py |
-| 5.5 | Remove `SHOW_TOOL_COUNTER` valve | agent_loop_guard.py |
-| 5.6 | Update `__event_emitter__` calls to use `_guard_status` terminology | agent_loop_guard.py |
-| 5.7 | Call `_add_guard_status_tool(body)` in the right place in `pipe()` | agent_loop_guard.py |
-| 5.8 | Update the `model_validator` to remove INJECTION_POSITION/SHOW_TOOL_COUNTER references (if any) | agent_loop_guard.py |
+| # | Change | File |
+|:-:|--------|:----:|
+| 5.1 | In `pipe()`: after computing `total`, `consecutive`, etc., build state dict | agent_loop_guard.py |
+| 5.2 | New method `_inject_or_replace_guard_status(messages, state)`: scan backwards, replace if found, append if not. Call it from `pipe()`. (Moved from Phase 3.3) | agent_loop_guard.py |
+| 5.3 | Remove calls to `_inject()` (old system message injection) | agent_loop_guard.py |
+| 5.4 | Remove call to `_append_tool_counter()` | agent_loop_guard.py |
+| 5.5 | Remove `INJECTION_POSITION` valve | agent_loop_guard.py |
+| 5.6 | Remove `SHOW_TOOL_COUNTER` valve | agent_loop_guard.py |
+| 5.7 | Update `__event_emitter__` calls to use `_guard_status` terminology | agent_loop_guard.py |
+| 5.8 | Call `_add_guard_status_tool(body)` in the right place in `pipe()` | agent_loop_guard.py |
+| 5.9 | Update the `model_validator` to remove INJECTION_POSITION/SHOW_TOOL_COUNTER references (if any) | agent_loop_guard.py |
 
 ### 5.1 — Main flow logic in `pipe()`
 
@@ -355,6 +332,25 @@ self._inject_or_replace_guard_status(messages, state)
 # --- Add _guard_status to tools -----------------------
 self._add_guard_status_tool(body)
 ```
+
+### 5.2 — Injection/replacement logic
+
+```python
+def _inject_or_replace_guard_status(self, messages: list[dict], state: dict) -> None:
+    """Scan backwards through messages.
+
+    - If an assistant message with tool_calls[0].id == 'guard_status' is found,
+      replace that assistant + its matching tool result in-place.
+    - If not found and state['total'] > 0, append a new pair at the end.
+    - If total == 0, do nothing (no guard state yet).
+    """
+    pair = _build_guard_status_pair(state)
+    ...
+```
+
+**Safety note:** The fixed `tool_call_id = "guard_status"` ensures
+`sanitize_tool_pairs()` in the middleware preserves the pair (the tool
+message's `tool_call_id` matches the assistant's `tool_calls[0].id`).
 
 ### 5.5–5.6 — Valve removals
 
