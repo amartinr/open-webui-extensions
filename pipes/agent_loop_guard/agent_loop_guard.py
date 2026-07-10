@@ -521,15 +521,6 @@ class Pipe:
         pair = _build_guard_status_pair(state)
         new_assistant, new_tool = pair
 
-        # Copy reasoning_content from the last real assistant message in the
-        # history. DeepSeek's thinking mode requires this field on ALL
-        # assistant messages in the conversation when it's enabled.
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if msg.get("role") == "assistant" and msg.get("reasoning_content"):
-                new_assistant["reasoning_content"] = msg["reasoning_content"]
-                break
-
         # Scan backwards to find existing _guard_status pair
         assistant_idx = None
         tool_idx = None
@@ -817,21 +808,6 @@ class Pipe:
         self._add_guard_status_tool(body)
 
         # --- Debug: final payload before forwarding --------------------
-        # Verify that the fabricated _guard_status assistant has reasoning_content
-        # (required by DeepSeek thinking mode)
-        for m in reversed(messages):
-            if m.get("role") == "assistant" and m.get("tool_calls"):
-                for tc in m["tool_calls"]:
-                    if tc.get("id") == "guard_status":
-                        rc = m.get("reasoning_content")
-                        log.debug(
-                            "_guard_status pair | has_reasoning_content=%s | rc_len=%d",
-                            bool(rc),
-                            len(rc) if rc else 0,
-                        )
-                        break
-                break
-
         payload_preview = {
             "model": real_model,
             "stream": body.get("stream", False),
@@ -852,7 +828,26 @@ class Pipe:
         )
 
         # --- Forward to gateway ---------------------------------------
-        payload = {**body, "model": real_model, "messages": messages}
+        # Strip _guard_status pairs from messages before sending to the
+        # gateway. DeepSeek's thinking mode cannot handle fabricated
+        # assistant messages (they lack valid reasoning_content). The pair
+        # stays in body['messages'] for the middleware loop to carry forward.
+        clean_messages = [
+            m
+            for m in messages
+            if not (
+                m.get("role") == "assistant"
+                and any(
+                    tc.get("id") == "guard_status"
+                    for tc in m.get("tool_calls", [])
+                )
+            )
+            and not (
+                m.get("role") == "tool"
+                and m.get("tool_call_id") == "guard_status"
+            )
+        ]
+        payload = {**body, "model": real_model, "messages": clean_messages}
 
         try:
             if body.get("stream", False):
