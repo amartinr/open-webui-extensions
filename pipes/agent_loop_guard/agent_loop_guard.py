@@ -254,6 +254,35 @@ class Pipe:
             body.pop("tool_choice", None)
             log.info("tool_choice '%s' targets a blocked tool — reset", tool_choice)
 
+    @staticmethod
+    def _add_guard_status_tool(body: dict) -> None:
+        """Add the _guard_status dummy tool to body['tools'].
+
+        This tool is never registered in Open WebUI's tool callable registry;
+        it is managed entirely by the pipe. The LLM sees it as available but
+        any attempt to call it is silently skipped by the middleware.
+        """
+        guard_tool = {
+            "type": "function",
+            "function": {
+                "name": "_guard_status",
+                "description": (
+                    "Internal read-only tool. Returns the current state of the "
+                    "agent loop guard: number of tool calls in the turn, "
+                    "consecutive identical calls, block status, and remaining "
+                    "budget."
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        tools = body.get("tools", [])
+        # Avoid duplicates in case this method is called more than once
+        if not any(
+            t.get("function", {}).get("name") == "_guard_status"
+            for t in tools
+        ):
+            body["tools"] = [guard_tool] + tools
+
     # ------------------------------------------------------------------
     # Tool-call analysis
     # ------------------------------------------------------------------
@@ -517,6 +546,9 @@ class Pipe:
                 getattr(self.valves, "INJECTION_POSITION", "append_user"),
             )
 
+            # Ensure _guard_status is always available, even after tool removal
+            self._add_guard_status_tool(body)
+
             # Inject instruction to summarise
             self._inject(messages, {
                 "role": "system",
@@ -665,6 +697,9 @@ class Pipe:
                     )
                 except Exception:
                     log.warning("Failed to emit counter status (non-fatal)", exc_info=True)
+
+        # --- Ensure _guard_status is available to the LLM ---------------
+        self._add_guard_status_tool(body)
 
         # --- Debug: final payload before forwarding --------------------
         payload_preview = {
