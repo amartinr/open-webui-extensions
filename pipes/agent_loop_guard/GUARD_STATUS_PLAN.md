@@ -33,8 +33,8 @@ Phase 3 ✅ ──────────────────────�
   (pair fabrication — pure functions)     │            │
       │                                   │            │
       ▼                                   ▼            ▼
-Phase 4 ──────────────────────────────────────────────────┐
-  (soft-block hardening — R3 + blocklist protection)      │
+Phase 4 ✅ ─────────────────────────────────────────────────┐
+  (blocklist protection — 4.3 only)                      │
       │                                                    │
       ▼                                                    ▼
 Phase 5 ──────────────────────────────────────────────────────┐
@@ -52,7 +52,7 @@ Phase 6 ────────────────────────
 | **1** | Nothing | No | ✅ Done |
 | **2** | Nothing | No — independent of Phase 1 | ✅ Done |
 | **3** | Phase 2 (needs the tool name/definition) | Yes | ✅ Done |
-| **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 | ⬜ Pending |
+| **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 | ✅ Done (4.3 only; 4.1/4.2 deferred to Phase 5) |
 | **5** | Phases 1, 3, 4 | Yes — all three must exist. Includes `_inject_or_replace_guard_status` (moved from Phase 3.3) because it only makes sense when integrated with removal of the old mechanism | ⬜ Pending |
 | **6** | Phase 5 | Yes — only after old mechanism is gone | ⬜ Pending |
 
@@ -211,10 +211,14 @@ def _build_guard_status_pair(state: dict) -> tuple[dict, dict]:
 ```
 
 
-## Phase 4 — Soft-Block Hardening (R3) + Blocklist Protection
+## Phase 4 — Soft-Block Hardening (R3) + Blocklist Protection [✅ Done — commit `dca9b8c`]
 
 **Goal:** Ensure `_guard_status` survives all soft-block and blocklist
 operations. This phase is independent of Phases 1–3.
+
+**Note:** Only 4.3 (blocklist protection) was implemented. Items 4.1 and 4.2
+are deferred to Phase 5 — they are naturally resolved by the soft-block
+rewrite that replaces system message injection with `_guard_status` pairs.
 
 | # | Change | File |
 |:-:|--------|:----:|
