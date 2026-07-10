@@ -88,7 +88,8 @@ def _build_guard_status_message(state: dict) -> str:
     elif status == "runaway":
         return (
             f"TOOL LIMIT REACHED: {total}/{max_calls}. "
-            f"All tools have been removed for this turn. Summarise now."
+            f"Tools used in this turn have been removed. "
+            f"Other tools are still available or you may summarise now."
         )
     return ""
 
@@ -620,13 +621,20 @@ class Pipe:
         if state["status"] == "ok" and runaway:
             state["status"] = "runaway"
             log.warning("Soft-block (runaway): %d tool calls in turn", total)
-            # Clear the tools list in-place so the change survives the
-            # middleware's ``new_form_data = {**form_data, ...}`` shallow copy
+            # Remove only the tools that were used in this turn,
+            # same pattern as loop block (blocked_tool removes just the offender).
+            # Unused tools stay available so the agent can still be productive.
+            used_tools = {tc["name"] for tc in history}
             tools_list = body.get("tools", [])
-            tools_list[:] = []
-            # Also clear metadata so the middleware can't execute tools
+            tools_list[:] = [
+                t for t in tools_list
+                if t.get("function", {}).get("name") not in used_tools
+            ]
             if __metadata__:
-                __metadata__.pop("tools", None)
+                meta_tools = __metadata__.get("tools", {})
+                if meta_tools:
+                    for name in used_tools:
+                        meta_tools.pop(name, None)
             body.pop("tool_choice", None)
 
         # --- Soft-block: early return (same pattern as master) -------------
