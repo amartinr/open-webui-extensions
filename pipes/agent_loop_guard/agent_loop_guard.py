@@ -815,12 +815,7 @@ class Pipe:
                 log.debug("Tool blocklist | removed: %s", sorted(removed))
 
         # --- Ensure _guard_status is available to the LLM ---------------
-        # During soft-block, do NOT add _guard_status — we stripped the
-        # fabricated pair from messages via clean_messages, so DeepSeek
-        # never sees a tool_call for it. Without any tools in body, the
-        # LLM is forced to respond with text.
-        if state["status"] not in ("runaway", "blocked_tool"):
-            self._add_guard_status_tool(body)
+        self._add_guard_status_tool(body)
 
         # --- Debug: final payload before forwarding --------------------
         payload_preview = {
