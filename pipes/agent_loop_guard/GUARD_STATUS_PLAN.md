@@ -29,8 +29,8 @@ Phase 2 ✅                                              │
   (tool registration + definition)                     │
       │                                                │
       ▼                                                │
-Phase 3 ──────────────────────────────────┐            │
-  (pair fabrication + injection/replace)  │            │
+Phase 3 ✅ ─────────────────────────────────┐            │
+  (pair fabrication — pure functions)     │            │
       │                                   │            │
       ▼                                   ▼            ▼
 Phase 4 ──────────────────────────────────────────────────┐
@@ -51,7 +51,7 @@ Phase 6 ────────────────────────
 |:-----:|-----------|:---------:|
 | **1** | Nothing | No | ✅ Done |
 | **2** | Nothing | No — independent of Phase 1 | ✅ Done |
-| **3** | Phase 2 (needs the tool name/definition) | Yes | 🔜 Pending |
+| **3** | Phase 2 (needs the tool name/definition) | Yes | ✅ Done |
 | **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 | ⬜ Pending |
 | **5** | Phases 1, 3, 4 | Yes — all three must exist. Includes `_inject_or_replace_guard_status` (moved from Phase 3.3) because it only makes sense when integrated with removal of the old mechanism | ⬜ Pending |
 | **6** | Phase 5 | Yes — only after old mechanism is gone | ⬜ Pending |
@@ -123,16 +123,16 @@ in the final tool list the LLM sees, even after blocklist or soft-block.
 
 ---
 
-## Phase 3 — Pair Fabrication & Injection/Replacement
+## Phase 3 — Pair Fabrication [✅ Done — commits `cd5525a`, `2af8803`, `c843821`]
 
-**Goal:** Build the fabricated assistant + tool pair and manage its
-presence in the message history. This is the core of the new mechanism.
+**Goal:** Build the fabricated assistant + tool pair as pure functions.
+No connection to pipe() flow yet — all code is dead until Phase 5.
 
 | # | Change | File |
 |:-:|--------|:----:|
 | 3.1 | New method `_build_guard_status_message(state)` → returns human-readable message string for the tool result | agent_loop_guard.py |
 | 3.2 | New method `_build_guard_status_content(state)` → returns JSON string with `status` + `message` fields | agent_loop_guard.py |
-| 3.3 | New method `_build_guard_status_pair(state)` → returns `(assistant_msg, tool_msg)` tuple | agent_loop_guard.py |
+| 3.3 | New method `_build_guard_status_pair(state)` → returns `(assistant_msg, tool_msg)` tuple (fixed `tool_call_id = "guard_status"`) | agent_loop_guard.py |
 
 ### 3.1 — Human-readable message builder
 
