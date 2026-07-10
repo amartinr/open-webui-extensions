@@ -351,14 +351,21 @@ class Pipe:
                 sorted(unknown),
             )
 
+        # Never remove _guard_status, even if accidentally blocklisted
         body["tools"] = [
             t for t in tools
             if t.get("function", {}).get("name") not in blocked
+            or t.get("function", {}).get("name") == "_guard_status"
         ]
 
-        # If tool_choice targets a blocked tool, reset it so the LLM can choose freely
+        # If tool_choice targets a blocked tool, reset it so the LLM can choose freely.
+        # Ignore _guard_status — it should never be targeted, but guard defensively.
         tool_choice = body.get("tool_choice")
-        if isinstance(tool_choice, str) and tool_choice in blocked:
+        if (
+            isinstance(tool_choice, str)
+            and tool_choice in blocked
+            and tool_choice != "_guard_status"
+        ):
             body.pop("tool_choice", None)
             log.info("tool_choice '%s' targets a blocked tool — reset", tool_choice)
 
