@@ -506,6 +506,67 @@ class Pipe:
             messages.append(message)
 
     # ------------------------------------------------------------------
+    # _guard_status injection/replacement
+    # ------------------------------------------------------------------
+
+    def _inject_or_replace_guard_status(
+        self, messages: list[dict], state: dict
+    ) -> None:
+        """Inject or replace the _guard_status pair in the message history.
+
+        Scans backwards through messages to find an existing assistant + tool
+        pair with tool_calls[0].id == 'guard_status'. If found, replaces them
+        in-place. If not found and state['total'] > 0, appends a new pair at
+        the end. If total == 0, does nothing.
+
+        This ensures there is never more than one _guard_status pair in the
+        message history at any time.
+        """
+        total = state.get("total", 0)
+        if total == 0:
+            return
+
+        pair = _build_guard_status_pair(state)
+        new_assistant, new_tool = pair
+
+        # Scan backwards to find existing _guard_status pair
+        assistant_idx = None
+        tool_idx = None
+
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc.get("id") == "guard_status":
+                        assistant_idx = i
+                        break
+                if assistant_idx is not None:
+                    break
+
+        if assistant_idx is not None:
+            # Find matching tool message (the one with tool_call_id == "guard_status")
+            # that appears right after the assistant message
+            for j in range(assistant_idx + 1, len(messages)):
+                if (
+                    messages[j].get("role") == "tool"
+                    and messages[j].get("tool_call_id") == "guard_status"
+                ):
+                    tool_idx = j
+                    break
+
+            # Replace in-place: assistant then tool
+            messages[assistant_idx] = new_assistant
+            if tool_idx is not None:
+                messages[tool_idx] = new_tool
+            else:
+                # Tool message not found (shouldn't happen), append after assistant
+                messages.insert(assistant_idx + 1, new_tool)
+        else:
+            # No existing pair — append at end
+            messages.append(new_assistant)
+            messages.append(new_tool)
+
+    # ------------------------------------------------------------------
     # Gateway proxy
     # ------------------------------------------------------------------
 
