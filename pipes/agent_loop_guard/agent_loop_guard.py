@@ -182,8 +182,6 @@ class Pipe:
             description="Consecutive identical tool calls before soft-block (min 3). "
             "Warnings are spaced automatically: WARNING at 50%, FINAL WARNING at 75%.",
         )
-
-
         TOOL_BLOCKLIST: str = Field(
             default="",
             description="Comma-separated (or newline-separated) tool names to REMOVE from the agent's tool list. "
@@ -313,10 +311,7 @@ class Pipe:
         """
         if not raw or not raw.strip():
             return set()
-        return {
-            t.strip() for t in re.split(r"[,\n\r]+", raw)
-            if t.strip()
-        }
+        return {t.strip() for t in re.split(r"[,\n\r]+", raw) if t.strip()}
 
     def _apply_tool_blocklist(self, body: dict) -> None:
         """Remove tools from body['tools'] whose names appear in TOOL_BLOCKLIST.
@@ -353,11 +348,7 @@ class Pipe:
         # If tool_choice targets a blocked tool, reset it so the LLM can choose freely.
         # Ignore _guard_status — it should never be targeted, but guard defensively.
         tool_choice = body.get("tool_choice")
-        if (
-            isinstance(tool_choice, str)
-            and tool_choice in blocked
-            and tool_choice != "_guard_status"
-        ):
+        if isinstance(tool_choice, str) and tool_choice in blocked and tool_choice != "_guard_status":
             body.pop("tool_choice", None)
             log.info("tool_choice '%s' targets a blocked tool — reset", tool_choice)
 
@@ -384,10 +375,7 @@ class Pipe:
         }
         tools = body.get("tools", [])
         # Avoid duplicates in case this method is called more than once
-        if not any(
-            t.get("function", {}).get("name") == "_guard_status"
-            for t in tools
-        ):
+        if not any(t.get("function", {}).get("name") == "_guard_status" for t in tools):
             body["tools"] = [guard_tool] + tools
 
     # ------------------------------------------------------------------
@@ -404,7 +392,7 @@ class Pipe:
                 break
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
-                    # Skip auto-injected _guard_status pairs — they are not real tool calls
+                    # Skip auto-injected _guard_status pairs
                     if tc["function"]["name"] == "_guard_status":
                         continue
                     try:
@@ -415,9 +403,7 @@ class Pipe:
         history.reverse()
         return history
 
-    def _count_consecutive_duplicates(
-        self, history: list[dict]
-    ) -> tuple[int, str | None, dict | None]:
+    def _count_consecutive_duplicates(self, history: list[dict]) -> tuple[int, str | None, dict | None]:
         """Count consecutive identical tool calls from the end of history.
 
         Returns (count, name, args) of the repeated tool.
@@ -435,84 +421,45 @@ class Pipe:
         return count, last["name"], last["args"]
 
     # ------------------------------------------------------------------
-    # Tool counter
+    # Tool counter (dead code — kept for reference, will be removed in Phase 6)
     # ------------------------------------------------------------------
 
     def _append_tool_counter(self, messages: list[dict], total: int, max_calls: int) -> None:
-        """Append a descending counter to the last tool result in the current turn.
-        The counter tells the agent how many tool calls it has left.
-
-        If _merge_injected is True (meaning _inject() already appended a guard
-        message to the last tool result), the counter is appended without adding
-        a second separator."""
+        """Append a descending counter to the last tool result in the current turn."""
         if max_calls <= 0:
             return
         remaining = max(0, max_calls - total)
-        # Scan backwards to find the last tool message in the current turn
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "user":
                 break
             if messages[i].get("role") == "tool":
                 original = messages[i].get("content", "")
-                if self._merge_injected:
-                    # Separator already added by _inject() — reuse it
-                    messages[i]["content"] = f"{original}\nremaining tool calls: {remaining}"
-                else:
-                    messages[i]["content"] = f"{original}\n---\nremaining tool calls: {remaining}"
+                messages[i]["content"] = f"{original}\n---\nremaining tool calls: {remaining}"
                 return
 
     # ------------------------------------------------------------------
-    # Injection helper
+    # Injection helper (dead code — kept for reference, will be removed in Phase 6)
     # ------------------------------------------------------------------
 
     def _inject(self, messages: list[dict], message: dict) -> None:
-        """Insert a guard message into the conversation at the configured position.
-
-        Supports two positions:
-          - append_user:      insert before the last user message (default)
-          - merge_last_tool:  append the message content to the end of the last
-                              tool result of the current turn, after a clear
-                              separator (no new message added).
-        """
-        pos = getattr(self.valves, "INJECTION_POSITION", "append_user")
-        if pos == "merge_last_tool":
-            # Append the guard message to the last tool result of the current turn.
-            # Scan backwards until we hit a user message (start of turn).
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get("role") == "user":
-                    break
-                if messages[i].get("role") == "tool":
-                    original = messages[i].get("content", "")
-                    suffix = message.get("content", "")
-                    if suffix:
-                        messages[i]["content"] = f"{original}\n\n---\n{suffix}"
-                    self._merge_injected = True
-                    return
-            # Fallback: no tool message found, append as system message
-            messages.append({"role": "system", "content": message.get("content", "")})
-        else:  # append_user (default)
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get("role") == "user":
-                    messages.insert(i, message)
-                    return
-            messages.append(message)
+        """Insert a guard message into the conversation. append_user position only."""
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                messages.insert(i, message)
+                return
+        messages.append(message)
 
     # ------------------------------------------------------------------
     # _guard_status injection/replacement
     # ------------------------------------------------------------------
 
-    def _inject_or_replace_guard_status(
-        self, messages: list[dict], state: dict
-    ) -> None:
+    def _inject_or_replace_guard_status(self, messages: list[dict], state: dict) -> None:
         """Inject or replace the _guard_status pair in the message history.
 
         Scans backwards through messages to find an existing assistant + tool
         pair with tool_calls[0].id == 'guard_status'. If found, replaces them
         in-place. If not found and state['total'] > 0, appends a new pair at
         the end. If total == 0, does nothing.
-
-        This ensures there is never more than one _guard_status pair in the
-        message history at any time.
         """
         total = state.get("total", 0)
         if total == 0:
@@ -523,8 +470,6 @@ class Pipe:
 
         # Scan backwards to find existing _guard_status pair
         assistant_idx = None
-        tool_idx = None
-
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -536,25 +481,19 @@ class Pipe:
                     break
 
         if assistant_idx is not None:
-            # Find matching tool message (the one with tool_call_id == "guard_status")
-            # that appears right after the assistant message
+            # Find matching tool message
+            tool_idx = None
             for j in range(assistant_idx + 1, len(messages)):
-                if (
-                    messages[j].get("role") == "tool"
-                    and messages[j].get("tool_call_id") == "guard_status"
-                ):
+                if messages[j].get("role") == "tool" and messages[j].get("tool_call_id") == "guard_status":
                     tool_idx = j
                     break
-
-            # Replace in-place: assistant then tool
+            # Replace in-place
             messages[assistant_idx] = new_assistant
             if tool_idx is not None:
                 messages[tool_idx] = new_tool
             else:
-                # Tool message not found (shouldn't happen), append after assistant
                 messages.insert(assistant_idx + 1, new_tool)
         else:
-            # No existing pair — append at end
             messages.append(new_assistant)
             messages.append(new_tool)
 
@@ -562,14 +501,10 @@ class Pipe:
     # Gateway proxy
     # ------------------------------------------------------------------
 
-    async def _stream(
-        self, payload: dict, headers: dict, url: str
-    ) -> AsyncGenerator[str, None]:
+    async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
         """Stream SSE lines from the gateway back to Open WebUI."""
         async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST", url, json=payload, headers=headers
-            ) as r:
+            async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
                     if line:
@@ -597,67 +532,43 @@ class Pipe:
         if not messages:
             return ""
 
-        # Strip pipe prefix from model ID.
-        # "pipe-uuid.deepseek/deepseek-v4-flash" → "deepseek/deepseek-v4-flash"
         real_model = body["model"].split(".", 1)[-1]
-
-        # Build headers and URL for the gateway.
         headers = {"Content-Type": "application/json", **self._build_gateway_headers(user=__user__, metadata=__metadata__)}
-
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 
         log.info(
             "Agent Loop Guard → %s (model=%s, auth_header=%s, has_auth=%s, custom_headers=%s)",
-            url,
-            real_model,
-            self.valves.GATEWAY_AUTH_HEADER,
-            bool(self.valves.GATEWAY_AUTH_VALUE),
-            bool(self.valves.GATEWAY_CUSTOM_HEADERS),
+            url, real_model, self.valves.GATEWAY_AUTH_HEADER,
+            bool(self.valves.GATEWAY_AUTH_VALUE), bool(self.valves.GATEWAY_CUSTOM_HEADERS),
         )
 
-        # --- Analyse tool calls in current turn -----------------------
+        # --- Analyse tool calls ------------------------------------------
         history = self._extract_tool_calls_in_turn(messages)
         total = len(history)
 
-        # --- Debug: summary of received request -----------------------
         log.debug(
             "pipe() called | model=%s | stream=%s | tools=%s | tool_choice=%s | messages=%d",
-            real_model,
-            body.get("stream", False),
+            real_model, body.get("stream", False),
             [t.get("function", {}).get("name") for t in body.get("tools", [])],
-            body.get("tool_choice", "auto"),
-            len(messages),
-        )
-        log.debug(
-            "Gateway headers: %s",
-            {k: ("<redacted>" if k == self.valves.GATEWAY_AUTH_HEADER else v) for k, v in headers.items()},
+            body.get("tool_choice", "auto"), len(messages),
         )
 
-        # --- Debug: tool calls extracted -------------------------------
-        log.debug(
-            "Tool calls in turn: %d | history: %s",
-            total,
-            json.dumps(history, indent=2),
-        )
+        log.debug("Tool calls in turn: %d | history: %s", total, json.dumps(history, indent=2))
 
-        # --- Loop detection (consecutive identical tool calls) ---------
+        # --- Loop detection -----------------------------------------------
         consecutive, bad_tool, _ = self._count_consecutive_duplicates(history)
         block_threshold = self.valves.MAX_CONSECUTIVE_BEFORE_BLOCK
         max_calls = self.valves.MAX_TOOL_CALLS_PER_TURN
         remaining_calls = max(0, max_calls - total)
 
-        # --- Debug: loop analysis -------------------------------------
         if total > 0:
+            final_pos = 2 + (block_threshold - 2) * 3 // 5 if block_threshold >= 2 else None
             log.debug(
                 "Loop analysis | consecutive=%s | bad_tool=%s | block_threshold=%s | final_pos=%s | total=%s",
-                consecutive,
-                bad_tool,
-                block_threshold,
-                2 + (block_threshold - 2) * 3 // 5 if block_threshold >= 2 else None,
-                total,
+                consecutive, bad_tool, block_threshold, final_pos, total,
             )
 
-        # --- Build guard state dict -----------------------------------
+        # --- Build guard state dict ---------------------------------------
         state = {
             "status": "ok",
             "tool": None,
@@ -667,10 +578,7 @@ class Pipe:
             "remaining_calls": remaining_calls,
         }
 
-        # --- Escalation ladder ----------------------------------------
-        # Soft-block states (runaway, blocked_tool) do early return
-        # to prevent any downstream modifications to body/messages after
-        # the block decision, exactly like the original master branch.
+        # --- Escalation ladder --------------------------------------------
         runaway = max_calls > 0 and total >= max_calls
 
         if runaway:
@@ -679,368 +587,117 @@ class Pipe:
             body.pop("tools", None)
             body.pop("tool_choice", None)
 
-
         elif consecutive >= 2:
-
             final_pos = 2 + (block_threshold - 2) * 3 // 5
 
             if consecutive >= block_threshold:
-
-                # Soft-block: remove only the looping tool
-
                 state["status"] = "blocked_tool"
-
                 state["tool"] = bad_tool
-
                 log.warning("Soft-block (loop): %s blocked after %d calls", bad_tool, total)
-
                 body["tools"] = [
-
                     t for t in body.get("tools", [])
-
                     if t.get("function", {}).get("name") != bad_tool
-
                 ]
-
                 if isinstance(body.get("tool_choice"), str) and bad_tool in body["tool_choice"]:
-
                     body.pop("tool_choice", None)
 
-
-
             elif block_threshold > 3 and consecutive == final_pos:
-
                 state["status"] = "final_warning"
-
                 state["tool"] = bad_tool
-
                 log.debug("Final warning: %s consecutive=%d", bad_tool, consecutive)
 
-
-
             elif consecutive == 2:
-
                 state["status"] = "warning"
-
                 state["tool"] = bad_tool
-
                 log.debug("Warning: %s consecutive=%d", bad_tool, consecutive)
 
-
-
-        # --- Soft-block: early return ----------------------------------
-
+        # --- Soft-block: early return (same pattern as master) -------------
         if state["status"] in ("runaway", "blocked_tool"):
-
             if __event_emitter__:
-
                 try:
-
                     if state["status"] == "runaway":
-
-                        await __event_emitter__(
-
-                            {
-
-                                "type": "notification",
-
-                                "data": {
-
-                                    "type": "error",
-
-                                    "content": (
-
-                                        f"\U0001f6e1\ufe0f Agent Loop Guard: Tool call limit reached "
-
-                                        f"({total}/{max_calls})."
-
-                                    ),
-
-                                },
-
-                            }
-
-                        )
-
-                        await __event_emitter__(
-
-                            {
-
-                                "type": "status",
-
-                                "data": {
-
-                                    "description": f"\U0001f6e1\ufe0f Tool call limit reached: {total}/{max_calls}",
-
-                                    "done": True,
-
-                                    "hidden": False,
-
-                                },
-
-                            }
-
-                        )
-
+                        await __event_emitter__({
+                            "type": "notification",
+                            "data": {"type": "error", "content": f"🛡️ Agent Loop Guard: Tool call limit reached ({total}/{max_calls})."},
+                        })
+                        await __event_emitter__({
+                            "type": "status",
+                            "data": {"description": f"🛡️ Tool call limit reached: {total}/{max_calls}", "done": True, "hidden": False},
+                        })
                     elif state["status"] == "blocked_tool":
-
-                        await __event_emitter__(
-
-                            {
-
-                                "type": "notification",
-
-                                "data": {
-
-                                    "type": "error",
-
-                                    "content": (
-
-                                        f"\U0001f6e1\ufe0f Agent Loop Guard: {bad_tool} blocked "
-
-                                        f"after {consecutive} identical calls."
-
-                                    ),
-
-                                },
-
-                            }
-
-                        )
-
-                        await __event_emitter__(
-
-                            {
-
-                                "type": "status",
-
-                                "data": {
-
-                                    "description": f"\U0001f6e1\ufe0f {bad_tool} blocked",
-
-                                    "done": True,
-
-                                    "hidden": False,
-
-                                },
-
-                            }
-
-                        )
-
+                        await __event_emitter__({
+                            "type": "notification",
+                            "data": {"type": "error", "content": f"🛡️ Agent Loop Guard: {bad_tool} blocked after {consecutive} identical calls."},
+                        })
+                        await __event_emitter__({
+                            "type": "status",
+                            "data": {"description": f"🛡️ {bad_tool} blocked", "done": True, "hidden": False},
+                        })
                 except Exception:
-
                     log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
-
-
             # Inject system message instructing the agent to stop
+            messages.append({"role": "system", "content": _build_guard_status_message(state)})
 
-            system_msg = _build_guard_status_message(state)
-
-            messages.append({"role": "system", "content": system_msg})
-
-
-
-            # Strip _guard_status pairs from messages before forwarding
-
+            # Strip _guard_status pairs before forwarding
             clean = [
-
                 m for m in messages
-
                 if not (
-
                     m.get("role") == "assistant"
-
-                    and any(
-
-                        tc.get("id") == "guard_status"
-
-                        for tc in m.get("tool_calls", [])
-
-                    )
-
+                    and any(tc.get("id") == "guard_status" for tc in m.get("tool_calls", []))
                 )
-
-                and not (
-
-                    m.get("role") == "tool"
-
-                    and m.get("tool_call_id") == "guard_status"
-
-                )
-
+                and not (m.get("role") == "tool" and m.get("tool_call_id") == "guard_status")
             ]
 
-
-
             payload = {**body, "model": real_model, "messages": clean}
-
-
-
             try:
-
                 if body.get("stream", False):
-
                     log.debug("Streaming request started (soft-block)")
-
                     return self._stream(payload, headers, url)
-
                 else:
-
-                    response = await self._call(payload, headers, url)
-
-                    return response
-
+                    return await self._call(payload, headers, url)
             except httpx.HTTPStatusError as e:
-
                 log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
-
-                return (
-
-                    f"Gateway error: HTTP {e.response.status_code}. "
-
-                    f"Please check the gateway configuration."
-
-                )
-
+                return f"Gateway error: HTTP {e.response.status_code}. Please check the gateway configuration."
             except httpx.RequestError as e:
-
                 log.error("Gateway unreachable: %s", e)
-
-                return (
-
-                    "Gateway unreachable. Please check that the gateway is running "
-
-                    "and GATEWAY_BASE_URL is correct."
-
-                )
-
+                return "Gateway unreachable. Please check that the gateway is running and GATEWAY_BASE_URL is correct."
             except Exception as e:
-
                 log.error("Unexpected error calling gateway: %s", e)
-
                 return f"Error calling gateway: {e}"
 
-
-
-        # --- Non-soft-block: event emission ----------------------------
+        # --- Non-soft-block: event emission --------------------------------
         if __event_emitter__:
             try:
-                if state["status"] == "runaway":
-                    await __event_emitter__(
-                        {
-                            "type": "notification",
-                            "data": {
-                                "type": "error",
-                                "content": (
-                                    f"🛡️ Agent Loop Guard: Tool call limit reached "
-                                    f"({total}/{max_calls})."
-                                ),
-                            },
-                        }
-                    )
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"🛡️ Tool call limit reached: {total}/{max_calls}",
-                                "done": True,
-                                "hidden": False,
-                            },
-                        }
-                    )
-                elif state["status"] == "blocked_tool":
-                    await __event_emitter__(
-                        {
-                            "type": "notification",
-                            "data": {
-                                "type": "error",
-                                "content": (
-                                    f"🛡️ Agent Loop Guard: {bad_tool} blocked "
-                                    f"after {consecutive} identical calls."
-                                ),
-                            },
-                        }
-                    )
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"🛡️ {bad_tool} blocked",
-                                "done": True,
-                                "hidden": False,
-                            },
-                        }
-                    )
-                elif state["status"] == "final_warning":
-                    await __event_emitter__(
-                        {
-                            "type": "notification",
-                            "data": {
-                                "type": "warning",
-                                "content": (
-                                    f"🛡️ Agent Loop Guard: {bad_tool} called "
-                                    f"{consecutive}x. Final warning."
-                                ),
-                            },
-                        }
-                    )
+                if state["status"] == "final_warning":
+                    await __event_emitter__({
+                        "type": "notification",
+                        "data": {"type": "warning", "content": f"🛡️ Agent Loop Guard: {bad_tool} called {consecutive}x. Final warning."},
+                    })
                 elif state["status"] == "warning":
-                    await __event_emitter__(
-                        {
-                            "type": "notification",
-                            "data": {
-                                "type": "info",
-                                "content": (
-                                    f"🛡️ Agent Loop Guard: {bad_tool} called "
-                                    f"{consecutive}x with same args."
-                                ),
-                            },
-                        }
-                    )
+                    await __event_emitter__({
+                        "type": "notification",
+                        "data": {"type": "info", "content": f"🛡️ Agent Loop Guard: {bad_tool} called {consecutive}x with same args."},
+                    })
 
-                # Always emit remaining calls status if a limit is configured
                 if max_calls > 0 and total > 0:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"🛡️ Remaining tool calls: {remaining_calls}/{max_calls}",
-                                "done": True,
-                                "hidden": False,
-                            },
-                        }
-                    )
+                    await __event_emitter__({
+                        "type": "status",
+                        "data": {"description": f"🛡️ Remaining tool calls: {remaining_calls}/{max_calls}", "done": True, "hidden": False},
+                    })
             except Exception:
                 log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
-        # --- Inject or replace _guard_status pair in messages ---------
+        # --- Inject or replace _guard_status pair ---------------------------
         self._inject_or_replace_guard_status(messages, state)
 
-        # During soft-block, inject a system message instructing the agent
-        # to stop calling tools and summarise. This message is NOT filtered
-        # by clean_messages (it's not a _guard_status pair), so DeepSeek
-        # receives it and the agent obeys.
-        if state["status"] in ("blocked_tool", "runaway"):
-            messages.append({
-                "role": "system",
-                "content": _build_guard_status_message(state),
-            })
-
-        # --- Apply tool blocklist -------------------------------------
-        before_blocklist = [t.get("function", {}).get("name") for t in body.get("tools", [])]
+        # --- Apply tool blocklist --------------------------------------------
         self._apply_tool_blocklist(body)
-        if self.valves.TOOL_BLOCKLIST.strip():
-            after_blocklist = [t.get("function", {}).get("name") for t in body.get("tools", [])]
-            removed = set(before_blocklist) - set(after_blocklist)
-            if removed:
-                log.debug("Tool blocklist | removed: %s", sorted(removed))
 
-        # --- Ensure _guard_status is available to the LLM ---------------
+        # --- Ensure _guard_status is available to the LLM --------------------
         self._add_guard_status_tool(body)
 
-        # --- Debug: final payload before forwarding --------------------
+        # --- Debug: final payload before forwarding --------------------------
         payload_preview = {
             "model": real_model,
             "stream": body.get("stream", False),
@@ -1055,30 +712,16 @@ class Pipe:
                 for m in messages
             ],
         }
-        log.debug(
-            "Forwarding to gateway | payload summary: %s",
-            json.dumps(payload_preview, indent=2),
-        )
+        log.debug("Forwarding to gateway | payload summary: %s", json.dumps(payload_preview, indent=2))
 
-        # --- Forward to gateway ---------------------------------------
-        # Strip _guard_status pairs from messages before sending to the
-        # gateway. DeepSeek's thinking mode cannot handle fabricated
-        # assistant messages (they lack valid reasoning_content). The pair
-        # stays in body['messages'] for the middleware loop to carry forward.
+        # --- Forward to gateway ---------------------------------------------
         clean_messages = [
-            m
-            for m in messages
+            m for m in messages
             if not (
                 m.get("role") == "assistant"
-                and any(
-                    tc.get("id") == "guard_status"
-                    for tc in m.get("tool_calls", [])
-                )
+                and any(tc.get("id") == "guard_status" for tc in m.get("tool_calls", []))
             )
-            and not (
-                m.get("role") == "tool"
-                and m.get("tool_call_id") == "guard_status"
-            )
+            and not (m.get("role") == "tool" and m.get("tool_call_id") == "guard_status")
         ]
         payload = {**body, "model": real_model, "messages": clean_messages}
 
@@ -1088,22 +731,14 @@ class Pipe:
                 return self._stream(payload, headers, url)
             else:
                 response = await self._call(payload, headers, url)
-                # Only log first 500 chars of response to avoid flooding
-                response_preview = json.dumps(response, indent=2)[:500]
-                log.debug("Non-streaming response (truncated): %s", response_preview)
+                log.debug("Non-streaming response (truncated): %s", json.dumps(response, indent=2)[:500])
                 return response
         except httpx.HTTPStatusError as e:
             log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
-            return (
-                f"Gateway error: HTTP {e.response.status_code}. "
-                f"Please check the gateway configuration."
-            )
+            return f"Gateway error: HTTP {e.response.status_code}. Please check the gateway configuration."
         except httpx.RequestError as e:
             log.error("Gateway unreachable: %s", e)
-            return (
-                "Gateway unreachable. Please check that the gateway is running "
-                "and GATEWAY_BASE_URL is correct."
-            )
+            return "Gateway unreachable. Please check that the gateway is running and GATEWAY_BASE_URL is correct."
         except Exception as e:
             log.error("Unexpected error calling gateway: %s", e)
             return f"Error calling gateway: {e}"
