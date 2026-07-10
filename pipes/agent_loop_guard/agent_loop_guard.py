@@ -87,8 +87,8 @@ def _build_guard_status_message(state: dict) -> str:
         )
     elif status == "runaway":
         return (
-            f"Tool call limit reached: {total}/{max_calls}. "
-            f"No more tool calls this turn. Summarise now."
+            f"TOOL LIMIT REACHED: {total}/{max_calls}. "
+            f"All tools have been removed for this turn. Summarise now."
         )
     return ""
 
@@ -339,7 +339,7 @@ class Pipe:
             )
 
         # Never remove _guard_status, even if accidentally blocklisted
-        body["tools"] = [
+        body["tools"][:] = [
             t for t in tools
             if t.get("function", {}).get("name") not in blocked
             or t.get("function", {}).get("name") == "_guard_status"
@@ -373,10 +373,13 @@ class Pipe:
                 "parameters": {"type": "object", "properties": {}},
             },
         }
-        tools = body.get("tools", [])
+        tools = body.get("tools")
+        if tools is None:
+            body["tools"] = [guard_tool]
+            return
         # Avoid duplicates in case this method is called more than once
         if not any(t.get("function", {}).get("name") == "_guard_status" for t in tools):
-            body["tools"] = [guard_tool] + tools
+            tools[:] = [guard_tool] + tools
 
     # ------------------------------------------------------------------
     # Tool-call analysis
@@ -501,14 +504,108 @@ class Pipe:
     # Gateway proxy
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _find_dsml_prefix(buffer: str, target: str) -> int:
+        """Find start index of longest suffix of *buffer* that is a non-empty
+        prefix of *target*.  Returns -1 if none.  Used to avoid emitting a
+        partial DSML opening tag that straddles SSE chunks."""
+        max_len = min(len(buffer), len(target) - 1)
+        for length in range(max_len, 0, -1):
+            if target.startswith(buffer[-length:]):
+                return len(buffer) - length
+        return -1
+
     async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
-        """Stream SSE lines from the gateway back to Open WebUI."""
+        """Stream SSE lines from the gateway back to Open WebUI,
+        stripping DSML markup from all text fields in the buffer
+        before emitting."""
+
+        _FF5C = "\uff5c"
+        _DSML_DELIM = rf"(?:{_FF5C}+|\|+)\s*DSML\s*(?:{_FF5C}+|\|+)"
+        _RE_DSML_BLOCK = re.compile(
+            rf"<\s*{_DSML_DELIM}\s*tool_calls[^>]*>.*?<\s*/\s*{_DSML_DELIM}\s*tool_calls[^>]*>",
+            re.DOTALL,
+        )
+        _RE_DSML_TAG = re.compile(
+            rf"<\s*{_DSML_DELIM}\s*[a-z_]\w*(?:\s[^>]*)?>|<\s*/\s*{_DSML_DELIM}\s*[a-z_]\w*(?:\s[^>]*)?>",
+        )
+
+        def clean(text):
+            if not text:
+                return text
+            text = _RE_DSML_BLOCK.sub("", text)
+            text = _RE_DSML_TAG.sub("", text)
+            return text
+
+        # Accumulate ALL incoming text, emit only the clean delta
+        raw_buf = ""
+        clean_buf = ""
+
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
-                    if line:
+                    if not line:
+                        continue
+
+                    if not line.startswith("data: "):
                         yield line
+                        continue
+
+                    try:
+                        data = json.loads(line[len("data: "):])
+                    except json.JSONDecodeError:
+                        yield line
+                        continue
+
+                    modified = False
+
+                    # Collect text from ALL delta text fields (content, reasoning_content, etc.)
+                    for choice in data.get("choices", []):
+                        delta = choice.get("delta", {})
+                        for field in ("content", "reasoning_content", "reasoning"):
+                            text = delta.get(field)
+                            if not text or not isinstance(text, str):
+                                continue
+                            raw_buf += text
+
+                    if not raw_buf or len(raw_buf) <= len(clean_buf):
+                        yield line
+                        continue
+
+                    # Clean the entire raw buffer
+                    new_clean = clean(raw_buf)
+
+                    # Emit only the NEW clean text not yet emitted
+                    delta_text = new_clean[len(clean_buf):]
+                    clean_buf = new_clean
+
+                    if not delta_text:
+                        # Only DSML was added — emit an empty delta so SSE stays alive
+                        for choice in data.get("choices", []):
+                            delta = choice.get("delta", {})
+                            if "content" in delta or "reasoning_content" in delta or "reasoning" in delta:
+                                delta["content"] = ""
+                                delta.pop("reasoning_content", None)
+                                delta.pop("reasoning", None)
+                                break
+                        line = "data: " + json.dumps(data, ensure_ascii=False)
+                        yield line
+                        continue
+
+                    # Distribute delta_text into the first delta.content field
+                    for choice in data.get("choices", []):
+                        delta = choice.get("delta", {})
+                        if "content" in delta or "reasoning_content" in delta or "reasoning" in delta:
+                            delta["content"] = delta_text
+                            delta.pop("reasoning_content", None)
+                            delta.pop("reasoning", None)
+                            modified = True
+                            break
+
+                    if modified:
+                        line = "data: " + json.dumps(data, ensure_ascii=False)
+                    yield line
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
         """Non-streaming call to the gateway."""
@@ -579,23 +676,23 @@ class Pipe:
         }
 
         # --- Escalation ladder --------------------------------------------
-        runaway = max_calls > 0 and total >= max_calls
+        # Loop detection takes precedence over runaway.  If the agent has
+        # exceeded the consecutive threshold, it's in a loop — report that
+        # even if it also hit the total-turn limit.  This way the agent
+        # keeps other tools available and can still be productive.
+        # Runaway only fires when consecutive is below the loop threshold.
+        runaway = max_calls > 0 and total >= max_calls and consecutive < block_threshold
 
-        if runaway:
-            state["status"] = "runaway"
-            log.warning("Soft-block (runaway): %d tool calls in turn", total)
-            body.pop("tools", None)
-            body.pop("tool_choice", None)
-
-        elif consecutive >= 2:
+        if consecutive >= 2:
             final_pos = 2 + (block_threshold - 2) * 3 // 5
 
             if consecutive >= block_threshold:
                 state["status"] = "blocked_tool"
                 state["tool"] = bad_tool
                 log.warning("Soft-block (loop): %s blocked after %d calls", bad_tool, total)
-                body["tools"] = [
-                    t for t in body.get("tools", [])
+                tools_list = body.get("tools", [])
+                tools_list[:] = [
+                    t for t in tools_list
                     if t.get("function", {}).get("name") != bad_tool
                 ]
                 if isinstance(body.get("tool_choice"), str) and bad_tool in body["tool_choice"]:
@@ -610,6 +707,15 @@ class Pipe:
                 state["status"] = "warning"
                 state["tool"] = bad_tool
                 log.debug("Warning: %s consecutive=%d", bad_tool, consecutive)
+
+        if state["status"] == "ok" and runaway:
+            state["status"] = "runaway"
+            log.warning("Soft-block (runaway): %d tool calls in turn", total)
+            # Clear the tools list in-place so the change survives the
+            # middleware's ``new_form_data = {**form_data, ...}`` shallow copy
+            tools_list = body.get("tools", [])
+            tools_list[:] = []
+            body.pop("tool_choice", None)
 
         # --- Soft-block: early return (same pattern as master) -------------
         if state["status"] in ("runaway", "blocked_tool"):
@@ -649,6 +755,8 @@ class Pipe:
                 and not (m.get("role") == "tool" and m.get("tool_call_id") == "guard_status")
             ]
 
+            body["tool_choice"] = "none"
+
             payload = {**body, "model": real_model, "messages": clean}
             try:
                 if body.get("stream", False):
@@ -687,6 +795,13 @@ class Pipe:
                     })
             except Exception:
                 log.warning("Failed to emit event (non-fatal)", exc_info=True)
+
+        # --- Inject system message for warning/final_warning -----------------
+        # The _guard_status pair is stripped before forwarding (see clean_messages
+        # below), so the LLM never sees the warning.  This system message gives
+        # the agent real feedback so it can correct itself before the soft-block.
+        if state["status"] in ("warning", "final_warning"):
+            messages.append({"role": "system", "content": _build_guard_status_message(state)})
 
         # --- Inject or replace _guard_status pair ---------------------------
         self._inject_or_replace_guard_status(messages, state)

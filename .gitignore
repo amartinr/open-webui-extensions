@@ -31,3 +31,6 @@ htmlcov/
 *.swo
 *~
 .DS_Store
+
+# Pi Coding Agent
+.pi/
