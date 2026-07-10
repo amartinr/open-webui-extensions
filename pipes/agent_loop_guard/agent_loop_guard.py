@@ -132,7 +132,6 @@ def _build_guard_status_pair(state: dict) -> tuple[dict, dict]:
     content = _build_guard_status_content(state)
     assistant_msg = {
         "role": "assistant",
-        "reasoning_content": None,
         "tool_calls": [
             {
                 "id": "guard_status",
@@ -521,6 +520,20 @@ class Pipe:
 
         pair = _build_guard_status_pair(state)
         new_assistant, new_tool = pair
+
+        # Copy reasoning_content from the last real assistant message in the
+        # conversation (if any). DeepSeek's thinking mode requires this field
+        # to be present on ALL assistant messages when sent back.
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                is_guard = any(
+                    tc.get("id") == "guard_status"
+                    for tc in msg.get("tool_calls", [])
+                )
+                if not is_guard and msg.get("reasoning_content"):
+                    new_assistant["reasoning_content"] = msg["reasoning_content"]
+                    break
 
         # Scan backwards to find existing _guard_status pair
         assistant_idx = None
