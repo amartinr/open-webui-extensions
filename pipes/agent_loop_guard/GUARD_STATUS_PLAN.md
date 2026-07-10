@@ -21,11 +21,11 @@ with clear dependency ordering.
 ## Dependency Graph
 
 ```
-Phase 1 ───────────────────────────────────────────────┐
+Phase 1 ✅ ─────────────────────────────────────────────┐
   (extraction filter — R1/R2)                          │
       │                                                │
       ▼                                                │
-Phase 2                                                │
+Phase 2 ✅                                              │
   (tool registration + definition)                     │
       │                                                │
       ▼                                                │
@@ -49,12 +49,12 @@ Phase 6 ────────────────────────
 
 | Phase | Depends on | Wait for? |
 |:-----:|-----------|:---------:|
-| **1** | Nothing | No |
-| **2** | Nothing | No — independent of Phase 1 |
-| **3** | Phase 2 (needs the tool name/definition) | Yes |
-| **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 |
-| **5** | Phases 1, 3, 4 | Yes — all three must exist |
-| **6** | Phase 5 | Yes — only after old mechanism is gone |
+| **1** | Nothing | No | ✅ Done |
+| **2** | Nothing | No — independent of Phase 1 | ✅ Done |
+| **3** | Phase 2 (needs the tool name/definition) | Yes | 🔜 Pending |
+| **4** | Nothing | No — independent, can be done in parallel with Phases 1–3 | ⬜ Pending |
+| **5** | Phases 1, 3, 4 | Yes — all three must exist | ⬜ Pending |
+| **6** | Phase 5 | Yes — only after old mechanism is gone | ⬜ Pending |
 
 Phases 1, 2, and 4 are **fully independent** and can be implemented in any
 order (or in parallel). Phase 5 is the integration point where everything
@@ -62,7 +62,7 @@ comes together.
 
 ---
 
-## Phase 1 — Safe Extraction (R1/R2) [no new behaviour]
+## Phase 1 — Safe Extraction (R1/R2) [✅ Done — commit `551afb6`]
 
 **Goal:** Prevent `_guard_status` pairs from being counted in tool-call
 analysis **before** the new mechanism is active. This is a pure defensive
@@ -88,7 +88,7 @@ in remaining-calls counter).
 
 ---
 
-## Phase 2 — Tool Registration [internal only]
+## Phase 2 — Tool Registration [✅ Done — commit `964afe4`]
 
 **Goal:** Add the `_guard_status` tool definition to `body["tools"]` on
 every `pipe()` call. At this stage no pairs are injected, so the tool is
