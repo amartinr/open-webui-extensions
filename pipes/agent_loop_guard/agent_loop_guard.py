@@ -118,6 +118,39 @@ def _build_guard_status_content(state: dict) -> str:
     )
 
 
+def _build_guard_status_pair(state: dict) -> tuple[dict, dict]:
+    """Fabricate an assistant + tool message pair for _guard_status.
+
+    Returns:
+        (assistant_msg, tool_msg):
+          - assistant_msg carries tool_calls[0].id = 'guard_status'
+          - tool_msg carries tool_call_id = 'guard_status'
+
+        The fixed ID ensures sanitize_tool_pairs() preserves the pair and
+        makes the pair trivially discoverable for replacement.
+    """
+    content = _build_guard_status_content(state)
+    assistant_msg = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "guard_status",
+                "type": "function",
+                "function": {
+                    "name": "_guard_status",
+                    "arguments": "{}",
+                },
+            }
+        ],
+    }
+    tool_msg = {
+        "role": "tool",
+        "tool_call_id": "guard_status",
+        "content": content,
+    }
+    return assistant_msg, tool_msg
+
+
 class Pipe:
     class Valves(BaseModel):
         GATEWAY_BASE_URL: str = Field(
