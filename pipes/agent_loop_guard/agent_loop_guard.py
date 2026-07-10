@@ -755,8 +755,6 @@ class Pipe:
                 and not (m.get("role") == "tool" and m.get("tool_call_id") == "guard_status")
             ]
 
-            body["tool_choice"] = "none"
-
             payload = {**body, "model": real_model, "messages": clean}
             try:
                 if body.get("stream", False):
