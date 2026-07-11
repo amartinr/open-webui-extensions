@@ -93,6 +93,10 @@ from the block. For `N=3` there is no FINAL WARNING (WARNING → block directly)
 
 ### Configuration
 
+### Admin valves (Pipe.Valves)
+
+Configured in the Function admin panel.
+
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `GATEWAY_BASE_URL` | `""` | Base URL for your OpenAI-compatible gateway (e.g. Bifrost) |
@@ -103,9 +107,22 @@ from the block. For `N=3` there is no FINAL WARNING (WARNING → block directly)
 | `MAX_CONSECUTIVE_BEFORE_BLOCK` | `4` | Consecutive identical tool calls before soft-block (min 3). Warnings spaced automatically: WARNING on first detection, FINAL WARNING at ~60% of threshold |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
 
-> **Note**: `MAX_TOOL_CALLS_PER_TURN` must be greater than `MAX_CONSECUTIVE_BEFORE_BLOCK`
+> **Validation**: `MAX_TOOL_CALLS_PER_TURN` must be greater than `MAX_CONSECUTIVE_BEFORE_BLOCK`
 > when both are enabled. The pipe validates this at config time — if runaway's threshold
 > is equal or lower, Open WebUI will reject the configuration with an error.
+
+### User valves (Pipe.UserValves)
+
+Configured per workspace model. A value of `0` defers to the admin default.
+
+| Valve | Default | Description |
+|-------|---------|-------------|
+| `MAX_TOOL_CALLS_PER_TURN` | `0` | Per-model override. `0` = use admin default. |
+| `MAX_CONSECUTIVE_BEFORE_BLOCK` | `0` | Per-model override. `0` = use admin default. |
+
+If the user's effective limits violate the `runaway > loop` constraint, a
+warning is logged at runtime and the pipe continues (but runaway may fire
+before loop detection).
 
 ### Custom headers with templates
 

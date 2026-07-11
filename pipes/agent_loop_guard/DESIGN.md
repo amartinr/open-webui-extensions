@@ -354,6 +354,12 @@ content based on the current state dict:
 
 ## 13. Valves
 
+> **Admin valves** are configured in the Function admin panel.
+> **User valves** (`UserValves`) can be overridden per workspace model.
+> User valve values of `0` mean "use admin default".
+
+### Admin valves (Pipe.Valves)
+
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `GATEWAY_BASE_URL` | `""` | Base URL for the OpenAI-compatible gateway |
@@ -366,6 +372,20 @@ content based on the current state dict:
 
 **Validation:** `MAX_TOOL_CALLS_PER_TURN` must be > `MAX_CONSECUTIVE_BEFORE_BLOCK`
 when both are enabled, enforced by Pydantic's `@model_validator`.
+
+### User valves (Pipe.UserValves)
+
+Available in the workspace model configuration. A value of `0` defers to the
+admin-configured default.
+
+| Valve | Default | Description |
+|-------|---------|-------------|
+| `MAX_TOOL_CALLS_PER_TURN` | `0` | Per-model override for max tool calls before soft-block. `0` = use admin default. |
+| `MAX_CONSECUTIVE_BEFORE_BLOCK` | `0` | Per-model override for consecutive identical calls before soft-block. `0` = use admin default. |
+
+If the user's effective limits violate the `runaway > loop` constraint, a
+warning is logged at runtime and the pipe continues with the given values
+(the misconfiguration may cause runaway to fire before loop detection).
 
 ---
 

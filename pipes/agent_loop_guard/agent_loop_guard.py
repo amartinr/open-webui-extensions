@@ -124,8 +124,21 @@ class Pipe:
                 )
             return self
 
+    class UserValves(BaseModel):
+        MAX_TOOL_CALLS_PER_TURN: int = Field(
+            default=0,
+            ge=0,
+            description="Max tool calls in a turn before tools are removed (soft-block). 0 = use admin default.",
+        )
+        MAX_CONSECUTIVE_BEFORE_BLOCK: int = Field(
+            default=0,
+            ge=0,
+            description="Consecutive identical tool calls before soft-block (min 3). 0 = use admin default.",
+        )
+
     def __init__(self):
         self.valves = self.Valves()
+        self._admin_valves = self.Valves()  # snapshot of admin defaults for user-valve resolution
         self._models_cache: list[dict] = []
 
     # ------------------------------------------------------------------
@@ -272,6 +285,14 @@ class Pipe:
             log.info("tool_choice '%s' targets a blocked tool — reset", tool_choice)
 
     # ------------------------------------------------------------------
+    # Valve resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_limit(self, user_val: int, admin_val: int) -> int:
+        """Resolve an effective limit: user override wins if non-zero, else admin default."""
+        return user_val if user_val > 0 else admin_val
+
+    # ------------------------------------------------------------------
     # Tool-call analysis
     # ------------------------------------------------------------------
 
@@ -368,10 +389,30 @@ class Pipe:
 
         log.debug("Tool calls in turn: %d | history: %s", total, json.dumps(history, indent=2))
 
+        # --- Resolve effective limits (user valve overrides admin if non-zero) -
+        max_calls = self._resolve_limit(
+            self.valves.MAX_TOOL_CALLS_PER_TURN,
+            self._admin_valves.MAX_TOOL_CALLS_PER_TURN,
+        )
+        block_threshold = self._resolve_limit(
+            self.valves.MAX_CONSECUTIVE_BEFORE_BLOCK,
+            self._admin_valves.MAX_CONSECUTIVE_BEFORE_BLOCK,
+        )
+
+        # Runtime validation: warn if effective limits would cause runaway to
+        # fire before loop detection (this can happen when user valves override
+        # admin defaults in a way that the admin config-time check cannot catch).
+        if max_calls > 0 and block_threshold >= max_calls:
+            log.warning(
+                "Effective MAX_TOOL_CALLS_PER_TURN (%d) must be greater than "
+                "MAX_CONSECUTIVE_BEFORE_BLOCK (%d). Runaway will fire before "
+                "loop detection — consider increasing MAX_TOOL_CALLS_PER_TURN "
+                "or decreasing MAX_CONSECUTIVE_BEFORE_BLOCK.",
+                max_calls, block_threshold,
+            )
+
         # --- Loop detection -----------------------------------------------
         consecutive, bad_tool, _ = self._count_consecutive_duplicates(history)
-        block_threshold = self.valves.MAX_CONSECUTIVE_BEFORE_BLOCK
-        max_calls = self.valves.MAX_TOOL_CALLS_PER_TURN
         remaining_calls = max(0, max_calls - total)
 
         if total > 0:
