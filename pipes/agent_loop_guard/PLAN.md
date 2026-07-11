@@ -9,8 +9,9 @@ is strictly more capable than the last.
 - [x] Phase 2 — Runaway Protection
 - [x] Phase 3 — Loop Detection & Escalation
 - [x] Phase 4 — Tool Counter & Injection Options
-- [ ] Phase 5 — Polish & Production Readiness
+- [x] Phase 5 — Polish & Production Readiness
 - [x] Phase 6 — Tool Blocklist
+- [x] Phase 7 — `_guard_status` cleanup (removed dead code, docs aligned)
 
 ## Phase overview
 
@@ -20,8 +21,9 @@ is strictly more capable than the last.
 | 2 | + Runaway limit (`MAX_TOOL_CALLS_PER_TURN`) + soft-block | ✅ Done |
 | 3 | + Consecutive duplicate detection + escalation + selective tool removal | ✅ Done |
 | 4 | + Descending tool counter + `merge_last_tool` injection + shortened messages | ✅ Done |
-| 5 | Polish: logging, hardening, tests | ⬜ Pending |
+| 5 | Polish: logging, hardening, tests | ✅ Done |
 | 6 | + Tool blocklist (remove tools by name) | ✅ Done |
+| 7 | + `_guard_status` removal: stripped dead code, docs aligned | ✅ Done |
 
 ---
 
