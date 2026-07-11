@@ -73,18 +73,9 @@ User message → Open WebUI → Agent Loop Guard pipe()
 With `MAX_CONSECUTIVE_BEFORE_BLOCK` (default 4):
 
 ```
-consecutive == 2  → WARNING (tools still available)
-  "{tool_name} called {total}x with same args. Change approach or summarize."
-  │  Agent ignores → continues looping
-
-consecutive == 3  → FINAL WARNING (tools still available)
-  "{tool_name} called {total}x. Still repeating. Stop now and summarize."
-  │  Agent still ignores
-
-consecutive >= 4  → SOFT-BLOCK: only the looping tool removed
-  Agent receives instruction + all collected results, can use other tools
-  "TOOL REMOVED: {tool_name} blocked after {total} identical calls."
-  → Agent has other tools available or can summarise.
+consecutive == 2  → WARNING (system message, tools still available)
+consecutive == 3  → FINAL WARNING (system message, tools still available, if threshold > 3)
+consecutive >= 4  → SOFT-BLOCK: only the looping tool removed from body + metadata
 ```
 
 Each level fires **exactly once**. Higher thresholds spread FINAL WARNING further
@@ -110,9 +101,7 @@ from the block. For `N=3` there is no FINAL WARNING (WARNING → block directly)
 | `GATEWAY_CUSTOM_HEADERS` | `""` | JSON object of extra headers. Supports `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` |
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before soft-block. `0` = disabled |
 | `MAX_CONSECUTIVE_BEFORE_BLOCK` | `4` | Consecutive identical tool calls before soft-block (min 3). Warnings spaced automatically: WARNING on first detection, FINAL WARNING at ~60% of threshold |
-| `SHOW_TOOL_COUNTER` | `True` | Append descending counter (`remaining tool calls: N`) to every tool result |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
-| `INJECTION_POSITION` | `"append_user"` | Where to inject: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |
 
 > **Note**: `MAX_TOOL_CALLS_PER_TURN` must be greater than `MAX_CONSECUTIVE_BEFORE_BLOCK`
 > when both are enabled. The pipe validates this at config time — if runaway's threshold
@@ -170,16 +159,8 @@ HTTP requests to your gateway via `httpx.AsyncClient`. This means:
 
 ## Upcoming Features
 
-See [PLAN.md](./PLAN.md) for details.
-
 - **Per-model overrides**: different thresholds per sub-pipe
 - **Production hardening**: comprehensive tests, edge case coverage
-
-### Implemented
-
-- **Phase 6 — Tool Blocklist** (`TOOL_BLOCKLIST` valve): remove tools from
-  the agent's tool list by name (e.g. block `delete_file`, `terminal_execute`).
-  Matching is exact — `fetch_url` does not block `smart_fetch_url`.
 
 ---
 
