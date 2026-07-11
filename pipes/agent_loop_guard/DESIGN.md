@@ -48,7 +48,7 @@ The pipe:
    count) by scanning backwards from the last user message.
 2. **Escalates** through a formula-based ladder: WARNING → FINAL WARNING →
    soft-block (each level fires exactly once).
-3. **Acts** via two channels that both survive the middleware's shallow-copy
+3. **Acts** via three channels that all survive the middleware's shallow-copy
    loop:
    - **System messages** injected into `body["messages"]` — forwarded to the
      gateway, the LLM receives them.
