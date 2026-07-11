@@ -8,7 +8,7 @@ requirements: httpx, pydantic
 """
 
 from pydantic import BaseModel, Field, model_validator
-from typing import AsyncGenerator, Awaitable, Callable, Literal, Optional
+from typing import AsyncGenerator, Awaitable, Callable, Optional
 import httpx
 import json
 import logging
@@ -21,30 +21,9 @@ log = logging.getLogger(__name__)
 # Guard message helpers
 # --------------------------------------------------------------------------
 
-def _warning_msg(tool_name: str, total: int) -> str:
-    return f"{tool_name} called {total}x with same args. Change approach or summarize."
 
-
-def _final_warning_msg(tool_name: str, total: int) -> str:
-    return f"{tool_name} called {total}x. Still repeating. Stop now and summarize."
-
-
-def _runaway_instruction(total: int, max_calls: int) -> str:
-    return (
-        f"TOOL LIMIT: {total}/{max_calls} used. "
-        f"No more tools this turn. Summarize now."
-    )
-
-
-def _loop_blocked_tool_instruction(tool_name: str, total: int) -> str:
-    return (
-        f"TOOL REMOVED: {tool_name} blocked after {total} identical calls. "
-        f"Other tools still available. Summarize or continue."
-    )
-
-
-def _build_guard_status_message(state: dict) -> str:
-    """Build a human-readable message string for the _guard_status tool result.
+def _build_guard_message(state: dict) -> str:
+    """Build a human-readable guard status message.
 
     Args:
         state: dict with keys:
@@ -92,64 +71,6 @@ def _build_guard_status_message(state: dict) -> str:
             f"Other tools are still available or you may summarise now."
         )
     return ""
-
-
-def _build_guard_status_content(state: dict) -> str:
-    """Build the JSON content for the _guard_status tool result.
-
-    Uses Option B from GUARD_STATUS.md: status + message fields only.
-
-    Args:
-        state: dict with keys:
-            - status: str ('ok'|'warning'|'final_warning'|'blocked_tool'|'runaway')
-            - tool: str | None
-            - consecutive: int
-            - total: int
-            - max_calls: int
-            - remaining_calls: int
-
-    Returns:
-        JSON string with 'status' and 'message' fields.
-    """
-    return json.dumps(
-        {
-            "status": state["status"],
-            "message": _build_guard_status_message(state),
-        }
-    )
-
-
-def _build_guard_status_pair(state: dict) -> tuple[dict, dict]:
-    """Fabricate an assistant + tool message pair for _guard_status.
-
-    Returns:
-        (assistant_msg, tool_msg):
-          - assistant_msg carries tool_calls[0].id = 'guard_status'
-          - tool_msg carries tool_call_id = 'guard_status'
-
-        The fixed ID ensures sanitize_tool_pairs() preserves the pair and
-        makes the pair trivially discoverable for replacement.
-    """
-    content = _build_guard_status_content(state)
-    assistant_msg = {
-        "role": "assistant",
-        "tool_calls": [
-            {
-                "id": "guard_status",
-                "type": "function",
-                "function": {
-                    "name": "_guard_status",
-                    "arguments": "{}",
-                },
-            }
-        ],
-    }
-    tool_msg = {
-        "role": "tool",
-        "tool_call_id": "guard_status",
-        "content": content,
-    }
-    return assistant_msg, tool_msg
 
 
 class Pipe:
@@ -339,48 +260,16 @@ class Pipe:
                 sorted(unknown),
             )
 
-        # Never remove _guard_status, even if accidentally blocklisted
         body["tools"][:] = [
             t for t in tools
             if t.get("function", {}).get("name") not in blocked
-            or t.get("function", {}).get("name") == "_guard_status"
         ]
 
         # If tool_choice targets a blocked tool, reset it so the LLM can choose freely.
-        # Ignore _guard_status — it should never be targeted, but guard defensively.
         tool_choice = body.get("tool_choice")
-        if isinstance(tool_choice, str) and tool_choice in blocked and tool_choice != "_guard_status":
+        if isinstance(tool_choice, str) and tool_choice in blocked:
             body.pop("tool_choice", None)
             log.info("tool_choice '%s' targets a blocked tool — reset", tool_choice)
-
-    @staticmethod
-    def _add_guard_status_tool(body: dict) -> None:
-        """Add the _guard_status dummy tool to body['tools'].
-
-        This tool is never registered in Open WebUI's tool callable registry;
-        it is managed entirely by the pipe. The LLM sees it as available but
-        any attempt to call it is silently skipped by the middleware.
-        """
-        guard_tool = {
-            "type": "function",
-            "function": {
-                "name": "_guard_status",
-                "description": (
-                    "Internal read-only tool. Returns the current state of the "
-                    "agent loop guard: number of tool calls in the turn, "
-                    "consecutive identical calls, block status, and remaining "
-                    "budget."
-                ),
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }
-        tools = body.get("tools")
-        if tools is None:
-            body["tools"] = [guard_tool]
-            return
-        # Avoid duplicates in case this method is called more than once
-        if not any(t.get("function", {}).get("name") == "_guard_status" for t in tools):
-            tools[:] = [guard_tool] + tools
 
     # ------------------------------------------------------------------
     # Tool-call analysis
@@ -396,9 +285,6 @@ class Pipe:
                 break
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
-                    # Skip auto-injected _guard_status pairs
-                    if tc["function"]["name"] == "_guard_status":
-                        continue
                     try:
                         args = json.loads(tc["function"]["arguments"])
                     except (json.JSONDecodeError, KeyError):
@@ -423,83 +309,6 @@ class Pipe:
             else:
                 break
         return count, last["name"], last["args"]
-
-    # ------------------------------------------------------------------
-    # Tool counter (dead code — kept for reference, will be removed in Phase 6)
-    # ------------------------------------------------------------------
-
-    def _append_tool_counter(self, messages: list[dict], total: int, max_calls: int) -> None:
-        """Append a descending counter to the last tool result in the current turn."""
-        if max_calls <= 0:
-            return
-        remaining = max(0, max_calls - total)
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
-                break
-            if messages[i].get("role") == "tool":
-                original = messages[i].get("content", "")
-                messages[i]["content"] = f"{original}\n---\nremaining tool calls: {remaining}"
-                return
-
-    # ------------------------------------------------------------------
-    # Injection helper (dead code — kept for reference, will be removed in Phase 6)
-    # ------------------------------------------------------------------
-
-    def _inject(self, messages: list[dict], message: dict) -> None:
-        """Insert a guard message into the conversation. append_user position only."""
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "user":
-                messages.insert(i, message)
-                return
-        messages.append(message)
-
-    # ------------------------------------------------------------------
-    # _guard_status injection/replacement
-    # ------------------------------------------------------------------
-
-    def _inject_or_replace_guard_status(self, messages: list[dict], state: dict) -> None:
-        """Inject or replace the _guard_status pair in the message history.
-
-        Scans backwards through messages to find an existing assistant + tool
-        pair with tool_calls[0].id == 'guard_status'. If found, replaces them
-        in-place. If not found and state['total'] > 0, appends a new pair at
-        the end. If total == 0, does nothing.
-        """
-        total = state.get("total", 0)
-        if total == 0:
-            return
-
-        pair = _build_guard_status_pair(state)
-        new_assistant, new_tool = pair
-
-        # Scan backwards to find existing _guard_status pair
-        assistant_idx = None
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                for tc in msg["tool_calls"]:
-                    if tc.get("id") == "guard_status":
-                        assistant_idx = i
-                        break
-                if assistant_idx is not None:
-                    break
-
-        if assistant_idx is not None:
-            # Find matching tool message
-            tool_idx = None
-            for j in range(assistant_idx + 1, len(messages)):
-                if messages[j].get("role") == "tool" and messages[j].get("tool_call_id") == "guard_status":
-                    tool_idx = j
-                    break
-            # Replace in-place
-            messages[assistant_idx] = new_assistant
-            if tool_idx is not None:
-                messages[tool_idx] = new_tool
-            else:
-                messages.insert(assistant_idx + 1, new_tool)
-        else:
-            messages.append(new_assistant)
-            messages.append(new_tool)
 
     # ------------------------------------------------------------------
     # Gateway proxy
@@ -663,7 +472,7 @@ class Pipe:
                     log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
             # Inject system message instructing the agent to stop
-            messages.append({"role": "system", "content": _build_guard_status_message(state)})
+            messages.append({"role": "system", "content": _build_guard_message(state)})
 
             # Fall through to the normal forward path.  Tools were already
             # cleared in-place above (tools[:] = ...) so no further action
@@ -692,23 +501,13 @@ class Pipe:
                 log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
         # --- Inject system message for warning/final_warning -----------------
-        # The _guard_status pair is stripped before forwarding (see clean_messages
-        # below), so the LLM never sees the warning.  This system message gives
-        # the agent real feedback so it can correct itself before the soft-block.
+        # System messages give the agent real feedback so it can correct
+        # itself before the soft-block.
         if state["status"] in ("warning", "final_warning"):
-            messages.append({"role": "system", "content": _build_guard_status_message(state)})
-
-        # --- Inject or replace _guard_status pair ---------------------------
-        self._inject_or_replace_guard_status(messages, state)
+            messages.append({"role": "system", "content": _build_guard_message(state)})
 
         # --- Apply tool blocklist --------------------------------------------
         self._apply_tool_blocklist(body)
-
-        # --- Ensure _guard_status is available to the LLM --------------------
-        # Do NOT re-add tools during soft-block — tools were intentionally
-        # cleared in-place so the middleware loop sees the empty list.
-        if state["status"] not in ("runaway", "blocked_tool"):
-            self._add_guard_status_tool(body)
 
         # --- Debug: final payload before forwarding --------------------------
         payload_preview = {
@@ -728,15 +527,7 @@ class Pipe:
         log.debug("Forwarding to gateway | payload summary: %s", json.dumps(payload_preview, indent=2))
 
         # --- Forward to gateway ---------------------------------------------
-        clean_messages = [
-            m for m in messages
-            if not (
-                m.get("role") == "assistant"
-                and any(tc.get("id") == "guard_status" for tc in m.get("tool_calls", []))
-            )
-            and not (m.get("role") == "tool" and m.get("tool_call_id") == "guard_status")
-        ]
-        payload = {**body, "model": real_model, "messages": clean_messages}
+        payload = {**body, "model": real_model, "messages": messages}
 
         try:
             if body.get("stream", False):
