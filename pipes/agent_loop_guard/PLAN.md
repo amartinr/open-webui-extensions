@@ -139,29 +139,17 @@ tool is removed, others remain available).
   from the end of history (returns count, name, args).
 - Formula-based escalation: `consecutive==2` → WARNING, `consecutive==final_pos`
   → FINAL WARNING, `consecutive >= N` → soft-block.
-- `_inject()` — inserts guard messages at configured position
-  (see Phase 4 for injection options).
-- Warning/final-warning message helpers (`_warning_msg`, `_final_warning_msg`).
-
-### Guard message helpers
-
-```python
-def _warning_msg(tool_name: str, total: int) -> str:
-    return f"{tool_name} called {total}x with same args. Change approach or summarize."
-
-def _final_warning_msg(tool_name: str, total: int) -> str:
-    return f"{tool_name} called {total}x. Still repeating. Stop now and summarize."
-```
+- `_build_guard_message()` — builds the system message content for all states.
 
 ### Escalation ladder
 
 Each level fires **exactly once**:
 
 ```
-consecutive == 2                    → WARNING
-consecutive == final_pos (≈60% of N) → FINAL WARNING (if N > 3)
+consecutive == 2                    → WARNING (system message)
+consecutive == final_pos (≈60% of N) → FINAL WARNING (system message, if N > 3)
 consecutive >= N                     → SOFT-BLOCK
-  Only the offending tool removed from body["tools"].
+  Only the offending tool removed from body["tools"] and metadata["tools"].
   Agent can still use other tools or summarise.
 otherwise                           → silent
 ```
@@ -180,18 +168,20 @@ pipe(body)
   6. N            = MAX_CONSECUTIVE_BEFORE_BLOCK
   7. final_pos    = 2 + (N - 2) * 3 // 5  ← ≈60% of range
 
-  8. if total >= MAX_TOOL_CALLS_PER_TURN > 0:
-       _soft_block(None)              ← remove all tools (runaway)
-
-  9. if consecutive >= 2:
+  8. if consecutive >= 2:
        if consecutive >= N:
-           _soft_block(bad_tool)       ← remove only looping tool
+           soft-block: remove tool from body["tools"] + metadata["tools"]
+           inject system message, fall through to forward
        elif N > 3 and consecutive == final_pos:
-           inject FINAL WARNING (tools still available)
+           inject FINAL WARNING (system message, tools still available)
        elif consecutive == 2:
-           inject WARNING (tools still available)
+           inject WARNING (system message, tools still available)
 
- 10. Forward to gateway (tools still available, unless soft-blocked)
+  9. if state == "ok" and total >= MAX_TOOL_CALLS_PER_TURN > 0:
+       soft-block: remove all used tools from body + metadata
+       inject system message, fall through to forward
+
+ 10. Forward to gateway (tools may be modified in-place)
 ```
 
 ### Validation (with `MAX_CONSECUTIVE_BEFORE_BLOCK=4`)
@@ -205,62 +195,27 @@ pipe(body)
 
 ---
 
-## Phase 4 — Tool Counter & Injection Options  [x]
+## Phase 4 — Tool Counter & Injection Options  [x]  *(removed in v3.0)*
 
-**Goal**: add a descending tool call counter to every tool result so the
-agent always knows its remaining budget. Provide configurable injection
-positions for guard messages.
+**Original goal:** add a descending tool call counter to every tool result
+and provide configurable injection positions for guard messages.
 
-### New code
+**What existed:**
+- `SHOW_TOOL_COUNTER` valve — appended `remaining tool calls: N` to every tool result.
+- `_append_tool_counter()` method.
+- `INJECTION_POSITION` valve (`"append_user"` / `"merge_last_tool"`).
+- `_inject()` method with position support.
 
-- `SHOW_TOOL_COUNTER` valve (default `True`) — append
-  `remaining tool calls: N` to every tool result.
-- `_append_tool_counter()` — finds the last tool result in the current
-  turn and appends the counter after a `---` separator.
-- `INJECTION_POSITION` valve (default `"append_user"`):
-  - `"append_user"`: inject guard message as a new `system` message
-    before the last `user` message.
-  - `"merge_last_tool"`: append guard message to the last tool result
-    in the current turn, after a `---` separator and the counter.
-- `_inject()` updated to support `merge_last_tool` position (appends guard
-  message to the last tool result instead of inserting a new message).
-
-### Tool counter format
-
-```
-result of web_search...
-
----
-remaining tool calls: 14
-```
-
-### Example with counter + warning (merge_last_tool)
-
-```
-result of web_search...
-
----
-remaining tool calls: 12
-
----
-web_search called 2x with same args. Change approach or summarize.
-```
-
-### Soft-block messages (short)
-
-| Type | Message |
-|:----:|---------|
-| Runaway | `TOOL LIMIT: {total}/{max} used. No more tools this turn. Summarize now.` |
-| Loop (tool removed) | `TOOL REMOVED: {tool_name} blocked after {total} identical calls. Other tools still available. Summarize or continue.` |
-
-### Validation
-
-- `SHOW_TOOL_COUNTER=True` → counter appended to every tool result.
-- `SHOW_TOOL_COUNTER=False` → no counter.
-- `MAX_TOOL_CALLS_PER_TURN=0` → counter not shown (no limit).
-- `INJECTION_POSITION=append_user` → warning is a new `system` message.
-- `INJECTION_POSITION=merge_last_tool` → warning appended to last tool result.
-- Both counter and warning can coexist in the same tool result.
+**Why removed:**
+- `_append_tool_counter()` contaminated real tool results with guard text,
+  mixing agent-facing content with system-facing bookkeeping.
+- The counter was consumed by the LLM on the next iteration but did not
+  survive the `body["messages"]` reset — it only appeared in the iteration
+  after it was appended, then lost.
+- The `_guard_status` replacement (v2.0.0) made these obsolete; and when
+  `_guard_status` itself was removed (v3.0), the dead code was cleaned up.
+- The agent is informed of its remaining budget via system messages on
+  warning/final_warning/soft-block, and via UI status events.
 
 ---
 
@@ -366,9 +321,10 @@ if tool_choice targets a blocked tool → reset tool_choice
 
 ### Soft-block interaction
 
-The blocklist filter runs **before** soft-block logic. If the runaway
-or loop soft-block fires afterwards, it operates on the already-filtered
-tool list (removing all tools or just the looping one, respectively).
+The blocklist filter runs **after** escalation logic (which may remove
+tools for loop/runaway), but **before** forwarding to the gateway.
+Soft-block modifies `body["tools"]` in-place first; the blocklist then
+removes any additionally blocked tools from the already-reduced list.
 
 ### Validation
 
@@ -382,12 +338,57 @@ tool list (removing all tools or just the looping one, respectively).
 
 ---
 
+## Phase 7 — `_guard_status` Cleanup  [x]
+
+**Goal:** remove the `_guard_status` dummy tool mechanism and all associated
+dead code, since analysis showed it provided no value (fabricated pair was
+stripped before forwarding, did not survive iterations, and misled the agent).
+
+### Removed functions
+
+| Function | Reason |
+|----------|--------|
+| `_build_guard_status_content()` | Fabricated JSON content for tool result |
+| `_build_guard_status_pair()` | Fabricated assistant+tool message pair |
+| `_add_guard_status_tool()` | Injected tool definition into `body["tools"]` |
+| `_inject_or_replace_guard_status()` | Managed the pair in message history |
+| `_warning_msg()`, `_final_warning_msg()` | Dead code (replaced by `_build_guard_message()`) |
+| `_runaway_instruction()`, `_loop_blocked_tool_instruction()` | Dead code |
+| `_append_tool_counter()` | Dead code from Phase 4 |
+| `_inject()` | Dead code from Phase 3/4 |
+
+### Renamed
+
+| Old name | New name |
+|----------|----------|
+| `_build_guard_status_message()` | `_build_guard_message()` |
+
+### Removed valves
+
+| Valve | Reason |
+|-------|--------|
+| `INJECTION_POSITION` | Removed in v2.0.0 (`_guard_status` refactor) |
+| `SHOW_TOOL_COUNTER` | Removed in v2.0.0 (`_guard_status` refactor) |
+
+### Removed import
+
+- `Literal` from `typing` (was used by `INJECTION_POSITION` valve)
+
+### Documentation aligned
+
+- DESIGN.md rewritten to v3.0 (current architecture).
+- GUARD_STATUS.md and GUARD_STATUS_PLAN.md merged into DESIGN.md and deleted.
+- README.md valve table cleaned.
+
+---
+
 ## File layout on disk
 
 ```
 pipes/agent_loop_guard/
-├── DESIGN.md              # Full design document (reference)
-├── PLAN.md                # This file
+├── DESIGN.md              # Full design document (current architecture)
+├── README.md              # User-facing documentation
+├── PLAN.md                # Implementation history
 └── agent_loop_guard.py    # Single-file pipe (all phases)
 ```
 
@@ -399,7 +400,7 @@ stored as a single source blob in the database. No `__init__.py`, no package.
 ## Implementation order & dependencies
 
 ```
-Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 ──► Phase 6
+Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 ──► Phase 6 ──► Phase 7
    │
    └── Foundation: Valves, pipes(), pipe(), _stream, _call
         │
@@ -412,6 +413,8 @@ Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 
                        └── Phase 5 adds logging, hardening, no new logic
                             │
                             └── Phase 6 adds tool blocklist filtering
+                                 │
+                                 └── Phase 7 removes _guard_status, dead code, aligns docs
 ```
 
 Each phase's code is an **additive diff** on the previous phase — never a

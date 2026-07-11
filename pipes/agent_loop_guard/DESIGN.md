@@ -1,20 +1,16 @@
----
-title: Agent Loop Guard
-author: open-webui-tools
-author_url: https://github.com/your-org/open-webui-tools
-version: 1.0.0
-required_open_webui_version: 0.5.0
-requirements: httpx, pydantic
----
+# Design Document: Agent Loop Guard
 
-# Pipe Function: Agent Loop Guard
+**Version:** 3.0  
+**Based on:** `agent_loop_guard.py` (current implementation)
+
+---
 
 ## 1. Purpose
 
 Prevent AI agents in Open WebUI from entering infinite tool-calling loops by
-analysing conversation history **in real time** — on every request, including
-tool-call continuations — and escalating through warning injection up to
-force-termination when the agent ignores the warnings.
+analysing conversation history **on every iteration** of the middleware's
+tool-call loop, escalating through system-message warnings up to **soft-block**
+(removing tools from the request body and metadata).
 
 ---
 
@@ -23,92 +19,99 @@ force-termination when the agent ignores the warnings.
 Open WebUI offers two extensibility mechanisms that could intercept the LLM
 request path:
 
-| | Filter Function (`inlet`) | Pipe Function (`pipe`) |
-|---|---|---|
-| Called on initial user request | ✅ Yes | ✅ Yes |
-| Called on tool-call continuations | ✅ **Yes** — since [commit 5064506](https://github.com/open-webui/open-webui/commit/5064506de4eb6c0aae560c82b79fcf8f1a56c123) (fixes [#18222](https://github.com/open-webui/open-webui/issues/18222)) | ✅ **Yes** — every iteration |
-| Can detect loops inside a turn | ✅ Yes — real-time | ✅ Yes — real-time |
-| Can force-terminate a runaway turn | ❌ No — `inlet()` must return the body | ✅ Yes — returns plain string |
+| Capability | Filter (`inlet`) | Pipe (`pipe`) |
+|-----------|:----------------:|:--------------:|
+| Called on each tool-call iteration | ✅ | ✅ |
+| Detect consecutive duplicates | ✅ | ✅ |
+| Inject warning messages | ✅ | ✅ |
+| **Remove tools from body** | ❌ Unreliable | ✅ **Definitive** |
+| **Skip LLM call / force-terminate** | ❌ Must return body | ✅ Returns string (soft-block preferred) |
+| **Manifold** (dynamic model discovery) | ❌ | ✅ |
+| **Proxy + prefix stripping** | ❌ | ✅ |
 
-Since [commit 5064506](https://github.com/open-webui/open-webui/commit/5064506de4eb6c0aae560c82b79fcf8f1a56c123)
-(`"refac/fix: inherit request form data"`), Open WebUI spreads `**form_data`
-into the `new_form_data` of every tool-call iteration. This means **both**
-the Pipe `pipe()` and the Filter `inlet()` are invoked on every iteration
-of the tool-calling loop — the fix carries the original model ID (with
-pipe prefix) and all filter modifications forward.
-
-A **Pipe** is still the right choice for this project because it alone can
-**force-terminate**: return a plain string to skip the LLM call entirely,
-saving tokens. A Filter must always return the body, so the LLM call
-happens regardless.
+Since [commit 5064506](https://github.com/open-webui/open-webui/commit/5064506de4eb6c0aae560c82b79fcf8f1a56c123),
+both Filters and Pipes are invoked on every tool-call iteration. However,
+only a Pipe can **definitively remove tools** from the request body (via
+in-place slice assignment that survives the middleware's shallow copy) and
+**block tool execution at the metadata level** (via `__metadata__["tools"]`
+which is the same dict the middleware uses).
 
 ---
 
-## 3. Architecture Overview
+## 3. Core Mechanism
 
-### 3.1 Manifold: One Pipe, Many Protected Models
+The pipe sits between Open WebUI and the LLM gateway. On every tool-call
+iteration, the middleware calls `pipe()` with the accumulated message history.
+The pipe:
+
+1. **Analyses** the current turn's tool calls (consecutive duplicates, total
+   count) by scanning backwards from the last user message.
+2. **Escalates** through a formula-based ladder: WARNING → FINAL WARNING →
+   soft-block (each level fires exactly once).
+3. **Acts** via two channels that both survive the middleware's shallow-copy
+   loop:
+   - **System messages** injected into `body["messages"]` — forwarded to the
+     gateway, the LLM receives them.
+   - **In-place tool removal** (`tools[:] = [...]`) on `body["tools"]` — the
+     shallow copy shares the same list object, so the change persists.
+   - **Metadata clearing** (`__metadata__["tools"].pop(name)`) — the same dict
+     object as the middleware's `metadata["tools"]`, so removed tools cannot
+     be executed.
+
+---
+
+## 4. Why Not a Fabricated Tool Pair
+
+Earlier versions (v1.x, v2.0.0) used a dummy tool `_guard_status` with
+fabricated assistant+tool pairs injected into the message history. This was
+removed because:
+
+| Issue | Detail |
+|-------|--------|
+| **Stripped before forwarding** | The pair was removed by `clean_messages` to avoid `reasoning_content` validation errors on DeepSeek thinking mode — the LLM never saw it. |
+| **Did not survive iterations** | `body["messages"]` is a new list each iteration (rebuilt from `form_data`), so the pair was lost between pipe calls. |
+| **Tool definition misled the agent** | `_guard_status` was in `body["tools"]` but not in `metadata["tools"]` — if the agent called it, it received `"Tool _guard_status not found"`, wasting a turn. |
+| **State is self-contained** | Every `pipe()` call recalculates state fresh from `_extract_tool_calls_in_turn()` — no cross-iteration memory needed. |
+
+The current design uses only the two channels that **do** work reliably:
+system messages and in-place tool/metadata mutation.
+
+---
+
+## 5. Architecture Overview
+
+### 5.1 Manifold: One Pipe, Many Protected Models
 
 The pipe uses Open WebUI's manifold pattern. A single `pipes()` method
-queries the gateway (Bifrost) for available models and creates one protected
-sub-pipe per model. **Nothing is hardcoded.**
+queries the gateway for available models and creates one protected sub-pipe
+per model. **Nothing is hardcoded.**
 
 ```
 ┌──────────────────────────────────────────────────┐
 │ Pipe: "Agent Loop Guard" (manifold)               │
 │                                                    │
-│ pipes() → GET {gateway}/models → Bifrost           │
+│ pipes() → GET {gateway}/models                    │
 │                                                    │
 │ Returns:                                           │
 │   🛡️ deepseek/deepseek-v4-flash                    │
 │   🛡️ deepseek/deepseek-v4-pro                      │
 │   🛡️ anthropic/claude-haiku-4-5                    │
-│   ... (whatever Bifrost returns)                   │
+│   ... (whatever the gateway returns)               │
 └──────────────────────────────────────────────────┘
 ```
 
-### 3.2 How the Admin Deploys It
-
-**Step 1 — Upload the pipe once.** Configure two valves:
-- `GATEWAY_BASE_URL` → Bifrost endpoint
-- `GATEWAY_AUTH_VALUE` → gateway credential
-
-**Step 2 — The selector populates automatically.** Open WebUI calls
-`pipes()` during model discovery, which queries Bifrost's `/models` endpoint
-and creates one sub-pipe per model.
-
-**Step 3 — Create protected workspace models.** In Admin Panel → Models,
-create workspace entries pointing at the sub-pipes. Each keeps its own
-system prompt, tools, capabilities, and temperature:
+### 5.2 Runtime Flow
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│ "DeepSeek v4 Assistant (Protegido)"                         │
-│   base_model_id = "pipe-uuid.deepseek/deepseek-v4-flash"   │
-│   system prompt  = "You are a helpful assistant..."         │
-│   tools          = [smart_fetch_url]                        │
-│   temperature    = 0.7                                       │
-├────────────────────────────────────────────────────────────┤
-│ "DeepSeek v4 SW Engineer (Protegido)"                       │
-│   base_model_id = "pipe-uuid.deepseek/deepseek-v4-pro"     │
-│   system prompt  = "You are an expert coding assistant..."  │
-│   terminal       = ephedrine                                 │
-├────────────────────────────────────────────────────────────┤
-│ ... etc. for every combination you need                     │
-└────────────────────────────────────────────────────────────┘
-```
-
-### 3.3 Runtime Flow
-
-```
-User selects "DeepSeek v4 Assistant (Protegido)"
+User selects "🛡️ DeepSeek v4 Flash"
      │
      ▼
 Open WebUI loads workspace model:
-  • Applies "You are a helpful assistant..." to body["messages"]
+  • Applies system prompt, tools, temperature, etc.
   • Resolves base_model_id → body["model"] = "pipe-uuid.deepseek/deepseek-v4-flash"
      │
      ▼
-Open WebUI detects model["pipe"] → calls pipe()
+Open WebUI calls pipe()
      │
      ▼
 +------------------------------------------+
@@ -118,92 +121,17 @@ Open WebUI detects model["pipe"] → calls pipe()
 |     → "deepseek/deepseek-v4-flash"       |
 |  2. Analyse messages for loops           |
 |  3. Inject warnings or soft-block        |
-|  4. Forward to Bifrost with real model   |
+|  4. Forward to gateway with real model   |
 +------------------------------------------+
      │
      ▼
-Bifrost routes to deepseek-v4-flash
+Gateway routes to model provider
      │
      ▼
 Response streams back through pipe → Open WebUI → user
 ```
 
-Open WebUI applies the system prompt and resolves `base_model_id` **before**
-the pipe runs. The pipe receives a body with the system prompt already
-injected and the model ID already set, then does three things:
-
-1. **Strips the pipe prefix** from `body["model"]` to get the real model ID
-2. **Analyses messages** and injects warnings / soft-blocks if needed
-3. **Forwards** to the gateway with the real model ID
-
-Tus workspace models conservan **todo**: system prompts, tools,
-parámetros de temperatura, capabilities. El pipe no sabe nada de eso — solo
-protege contra bucles.
-
----
-
-## 4. Open WebUI Pipe Contract
-
-### 4.1 Manifold: pipes()
-
-A `pipes()` method (sync, async, or a plain list) tells Open WebUI which
-sub-pipes the manifold exposes. Each entry is `{"id": "...", "name": "..."}`.
-
-```python
-async def pipes(self):
-    """Query gateway for available models. Returns one sub-pipe per model."""
-    ...
-    return [
-        {"id": "deepseek/deepseek-v4-flash", "name": "🛡️ DeepSeek v4 Flash"},
-        {"id": "deepseek/deepseek-v4-pro",   "name": "🛡️ DeepSeek v4 Pro"},
-    ]
-```
-
-Open WebUI registers each as `{pipe_id}.{sub_pipe_id}` and they appear in
-the model selector.
-
-### 4.2 pipe() — Request Handler
-
-The `pipe()` method receives every chat completion request. `body["model"]`
-contains the full sub-pipe ID (e.g. `"pipe-uuid.deepseek/deepseek-v4-flash"`).
-
-```python
-async def pipe(self, body: dict, __user__: Optional[dict] = None, __metadata__: Optional[dict] = None):
-    # Strip prefix to get the real model ID
-    model = body["model"].split(".", 1)[-1]
-    ...
-```
-
-Returns an async generator (streaming proxy), a dict (non-streaming proxy),
-or the result of `_soft_block()` (forwards to gateway with tools removed).
-Unlike a traditional force-termination (which returns a plain string to skip
-the LLM call), soft-block sends an instruction to summarise while keeping
-tools unavailable.
-
----
-
-## 5. Valves
-
-| Valve | Type | Default | Description |
-|-------|------|---------|-------------|
-| `GATEWAY_BASE_URL` | str | `""` | Base URL for the OpenAI-compatible gateway |
-| `GATEWAY_AUTH_HEADER` | str | `"x-bf-vk"` | HTTP header name for the API key |
-| `GATEWAY_AUTH_VALUE` | str (password) | `""` | Credential value sent in the configured auth header |
-| `GATEWAY_CUSTOM_HEADERS` | str (JSON) | `""` | JSON object of extra HTTP headers. Supports template variables: `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` (e.g. `{"x-bf-dim-host": "myhost", "x-user": "{{USER_NAME}}"}`) |
-| `MAX_TOOL_CALLS_PER_TURN` | int | 15 | Max tool calls in a turn before tools are removed (soft-block). Set to 0 to disable. |
-| `MAX_CONSECUTIVE_BEFORE_BLOCK` | int | 4 | Consecutive identical tool calls before soft-block (min 3). Warnings are spaced automatically: WARNING on first detection (consecutive=2), FINAL WARNING at ~60% of threshold, soft-block at threshold |
-
-> **Validation**: `MAX_TOOL_CALLS_PER_TURN` must be greater than `MAX_CONSECUTIVE_BEFORE_BLOCK`
-> when both are enabled. If runaway's threshold is equal or lower, Pydantic rejects the
-> configuration with a descriptive error.
-
-| `INJECTION_POSITION` | Literal["append_user","merge_last_tool"] | `"append_user"` | Where to inject guard messages: `"append_user"` (before last user message) or `"merge_last_tool"` (append to last tool result) |
-| `SHOW_TOOL_COUNTER` | bool | `True` | Append descending counter (`remaining tool calls: N`) to every tool result |
-| `TOOL_BLOCKLIST` | str | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
-
----
-
-## 6. Model Discovery with Cache
+### 5.3 Model Discovery with Cache
 
 `pipes()` queries the gateway. If the gateway is unreachable, it falls back
 to the last successful cache so protected models don't disappear from the
@@ -217,9 +145,6 @@ def __init__(self):
 async def pipes(self):
     if not self.valves.GATEWAY_BASE_URL:
         return [{"id": "config", "name": "⚠️ Configure gateway URL"}]
-
-    headers = self._build_gateway_headers()
-    url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/models"
 
     try:
         async with httpx.AsyncClient() as client:
@@ -236,22 +161,61 @@ async def pipes(self):
     return self._models_cache
 ```
 
-If Bifrost adds a model (e.g. a new provider), it appears automatically on
-the next model refresh. If Bifrost is down, the cached list keeps working.
+---
+
+## 6. Middleware Integration
+
+The pipe relies on three properties of Open WebUI's `streaming_chat_response_handler`
+in `backend/open_webui/utils/middleware.py`:
+
+### 6.1 `pipe()` is called on every tool-call iteration
+
+The middleware's tool-call loop:
+
+```python
+while tool_calls and (iterations < CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS):
+    # ... execute tools, collect results ...
+    new_form_data = {**form_data, ...}                              # shallow copy
+    new_form_data['messages'] = [*form_data['messages'], *tool_messages]  # new list
+    res = await generate_chat_completion(request, new_form_data, ...)  # → pipe()
+```
+
+The model ID retains its pipe prefix, so every iteration routes through `pipe()`.
+
+### 6.2 `body["tools"]` is shared via shallow copy
+
+`new_form_data = {**form_data}` is a **shallow copy**. Lists inside `form_data`
+(including `body["tools"]`) are the **same objects** — the copy only copies
+references. Mutating the list with **slice assignment** (`tools[:] = [...]`)
+modifies the shared object. Reassigning (`body["tools"] = [...]`) creates a
+new object that `form_data["tools"]` does not follow.
+
+### 6.3 `__metadata__["tools"]` is the middleware's execution registry
+
+The middleware executes tools by looking them up in `metadata["tools"]` (a
+callable dict), **not** `body["tools"]` (the LLM-facing spec list). Removing
+tools from `__metadata__["tools"]` prevents execution even if the LLM emits
+`tool_calls` (via parsed DSML, etc.).
+
+### 6.4 `body["messages"]` is ephemeral
+
+`body["messages"]` is a **new list** on every iteration. Modifications to it
+(append, replace, delete) do **not** survive to the next iteration. This is
+why the pipe uses **system messages** only for communicating with the LLM —
+they are part of the forwarded payload and reach the gateway, but they do not
+accumulate across iterations.
 
 ---
 
-## 7. Analysis of Conversation History
+## 7. Tool-Call Analysis
 
 ### 7.1 Extracting Tool Calls Per Turn
 
-Scan backwards from the end of `body["messages"]` until the last user
-message. Every assistant message with `tool_calls` in that range is part of
-the current turn.
-
 ```python
 def _extract_tool_calls_in_turn(self, messages: list[dict]) -> list[dict]:
-    history = []
+    """Scan backwards from the end until the last user message.
+    Collect every assistant tool_call in the current turn."""
+    history: list[dict] = []
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
         if msg.get("role") == "user":
@@ -271,11 +235,6 @@ def _extract_tool_calls_in_turn(self, messages: list[dict]) -> list[dict]:
 
 ```python
 def _count_consecutive_duplicates(self, history: list[dict]) -> tuple[int, str | None, dict | None]:
-    """Count consecutive identical tool calls from the end of history.
-
-    Returns (count, name, args) of the repeated tool.
-    count=1 means the last call is unique (no consecutive duplicate).
-    """
     if not history:
         return 0, None, None
     last = history[-1]
@@ -288,299 +247,178 @@ def _count_consecutive_duplicates(self, history: list[dict]) -> tuple[int, str |
     return count, last["name"], last["args"]
 ```
 
-### 7.3 Formula-Based Escalation
+### 7.3 State-Free Escalation
 
-Instead of tracking warnings via instance variables, escalation is determined
-by a simple formula that guarantees each level fires exactly once:
+Because escalation is purely formula-based (`consecutive` count determines
+the action), there is no instance state to manage. Each `pipe()` invocation
+is stateless with respect to escalation level — it reads the history and
+computes the action fresh.
+
+---
+
+## 8. Escalation Ladder
+
+Each level fires **exactly once** per turn, determined by the formula:
 
 ```
 final_pos = 2 + (N - 2) * 3 // 5    # ≈60% of the range [2, N)
-
-consecutive == 2       → WARNING
-consecutive == final_pos → FINAL WARNING (if N > 3)
-consecutive >= N        → soft-block
-otherwise               → silent
 ```
 
-For `N=3` there is no room for FINAL WARNING: WARNING at consecutive=2,
-soft-block at consecutive=3.
+| consecutive | Action | What the LLM receives |
+|:-----------:|:------:|-----------------------|
+| 1 | None (silent) | Nothing |
+| 2 | **WARNING** | System message: `"{tool} called 2x with the same arguments. Change your approach or summarise."` |
+| `final_pos` (if N > 3) | **FINAL WARNING** | System message: `"{tool} called {n}x... This is your final warning. Stop repeating and summarise."` |
+| ≥ N | **SOFT-BLOCK** | Offending tool removed from `body["tools"]` + `__metadata__["tools"]`. System message instructs the agent to summarise. Other tools remain available. |
+
+For `N=3` there is no FINAL WARNING (WARNING → block directly).
+
+**Priority:** Loop detection wins over runaway. Runaway only fires when
+`consecutive < block_threshold` — an agent in a loop gets `blocked_tool`
+(only the looping tool removed) even if it also hit the total-turn limit.
 
 ---
 
-## 8. Injection & Escalation Strategy
+## 9. Soft-block (Loop & Runaway)
 
-### 8.1 Escalation Ladder
+When the guard decides to stop the agent:
 
-```
-consecutive == 2                    → WARNING (tools still available)
-  "{tool_name} called {total}x with same args. Change approach or summarize."
-  │  Agent ignores → continues looping
+1. **In-place tool removal** — `tools[:] = [...]` mutates the shared list
+   object so the change survives the middleware's shallow copy.
+2. **Metadata clearing** — `__metadata__["tools"].pop(name)` prevents the
+   middleware from executing the tool even if the LLM emits tool_calls.
+3. **System message** — `messages.append({"role": "system", ...})` instructs
+   the agent to summarise.
+4. **No early return** — execution falls through to the normal forwarding
+   path. The LLM receives all collected tool results + system instruction,
+   but without tools it **cannot** schedule more tool calls.
 
-consecutive == final_pos (≈60% of N) → FINAL WARNING (if N > 3, tools still available)
-  "{tool_name} called {total}x. Still repeating. Stop now and summarize."
-  │  Agent still ignores
+### Runaway vs Loop block
 
-consecutive >= N                     → SOFT-BLOCK: only the looping tool removed
-  Agent receives instruction + all collected results, can use other tools
-  "TOOL REMOVED: {tool_name} blocked after {total} identical calls."
-  → Agent has other tools available or can summarise.
-```
+| Scenario | What is removed | Agent can still use |
+|:---------|:---------------|:--------------------|
+| **Loop** (consecutive ≥ threshold) | Only the looping tool | Other tools + summarise |
+| **Runaway** (total ≥ max_calls, no loop) | All tools used this turn | Unused tools + summarise |
 
-Where `final_pos = 2 + (N - 2) * 3 // 5`. For `N=3` there is no FINAL WARNING.
+Both are symmetric: they remove only the problematic tools and leave the
+rest available. The agent is forced to summarise only when no useful tools
+remain.
 
-### 8.2 Injection Messages
+---
 
-**Loop Warning (level 1):**
+## 10. Tool Blocklist (TOOL_BLOCKLIST)
+
+The `TOOL_BLOCKLIST` valve lets administrators permanently remove tools by
+name before forwarding. It runs after escalation but before the gateway call.
+
+- Accepts comma-separated and/or newline-separated tool names.
+- Matching is **exact** (`==`) — `fetch_url` does not match `smart_fetch_url`.
+- Unknown names are logged as warnings but don't break execution.
+- If `tool_choice` targets a blocked tool, it is reset so the LLM can choose freely.
+
 ```python
-def _warning_msg(tool_name: str, total: int) -> str:
-    return f"{tool_name} called {total}x with same args. Change approach or summarize."
-```
-
-**Final Warning (level 2):**
-```python
-def _final_warning_msg(tool_name: str, total: int) -> str:
-    return f"{tool_name} called {total}x. Still repeating. Stop now and summarize."
-```
-
-**Runaway Prevention (skip escalation, immediate soft-block):**
-```python
-def _runaway_instruction(total: int, max_calls: int) -> str:
-    return (
-        f"TOOL LIMIT: {total}/{max_calls} used. "
-        f"No more tools this turn. Summarize now."
-    )
-```
-
-**Loop soft-block (only the offending tool removed):**
-```python
-def _loop_blocked_tool_instruction(tool_name: str, total: int) -> str:
-    return (
-        f"TOOL REMOVED: {tool_name} blocked after {total} identical calls. "
-        f"Other tools still available. Summarize or continue."
-    )
-```
-
-### 8.3 Injection Position
-
-| Value | Behaviour |
-|-------|-----------|
-| `"append_user"` (default) | Insert a new `system` message before the last user message |
-| `"merge_last_tool"` | Append the guard message content to the last tool result in the current turn, after a clear separator |
-
-### 8.4 Formula-Based Injection (No Stale State)
-
-Because escalation is purely formula-based (`consecutive` count determines
-the action), there is no instance state to reset. Each `pipe()` invocation
-is stateless with respect to escalation. The `_merge_injected` flag is the
-only per-turn state, reset when `total == 0`.
-
----
-
-## 9. Soft-block (replaces force-termination)
-
-When the guard decides to stop an agent, it does **not** skip the LLM call.
-Instead, it removes `tools` from the request body and injects a system
-message instructing the agent to summarise. The LLM receives all tool
-results already in the chat and is forced to respond with text — it
-cannot call more tools because none are available.
-
-This preserves all collected results and produces a useful final answer
-instead of a hardcoded guard message impersonating the agent.
-
----
-
-## 10. Architecture Summary
-
-The pipe is structured as a pipeline of independent phases, each one
-additive on the previous:
-
-### Phase 1 — Manifold Proxy
-- `pipes()` queries the gateway's `/models` endpoint
-- Caches results; falls back to cache on gateway failure
-- `pipe()` strips the pipe prefix from the model ID, forwards to gateway
-
-### Phase 2 — Runaway Protection
-- `_extract_tool_calls_in_turn()` scans messages backwards from the end
-  until the last user message, collecting all tool_calls in the current turn
-- If the count reaches `MAX_TOOL_CALLS_PER_TURN`, the pipe **soft-blocks**
-  (removes tools, injects instruction, forwards)
-
-### Phase 3 — Loop Detection & Escalation
-- `_count_consecutive_duplicates()` counts consecutive identical calls from end of history
-- Formula-based escalation (each level fires exactly once):
-  - `consecutive == 2` → inject WARNING (tools still available)
-  - `consecutive == final_pos` (≈60% of N, if N > 3) → inject FINAL WARNING (tools still available)
-  - `consecutive >= N` → soft-block (only the looping tool removed)
-
-### Phase 6 — Tool Blocklist
-- `TOOL_BLOCKLIST` valve: comma/newline-separated list of tool names to **remove**
-- `_parse_tool_list()` splits on commas, newlines, or mixed input
-  using `re.split(r"[,\n\r]+", raw)`
-- `_apply_tool_blocklist()` mutates `body['tools']` before forwarding;
-  logs a warning for names that don't match any available tool;
-  resets `tool_choice` if it targets a removed tool
-- Matching is exact (`==`); `fetch_url` does not match `smart_fetch_url`
-- Runs on every normal forward before reaching the gateway;
-  soft-block modifications happen after the filter
-
-### Gateway proxy
-- `_stream()` forwards SSE lines from the gateway back to Open WebUI
-- `_call()` handles non-streaming requests
-- `_build_gateway_headers()` assembles auth, custom headers, and resolves
-  template variables (`{{USER_NAME}}`, `{{USER_ID}}`, etc.)
-
----
-
-## 11. Flow Diagrams
-
-### Normal Turn (No Loop)
-
-```
-User: "Search for AI trends" via "DeepSeek v4 Assistant (Protegido)"
-     │
-     ▼
-Open WebUI: system prompt applied → body["model"] = "pipe-id.deepseek/deepseek-v4-flash"
-     │
-     ▼
-pipe()
-  ├─ real_model = "deepseek/deepseek-v4-flash"
-  ├─ history = [] → no loop
-  ├─ no injections
-  └─ Forward to Bifrost → POST /v1/chat/completions
-     │
-     ▼
-LLM: tool_calls [search_web("AI trends")]
-OWUI executes tool, sends continuation
-
-pipe()  ← continuation
-  ├─ history = [search_web] → no loop
-  └─ Forward to Bifrost
-
-LLM: "Here are the AI trends..." ✅
-```
-
-### Loop Detected — Escalation Within One Turn
-
-```
-pipe() → forward → LLM: tool_calls [get_weather("Paris")]
-OWUI executes tool
-
-pipe()  ← continuation
-  ├─ history = [get_weather("Paris")]
-  └─ no loop → forward
-
-LLM: tool_calls [get_weather("Paris")]  ← same call
-OWUI executes tool
-
-pipe()  ← continuation
-  ├─ history = [get_weather("Paris") × 2]
-  ├─ duplicates detected (threshold=2)
-  ├─ consecutive=2 → inject WARNING
-  └─ Forward to Bifrost (with warning)
-
-LLM: tool_calls [get_weather("Paris")]  ← ignores warning
-OWUI executes tool
-
-pipe()  ← continuation
-  ├─ history = [get_weather("Paris") × 3]
-  ├─ consecutive=3, final_pos=3 → inject FINAL WARNING
-  └─ Forward to Bifrost (with final warning)
-
-LLM: tool_calls [get_weather("Paris")]  ← still ignores
-OWUI executes tool
-
-pipe()  ← continuation
-  ├─ history = [get_weather("Paris") × 4]
-  ├─ consecutive=4 ≥ N(=4)
-  └─ _soft_block(bad_tool="get_weather")
-
-🛑 Soft-blocked: only `get_weather` removed from body["tools"], instruction
-    injected, forwarded to gateway. LLM receives all results but cannot call
-    `get_weather`. Other tools (if any) remain available.
+body["tools"][:] = [
+    t for t in tools
+    if t.get("function", {}).get("name") not in blocked
+]
 ```
 
 ---
 
-## 12. Token Efficiency
+## 11. Guard Message Builder
+
+The single function `_build_guard_message(state)` produces all system message
+content based on the current state dict:
+
+| status | Example message |
+|--------|----------------|
+| `ok` | `"14/15 tool calls remaining."` |
+| `warning` | `"smart_fetch_url called 2x with the same arguments. 13/15 tool calls remaining. Change your approach or summarise."` |
+| `final_warning` | `"smart_fetch_url called 3x... 12/15 tool calls remaining. This is your final warning."` |
+| `blocked_tool` | `"TOOL REMOVED: smart_fetch_url blocked after 4 identical calls. 11/15 tool calls remaining. Other tools are still available or you may summarise now."` |
+| `runaway` | `"TOOL LIMIT REACHED: 15/15. Tools used in this turn have been removed."` |
+
+---
+
+## 12. UI Events
+
+| State | Notification | Type |
+|-------|-------------|:----:|
+| WARNING | `"🛡️ {tool} called {n}x with same args."` | `info` |
+| FINAL WARNING | `"🛡️ {tool} called {n}x. Final warning."` | `warning` |
+| Blocked tool | `"🛡️ {tool} blocked after {n} identical calls."` | `error` |
+| Runaway | `"🛡️ Tool call limit reached ({n}/{max})."` | `error` |
+| Counter | `"🛡️ Remaining tool calls: {remaining}/{max}"` | `status` |
+
+---
+
+## 13. Valves
+
+| Valve | Default | Description |
+|-------|---------|-------------|
+| `GATEWAY_BASE_URL` | `""` | Base URL for the OpenAI-compatible gateway |
+| `GATEWAY_AUTH_HEADER` | `"x-bf-vk"` | HTTP header name for the API key |
+| `GATEWAY_AUTH_VALUE` | `""` | Credential value (password field) |
+| `GATEWAY_CUSTOM_HEADERS` | `""` | JSON object of extra headers with template variable support |
+| `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before soft-block. `0` = disabled |
+| `MAX_CONSECUTIVE_BEFORE_BLOCK` | `4` | Consecutive identical calls before soft-block (min 3) |
+| `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to remove |
+
+**Validation:** `MAX_TOOL_CALLS_PER_TURN` must be > `MAX_CONSECUTIVE_BEFORE_BLOCK`
+when both are enabled, enforced by Pydantic's `@model_validator`.
+
+---
+
+## 14. Custom Headers with Templates
+
+```json
+{
+  "x-bf-dim-host": "myhost",
+  "x-authenticated-user": "{{USER_NAME}}",
+  "x-user-id": "{{USER_ID}}"
+}
+```
+
+Supports: `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`,
+`{{CHAT_ID}}`, `{{MESSAGE_ID}}`.
+
+---
+
+## 15. Token Efficiency
 
 | Scenario | Extra tokens | Notes |
 |----------|:------------:|-------|
-| Normal operation | 0 | Pipe forwards body as-is |
+| Normal operation (no warnings) | 0 | Pipe forwards body as-is |
 | Loop warning | ~60-80 | Injected system message |
 | Final warning | ~70-90 | Second injection |
-| Soft-block (runaway limit) | ~60-80 (system msg) + LLM response | Pipe removes tools, injects instruction, forwards |
-| Soft-block (loop) | ~60-80 (system msg) + LLM response | Same — all results preserved, LLM summarises |
+| Soft-block (either type) | ~60-80 (system msg) + LLM response | All results preserved, LLM summarises |
 
 ---
 
-## 13. Edge Cases
+## 16. Edge Cases
 
 | Case | Handling |
 |------|----------|
-| No tool calls in current turn | No loop detection. Forward unchanged. |
-
+| No tool calls in current turn | Forward unchanged. No analysis needed. |
 | Gateway unreachable during `pipes()` | Returns cached model list. Selector still works. |
-| Gateway unreachable during `pipe()` | Exception caught → error string. |
-| Warning already present from earlier | Formula-based: consecutive count determines action, no repeated injections. |
-| Bifrost adds a new model | Appears automatically on next model refresh. |
-| `MAX_CONSECUTIVE_BEFORE_BLOCK = 3` | WARNING on consecutive=2, soft-block at consecutive=3 (no FINAL WARNING). |
+| Gateway unreachable during `pipe()` | Exception caught → descriptive error string returned. |
+| Both loop AND total-turn limit simultaneously | Loop wins — `blocked_tool` fires instead of `runaway`, keeping non-looping tools available. |
+| `MAX_CONSECUTIVE_BEFORE_BLOCK = 3` | WARNING at consecutive=2, soft-block at consecutive=3 (no FINAL WARNING). |
 | `MAX_CONSECUTIVE_BEFORE_BLOCK = 6` | WARNING at 2, FINAL WARNING at 4 (≈60%), soft-block at 6. |
-| `MAX_TOOL_CALLS_PER_TURN ≤ MAX_CONSECUTIVE_BEFORE_BLOCK` | Error at config time — runaway would fire before loop detection, making loop invisible. |
+| `MAX_TOOL_CALLS_PER_TURN ≤ MAX_CONSECUTIVE_BEFORE_BLOCK` | Error at config time — Pydantic rejects the configuration. |
+| `TOOL_BLOCKLIST` contains unknown names | Logged as warnings; only matching tools are blocked. |
+| `tool_choice` targets a blocked tool | Reset so the LLM can choose freely. |
 | Workspace model has no system prompt | Open WebUI skips system prompt injection. Pipe unaffected. |
 
 ---
 
-## 14. Validation Criteria
+## 17. Risk Analysis
 
-1. **Dynamic model discovery**: `pipes()` queries the gateway and populates
-   the selector without hardcoded model IDs.
+### Mitigated risks
 
-2. **Cache with fallback**: If the gateway is unreachable, `pipes()` returns
-   the last successful cache so protected models don't vanish.
-
-3. **Transparent proxy**: When no loop is detected, the pipe forwards
-   `body` to the gateway and streams the response back unchanged.
-
-4. **Loop detection in real time**: When consecutive identical tool calls are
-   detected, a warning is injected before the next LLM call.
-
-5. **Escalation**: Formula-based: WARNING at consecutive=2, FINAL WARNING at
-   ≈60% of threshold (if N > 3), soft-block at threshold (only the looping tool
-   removed from `body["tools"]`, instruction injected, forwarded to gateway).
-
-6. **Runaway limit**: When tool calls in a turn exceed
-   `MAX_TOOL_CALLS_PER_TURN`, the pipe soft-blocks immediately (all tools removed,
-   instruction injected, forwarded to gateway).
-
-7. **Soft-block preserves LLM call**: Unlike force-termination, soft-block
-   forwards to the gateway with all tool results preserved and an instruction
-   to summarise. The LLM call still happens, but no tools are available.
-
-8. **Respects workspace model config**: System prompts, tools, and
-   parameters from the workspace model are applied by Open WebUI before
-   the pipe runs. The pipe does not touch them.
-
-9. **Works with any model the gateway exposes**: Adding a provider to
-   Bifrost adds a protected sub-pipe automatically.
-
-10. **Single set of credentials**: Only `GATEWAY_BASE_URL` and
-    `GATEWAY_AUTH_VALUE` are needed — all models share the same gateway.
-
-11. **Tool blocklist**: Setting `TOOL_BLOCKLIST` to `"delete_file, terminal_execute"`
-    removes only those tools. Everything else remains visible.
-
-12. **Flexible input format**: The valve accepts commas, newlines, or
-    mixed input. `"delete_file, terminal_execute"` and
-    `"delete_file\nterminal_execute"` produce the same set.
-
-13. **Unknown name detection**: If a name in `TOOL_BLOCKLIST` does not
-    match any available tool, a warning is logged and the name is ignored.
-    The pipe does not break.
-
-14. **Exact match**: `fetch_url` blocks only `fetch_url`, not
-    `smart_fetch_url`. Matching is done with `==` via set membership.
-
-15. **tool_choice cleanup**: If `tool_choice` targets a blocked tool,
-    it is reset so the LLM can choose freely.
-
-
+| # | Risk | Mitigation |
+|:-:|------|------------|
+| R1 | Shallow copy discards reassigned `body["tools"]` | In-place slice assignment `tools[:] = [...]` mutates the shared list. |
+| R2 | Middleware executes tools from `metadata["tools"]` | Clear `__metadata__["tools"]` alongside `body["tools"]`. |
+| R3 | `tool_choice: "none"` causes raw DSML leakage | Leave `tool_choice` unset; Bifrost parses DSML into harmless `tool_calls` against empty metadata. |
+| R4 | DSML buffer corrupts `reasoning_content` | No buffering in `_stream()` — transparent SSE proxy. |
