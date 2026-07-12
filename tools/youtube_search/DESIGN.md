@@ -618,7 +618,7 @@ async def youtube_tool(
     playlist_id: str = "",    # For action=playlist: playlist ID
     max_results: Optional[int] = None,  # If omitted, falls back to UserValve default_results
     sort: str = "relevance",  # For search|channel: sort order (relevance, views, date, duration)
-    search_type: str = "video", # For action=search: video, playlist, or channel
+    type: str = "video", # For action=search: video, playlist, or channel
     language: Optional[str] = None,  # If omitted, falls back to UserValve preferred_language
     __event_emitter__=None,   # Injected by Open WebUI for status/progress events
 ) -> str:
@@ -638,7 +638,7 @@ async def youtube_tool(
         In any case, clamped by UserValve max_results (personal ceiling)
         and AdminValve max_results (global ceiling).
     :param sort: Sort order (relevance, views, date, duration)
-    :param search_type: Content type for search (video, playlist, channel)
+    :param type: Content type for search (video, playlist, channel)
     :param language: Language code for transcript.
         If omitted, falls back to UserValve preferred_language.
         The UserValve does not override the LLM: if the agent passes an
@@ -689,7 +689,7 @@ await __event_emitter__(
 
 | `action` | Required params | Optional params | Calls | Returns |
 |---|---|---|---|---|
-| `search` | `query` | `max_results`, `sort`, `search_type` | `GET /search` | List of results with `id`, `title`, `type`, etc. |
+| `search` | `query` | `max_results`, `sort`, `type` | `GET /search` | List of results with `id`, `title`, `type`, etc. |
 | `video` | `video_id` | — | `GET /video` | Full video metadata (likes, date, tags) |
 | `channel` | `channel_name` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
 | `playlist` | `playlist_id` | `max_results` | `GET /playlist` | Playlist info + list of videos |
@@ -717,10 +717,10 @@ On errors:
 2. If likes or upload date needed → `youtube_tool(action="video", video_id="dQw4w9WgXcQ")`
 
 ### Flow 2: Search non-video content
-1. `youtube_tool(action="search", query="machine learning", max_results=3, search_type="playlist")`
+1. `youtube_tool(action="search", query="machine learning", max_results=3, type="playlist")`
 2. Get playlist contents → `youtube_tool(action="playlist", playlist_id="PL...", max_results=10)`
 
-1. `youtube_tool(action="search", query="python", max_results=3, search_type="channel")`
+1. `youtube_tool(action="search", query="python", max_results=3, type="channel")`
 2. Get channel videos → `youtube_tool(action="channel", channel_name="@Fireship", max_results=10)`
 
 ### Flow 3: Explore channel or playlist
@@ -741,8 +741,8 @@ On errors:
 | "Search for Rick Astley videos" | `youtube_tool(action="search", query="rick astley", max_results=5)` |
 | "Find the most viewed ones on this topic" | `youtube_tool(action="search", query="topic", max_results=5, sort="views")` |
 | "Show the longest videos about..." | `youtube_tool(action="search", query="...", max_results=5, sort="duration")` |
-| "Find playlists about machine learning" | `youtube_tool(action="search", query="machine learning", max_results=5, search_type="playlist")` |
-| "Find channels that teach Python" | `youtube_tool(action="search", query="python", max_results=5, search_type="channel")` |
+| "Find playlists about machine learning" | `youtube_tool(action="search", query="machine learning", max_results=5, type="playlist")` |
+| "Find channels that teach Python" | `youtube_tool(action="search", query="python", max_results=5, type="channel")` |
 | "Show me what's on the @Fireship channel" | `youtube_tool(action="channel", channel_name="@Fireship", max_results=10, sort="views")` |
 | "List videos in this playlist..." | `youtube_tool(action="playlist", playlist_id="PLblh5JKOoLU...", max_results=20)` |
 | "How many views does this video have?" | `youtube_tool(action="video", video_id="dQw4w9WgXcQ")` → `views` |

@@ -109,9 +109,9 @@ class Tools:
             params = {
                 "query": kwargs["query"],
                 "max_results": self._resolve_max_results(kwargs.get("max_results")),
-                "type": kwargs.get("search_type", "video"),
+                "type": kwargs.get("type", "video"),
             }
-            if kwargs.get("sort") and kwargs["search_type"] in ("video", ""):
+            if kwargs.get("sort") and kwargs.get("type", "video") in ("video", ""):
                 params["sort"] = kwargs["sort"]
             return f"{base}/search", params
 
@@ -393,7 +393,7 @@ class Tools:
         playlist_id: str = "",
         max_results: Optional[int] = None,
         sort: str = "relevance",
-        search_type: str = "video",
+        type: str = "video",
         language: Optional[str] = None,
         __event_emitter__=None,
     ) -> str:
@@ -413,7 +413,7 @@ class Tools:
             - Use ``transcript`` to get timed transcript fragments.
 
             **Workflow for channels:**
-            1. First call ``action="search"`` with ``search_type="channel"`` to find the channel
+            1. First call ``action="search"`` with ``type="channel"`` to find the channel
                and get its @handle (e.g. ``@NateGentile7``).
             2. Then call ``action="channel"`` with ``channel_name="@NateGentile7"`` to list its videos.
 
@@ -426,7 +426,7 @@ class Tools:
             Accepts @handle (``@NateGentile7``), handle without @ (``NateGentile7``),
             or UCID (``UC36xmz34q...``).
             Does NOT accept display names (e.g. ``"Nate Gentile"``) —
-            use ``action="search"`` with ``search_type="channel"`` to find the handle first.
+            use ``action="search"`` with ``type="channel"`` to find the handle first.
         :param playlist_id: Playlist ID (required for action=playlist)
         :param max_results: Results requested by the LLM.
             If omitted, falls back to UserValve default_results.
@@ -434,7 +434,7 @@ class Tools:
             and AdminValve max_results (global ceiling).
         :param sort: Sort order. For ``search`` (videos): relevance, views, duration.
             For ``channel``: views, date, duration. ``relevance`` only applies to search.
-        :param search_type: Content type for search: video (default), playlist, channel.
+        :param type: Content type for search: video (default), playlist, channel.
             Use ``channel`` to find a channel by name and get its @handle.
         :param language: Language code for transcript.
             If omitted, falls back to UserValve preferred_language.
@@ -467,7 +467,7 @@ class Tools:
                 playlist_id=playlist_id,
                 max_results=max_results,
                 sort=sort,
-                search_type=search_type,
+                type=type,
                 language=language,
             )
         except ValueError as e:
@@ -488,7 +488,7 @@ class Tools:
             if action == "channel" and data["error"] == "channel_not_found":
                 return self._fmt_error(
                     data["error"],
-                    "Use search with search_type to find the exact @handle first",
+                    "Use search with type='channel' to find the exact @handle first",
                 )
             return self._fmt_error(data["error"], data.get("detail", ""))
 
