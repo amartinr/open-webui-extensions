@@ -225,9 +225,6 @@ class Tools:
             if handle:
                 return f"https://youtube.com/{handle}"
             return f"https://youtube.com/channel/{id_}"
-        # Fallback: if no type is set, assume video by ID pattern
-        if id_ and len(id_) == 11:
-            return f"https://youtu.be/{id_}"
         return ""
 
     def _fmt_search_videos(self, query: str, results: list) -> str:
@@ -325,7 +322,7 @@ class Tools:
         if handle:
             lines.append(f"- **Handle:** {handle}")
         if subs:
-            lines.append(f"- **Subscribers:** {subs:,}" if isinstance(subs, int) else f"- **Subscribers:** {subs}")
+            lines.append(f"- **Subscribers:** {subs}")
         if url:
             lines.append(f"- **URL:** {url}")
 
