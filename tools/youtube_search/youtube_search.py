@@ -17,11 +17,6 @@ from pydantic import BaseModel, Field
 
 
 HARD_LIMIT = 50
-ENDPOINT_LIMITS = {
-    "search": 20,
-    "channel": 50,
-    "playlist": 50,
-}
 
 
 class Tools:
