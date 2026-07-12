@@ -1,9 +1,9 @@
 """
 title: YouTube Search
 id: youtube_search
-author: Your Name
-author_url: https://github.com/yourname
-git_url: https://github.com/yourname/youtube_search.git
+author: A. Martin
+author_url: https://github.com/amartinr
+git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Search YouTube videos, channels, playlists, get transcripts, and more.
 required_open_webui_version: 0.5.0
 requirements: httpx
