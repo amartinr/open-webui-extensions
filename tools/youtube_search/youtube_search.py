@@ -322,7 +322,7 @@ class Tools:
         if handle:
             lines.append(f"- **Handle:** {handle}")
         if subs:
-            lines.append(f"- **Subscribers:** {subs}")
+            lines.append(f"- **Subscribers:** {subs:,}" if isinstance(subs, int) else f"- **Subscribers:** {subs}")
         if url:
             lines.append(f"- **URL:** {url}")
 
