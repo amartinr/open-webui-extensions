@@ -133,7 +133,7 @@ class Tools:
         elif action == "list":
             if rtype == "channel":
                 params = {
-                    "name": kwargs["channel_name"],
+                    "name": kwargs["handle"],
                     "max_results": self._resolve_max_results(kwargs.get("max_results")),
                 }
                 channel_sorts = ("views", "date", "duration")
@@ -394,7 +394,7 @@ class Tools:
         type: str = "video",
         query: str = "",
         video_id: str = "",
-        channel_name: str = "",
+        handle: str = "",
         playlist_id: str = "",
         max_results: Optional[int] = None,
         sort: str = "relevance",
@@ -426,19 +426,19 @@ class Tools:
             **list** — enumerate videos from a known resource.
               Does NOT search. You need the identifier first.
 
-              * type=channel → needs channel_name (@handle, handle, or UCID)
+              * type=channel → needs handle (@handle, handle, or UCID)
               * type=playlist → needs playlist_id
 
             **Workflow for channels:**
               1. action=search, type=channel, query="Nate Gentile"
                  → returns @NateGentile7
-              2. action=list, type=channel, channel_name="@NateGentile7"
+              2. action=list, type=channel, handle="@NateGentile7"
                  → lists his videos
 
         :param type: Resource type: video (default), channel, playlist, transcript.
         :param query: Search term (required for action=search)
         :param video_id: YouTube video ID (required for action=get with type=video|transcript)
-        :param channel_name: Channel identifier (required for action=list with type=channel).
+        :param handle: Channel identifier (required for action=list with type=channel).
             Accepts @handle (``@NateGentile7``), handle without @ (``NateGentile7``),
             or UCID (``UC36xmz34q...``).
             Does NOT accept display names — use ``action=search, type=channel`` to find
@@ -474,7 +474,7 @@ class Tools:
                 type=type,
                 query=query,
                 video_id=video_id,
-                channel_name=channel_name,
+                handle=handle,
                 playlist_id=playlist_id,
                 max_results=max_results,
                 sort=sort,

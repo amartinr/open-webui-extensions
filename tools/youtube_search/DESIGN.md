@@ -616,7 +616,7 @@ async def youtube_tool(
     type: str = "video",      # Resource: video | channel | playlist | transcript
     query: str = "",          # For action=search: search term
     video_id: str = "",       # For action=get + type=video|transcript
-    channel_name: str = "",   # For action=list + type=channel
+    handle: str = "",   # For action=list + type=channel
     playlist_id: str = "",    # For action=list + type=playlist
     max_results: Optional[int] = None,  # If omitted, falls back to UserValve default_results
     sort: str = "relevance",  # Sort order
@@ -639,7 +639,7 @@ async def youtube_tool(
     :param type: Resource type: video, channel, playlist, transcript
     :param query: Search term (required for action=search)
     :param video_id: YouTube video ID (required for get+video|transcript)
-    :param channel_name: @handle, handle, or UCID (required for list+channel).
+    :param handle: @handle, handle, or UCID (required for list+channel).
         Does NOT accept display names.
     :param playlist_id: Playlist ID (required for list+playlist)
     :param max_results: Max results. Resolved against UserValve/AdminValve.
@@ -696,7 +696,7 @@ await __event_emitter__(
 | `search` | `playlist` | `query` | `max_results` | `GET /search` | List of playlists with id |
 | `get` | `video` | `video_id` | — | `GET /video` | Full video metadata (likes, date, tags) |
 | `get` | `transcript` | `video_id` | `language` | `GET /transcript` | Timed transcript fragments |
-| `list` | `channel` | `channel_name` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
+| `list` | `channel` | `handle` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
 | `list` | `playlist` | `playlist_id` | `max_results` | `GET /playlist` | Playlist info + list of videos |
 
 ### Error handling
@@ -725,10 +725,10 @@ On errors:
 2. Get playlist contents → `youtube_tool(action="list", type="playlist", playlist_id="PL...", max_results=10)`
 
 1. `youtube_tool(action="search", type="channel", query="python", max_results=3)`
-2. Get channel videos → `youtube_tool(action="list", type="channel", channel_name="@Fireship", max_results=10)`
+2. Get channel videos → `youtube_tool(action="list", type="channel", handle="@Fireship", max_results=10)`
 
 ### Flow 3: Explore channel or playlist
-1. `youtube_tool(action="list", type="channel", channel_name="@statquest", max_results=5, sort="views")`
+1. `youtube_tool(action="list", type="channel", handle="@statquest", max_results=5, sort="views")`
 2. Get details of one video → `youtube_tool(action="get", type="video", video_id="h5o1n1QMcmM")`
 3. Get transcript → `youtube_tool(action="get", type="transcript", video_id="h5o1n1QMcmM", language="en")`
 
@@ -747,7 +747,7 @@ On errors:
 | "Show the longest videos about..." | `youtube_tool(action="search", type="video", query="...", max_results=5, sort="duration")` |
 | "Find playlists about machine learning" | `youtube_tool(action="search", type="playlist", query="machine learning", max_results=5)` |
 | "Find channels that teach Python" | `youtube_tool(action="search", type="channel", query="python", max_results=5)` |
-| "Show me what's on the @Fireship channel" | `youtube_tool(action="list", type="channel", channel_name="@Fireship", max_results=10, sort="views")` |
+| "Show me what's on the @Fireship channel" | `youtube_tool(action="list", type="channel", handle="@Fireship", max_results=10, sort="views")` |
 | "List videos in this playlist..." | `youtube_tool(action="list", type="playlist", playlist_id="PLblh5JKOoLU...", max_results=20)` |
 | "How many views does this video have?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `views` |
 | "When was it published?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `upload_date` |
@@ -764,7 +764,7 @@ On errors:
 - When the user provides a video URL, extract the 11-character video ID after `v=` and use it as `video_id`.
 - The API does not return `url` fields. Always construct URLs using the patterns in the URL Construction section.
 - Playlist and channel search results don't include per-video stats. Use `list` with the appropriate type to get those.
-- `channel_name` accepts @handle (`@statquest`), handle without @ (`statquest`), or UCID.
+- `channel` accepts @handle (`@statquest`), handle without @ (`statquest`), or UCID.
 
 ---
 
