@@ -81,7 +81,7 @@ Search YouTube by text query. Searches for videos, playlists, or channels.
       "views": 1791671680,
       "likes": null,
       "duration": 214,
-      "upload_date": "",
+      "upload_date": "2009-10-25",
       "description": "The official video for...",
       "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg",
       "tags": [],
@@ -142,7 +142,8 @@ Search YouTube by text query. Searches for videos, playlists, or channels.
 | `channel` | `https://www.youtube.com/channel/{id}` |
 
 **Notes:**
-- `likes` and `upload_date` are **always null/empty** in search results for videos. Use `/video` for those fields.
+- `likes` is **always null** in search results for videos. Use `/video` for likes.
+- `upload_date` is now returned in search results (formatted as `YYYY-MM-DD`).
 - The `sort` parameter only applies to `type=video`. For playlists/channels the order is YouTube's default ranking.
 - Playlist results include `video_count` (int or null).
 - Channel results include `handle` (string starting with @) and `subscriber_count` (string or null).
@@ -178,7 +179,7 @@ Get detailed metadata for a single video.
   "views": 1791671680,
   "likes": 19239045,
   "duration": 213,
-  "upload_date": "20091025",
+  "upload_date": "2009-10-25",
   "description": "The official video for...",
   "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg",
   "tags": ["music", "80s"]
@@ -220,7 +221,7 @@ List videos from a YouTube channel.
       "title": "Optimization with Linear Programming",
       "views": 11000,
       "duration": 1442,
-      "upload_date": "",
+      "upload_date": "2024-03-15",
       "thumbnail": "https://i.ytimg.com/vi/h5o1n1QMcmM/mqdefault.jpg"
     }
   ]
@@ -228,7 +229,7 @@ List videos from a YouTube channel.
 ```
 
 **Notes:**
-- `upload_date` may be empty (flat extraction for speed). Use `/video` per-video for exact dates.
+- `upload_date` is now returned in channel video listings (formatted as `YYYY-MM-DD`).
 - The `handle` field is populated for both @handle and UCID queries — yt-dlp extracts it from `uploader_id`. It is only empty if YouTube itself does not return it.
 
 **Errors:**
@@ -353,7 +354,7 @@ The tool must convert the API's JSON response into **Markdown** before returning
 - **URLs** as Markdown links: `[title](url)`. Never return bare `id` fields.
 - **Duration** in `m:ss` format (e.g. `765` → `12:45`, `61` → `1:01`).
 - **Views, likes** with thousand separators (e.g. `1791658734` → `1,791,658,734`).
-- **Upload date** as `YYYY-MM-DD` (e.g. `20091025` → `2009-10-25`).
+- **Upload date** as `YYYY-MM-DD` (e.g. `2009-10-25`).
 - **Omit null/empty fields.** Do not include fields like `likes: null` or `tags: []`.
 - **Thumbnail** — include the URL as returned by the API. For videos it follows a predictable pattern (`https://i.ytimg.com/vi/{id}/mqdefault.jpg`), for channels it is a non-derivable `yt3.googleusercontent.com` URL. Always pass it through rather than reconstructing it.
 - **Description** is truncated to ~200 characters at the list level. Keep full description for `action="get"` + `type="video"`.
@@ -369,6 +370,7 @@ The tool must convert the API's JSON response into **Markdown** before returning
 - **Channel:** {channel}
 - **Views:** {views:,}
 - **Duration:** {m:ss}
+- **Published:** {upload_date: YYYY-MM-DD}
 - **Thumbnail:** {thumbnail}
 - **Description:** {description[:200]...}
 
@@ -442,10 +444,10 @@ Omits rows for any null/empty field (e.g. no `Likes` row if `likes` is null).
 
 ### Videos
 
-| # | Title | Views | Duration |
-|---|---|---|---|
-| 1 | [{title}](https://youtu.be/{id}) | {views:,} | {m:ss} |
-| 2 | [{title}](https://youtu.be/{id}) | {views:,} | {m:ss} |
+| # | Title | Views | Duration | Published |
+|---|---|---|---|---|
+| 1 | [{title}](https://youtu.be/{id}) | {views:,} | {m:ss} | {upload_date: YYYY-MM-DD} |
+| 2 | [{title}](https://youtu.be/{id}) | {views:,} | {m:ss} | {upload_date: YYYY-MM-DD} |
 ```
 
 ---
@@ -460,10 +462,10 @@ Omits rows for any null/empty field (e.g. no `Likes` row if `likes` is null).
 
 ### Videos
 
-| # | Title | Views | Duration |
-|---|---|---|---|
-| 1 | [{title}](https://youtu.be/{id}) | {views:,} | {m:ss} |
-| 2 | [{title}](https://youtu.be/{id}) | {views:,} | {m:ss} |
+| # | Title | Views | Duration | Published |
+|---|---|---|---|---|
+| 1 | [{title}](https://youtu.be/{id}) | {views:,} | {m:ss} | {upload_date: YYYY-MM-DD} |
+| 2 | [{title}](https://youtu.be/{id}) | {views:,} | {m:ss} | {upload_date: YYYY-MM-DD} |
 ```
 
 ---
@@ -760,7 +762,7 @@ On errors:
 
 **Flow tips for the LLM:**
 - For lists with sorting (`views`, `duration`), present results ordered from highest to lowest.
-- `likes` and `upload_date` are only available via `action="get"` + `type="video"`, not via search. If the user asks about them, always call `get+video`.
+- `likes` is only available via `action="get"` + `type="video"`, not via search. `upload_date` is now included in search results and video listings, so you can answer "when was it published?" without an extra `get+video` call.
 - When the user provides a video URL, extract the 11-character video ID after `v=` and use it as `video_id`.
 - The API does not return `url` fields. Always construct URLs using the patterns in the URL Construction section.
 - Playlist and channel search results don't include per-video stats. Use `list` with the appropriate type to get those.

@@ -234,6 +234,7 @@ class Tools:
             channel = r.get("channel", "")
             views = r.get("views")
             duration = r.get("duration")
+            upload_date = r.get("upload_date", "")
             thumb = r.get("thumbnail", "")
             desc = r.get("description", "")
 
@@ -244,6 +245,8 @@ class Tools:
                 lines.append(f"- **Views:** {self._fmt_number(views)}")
             if duration is not None:
                 lines.append(f"- **Duration:** {self._fmt_duration(duration)}")
+            if upload_date:
+                lines.append(f"- **Published:** {self._fmt_date(upload_date)}")
             if thumb:
                 lines.append(f"- **Thumbnail:** {thumb}")
             if desc:
@@ -329,15 +332,17 @@ class Tools:
             lines.append(f"- **URL:** {url}")
 
         if videos:
-            lines.extend(["", "### Videos", "", "| # | Title | Views | Duration |"])
+            lines.extend(["", "### Videos", "", "| # | Title | Views | Duration | Published |"])
             for i, v in enumerate(videos, 1):
                 vtitle = v.get("title", "Untitled")
                 vurl = f"https://youtu.be/{v.get('id', '')}"
                 vviews = v.get("views")
                 vdur = v.get("duration")
+                vupload = v.get("upload_date", "")
                 views_str = self._fmt_number(vviews) if vviews is not None else ""
                 dur_str = self._fmt_duration(vdur) if vdur is not None else ""
-                lines.append(f"| {i} | [{vtitle}]({vurl}) | {views_str} | {dur_str} |")
+                date_str = self._fmt_date(vupload) if vupload else ""
+                lines.append(f"| {i} | [{vtitle}]({vurl}) | {views_str} | {dur_str} | {date_str} |")
 
         return "\n".join(lines)
 
@@ -359,15 +364,17 @@ class Tools:
             lines.append(f"- **URL:** {url}")
 
         if videos:
-            lines.extend(["", "### Videos", "", "| # | Title | Views | Duration |"])
+            lines.extend(["", "### Videos", "", "| # | Title | Views | Duration | Published |"])
             for i, v in enumerate(videos, 1):
                 vtitle = v.get("title", "Untitled")
                 vurl = f"https://youtu.be/{v.get('id', '')}"
                 vviews = v.get("views")
                 vdur = v.get("duration")
+                vupload = v.get("upload_date", "")
                 views_str = self._fmt_number(vviews) if vviews is not None else ""
                 dur_str = self._fmt_duration(vdur) if vdur is not None else ""
-                lines.append(f"| {i} | [{vtitle}]({vurl}) | {views_str} | {dur_str} |")
+                date_str = self._fmt_date(vupload) if vupload else ""
+                lines.append(f"| {i} | [{vtitle}]({vurl}) | {views_str} | {dur_str} | {date_str} |")
 
         return "\n".join(lines)
 
