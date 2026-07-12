@@ -485,7 +485,15 @@ class Tools:
 
         # --- handle API error ---
         if "error" in data:
-            return self._fmt_error(data["error"], data.get("detail", ""))
+            detail = data.get("detail", "")
+            if action == "channel" and data["error"] == "channel_not_found":
+                hint = (
+                    " Use action='search' with search_type='channel' first "
+                    "to find the channel's @handle, then use action='channel' "
+                    "with that handle."
+                )
+                detail = detail + hint
+            return self._fmt_error(data["error"], detail)
 
         # --- format response ---
         if action == "search":
