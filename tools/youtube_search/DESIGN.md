@@ -47,24 +47,7 @@ The API listens on **port 8700**. Default Valve: `http://localhost:8700/` (confi
 
 ## API Endpoints
 
-### `GET /health`
 
-Check service status.
-
-**Response (200):**
-```json
-{
-  "status": "ok",
-  "yt_dlp_version": "2026.07.04",
-  "deno_available": true,
-  "deno_version": "2.4.0",
-  "proxy_configured": false,
-  "ca_bundle": null,
-  "ssl_verification": true
-}
-```
-
----
 
 ### `GET /search`
 
@@ -499,19 +482,7 @@ Timestamps use `m:ss` format (e.g. `1.4` → `0:01`, `120.0` → `2:00`).
 
 ---
 
-### `health`
 
-```markdown
-## Service Status
-
-- **Status:** ok
-- **yt-dlp version:** 2026.07.04
-- **Deno version:** 2.4.0
-- **Proxy configured:** no
-- **SSL verification:** yes
-```
-
----
 
 ### Error
 
@@ -640,7 +611,7 @@ completamente asíncronas del engine:
 ```python
 async def youtube_tool(
     self,
-    action: str,              # Required. One of: search, video, channel, playlist, transcript, health
+    action: str,              # Required. One of: search, video, channel, playlist, transcript
     query: str = "",          # For action=search: search term
     video_id: str = "",       # For action=video|transcript: YouTube video ID
     channel_name: str = "",   # For action=channel: @handle, handle, or UCID
@@ -657,7 +628,7 @@ async def youtube_tool(
     Dispatches to the correct API endpoint based on `action` and returns
     formatted Markdown.
 
-    :param action: One of: search, video, channel, playlist, transcript, health
+    :param action: One of: search, video, channel, playlist, transcript
     :param query: Search term (required for action=search)
     :param video_id: YouTube video ID (required for action=video|transcript)
     :param channel_name: @handle, handle, or UCID (required for action=channel)
@@ -723,7 +694,6 @@ await __event_emitter__(
 | `channel` | `channel_name` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
 | `playlist` | `playlist_id` | `max_results` | `GET /playlist` | Playlist info + list of videos |
 | `transcript` | `video_id` | `language` | `GET /transcript` | Timed transcript fragments |
-| `health` | — | — | `GET /health` | Service status |
 
 ### Error handling
 

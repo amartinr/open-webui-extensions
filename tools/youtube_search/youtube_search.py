@@ -145,9 +145,6 @@ class Tools:
                 params["language"] = lang
             return f"{base}/transcript", params
 
-        elif action == "health":
-            return f"{base}/health", {}
-
         raise ValueError(f"Unknown action: {action}")
 
     # ------------------------------------------------------------------ #
@@ -379,18 +376,6 @@ class Tools:
             lines.append(f"| {m}:{s:02d} | {text} |")
         return "\n".join(lines)
 
-    def _fmt_health(self, data: dict) -> str:
-        lines = [
-            "## Service Status",
-            "",
-            f"- **Status:** {data.get('status', 'unknown')}",
-            f"- **yt-dlp version:** {data.get('yt_dlp_version', 'N/A')}",
-            f"- **Deno version:** {data.get('deno_version', 'N/A')}",
-            f"- **Proxy configured:** {'yes' if data.get('proxy_configured') else 'no'}",
-            f"- **SSL verification:** {'yes' if data.get('ssl_verification') else 'no'}",
-        ]
-        return "\n".join(lines)
-
     def _fmt_error(self, error_code: str, detail: str) -> str:
         return f"**Error:** {error_code}\n{detail}"
 
@@ -417,7 +402,7 @@ class Tools:
         Dispatches to the correct API endpoint based on `action` and returns
         formatted Markdown.
 
-        :param action: One of: search, video, channel, playlist, transcript, health
+        :param action: One of: search, video, channel, playlist, transcript
         :param query: Search term (required for action=search)
         :param video_id: YouTube video ID (required for action=video|transcript)
         :param channel_name: @handle, handle, or UCID (required for action=channel)
@@ -441,7 +426,7 @@ class Tools:
             "channel": "Fetching channel info...",
             "playlist": "Fetching playlist info...",
             "transcript": "Fetching transcript...",
-            "health": "Checking service status...",
+
         }
 
         await self._emit_status(
@@ -501,8 +486,5 @@ class Tools:
 
         elif action == "transcript":
             return self._fmt_transcript(data)
-
-        elif action == "health":
-            return self._fmt_health(data)
 
         return self._fmt_error("unexpected", f"Unhandled action: {action}")
