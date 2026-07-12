@@ -356,7 +356,7 @@ The tool must convert the API's JSON response into **Markdown** before returning
 - **Upload date** as `YYYY-MM-DD` (e.g. `20091025` → `2009-10-25`).
 - **Omit null/empty fields.** Do not include fields like `likes: null` or `tags: []`.
 - **Thumbnail** — include the URL as returned by the API. For videos it follows a predictable pattern (`https://i.ytimg.com/vi/{id}/mqdefault.jpg`), for channels it is a non-derivable `yt3.googleusercontent.com` URL. Always pass it through rather than reconstructing it.
-- **Description** is truncated to ~200 characters at the list level. Keep full description for `action="video"`.
+- **Description** is truncated to ~200 characters at the list level. Keep full description for `action="get"` + `type="video"`.
 
 ---
 
@@ -611,39 +611,40 @@ completamente asíncronas del engine:
 ```python
 async def youtube_tool(
     self,
-    action: str,              # Required. One of: search, video, channel, playlist, transcript
+    action: str,              # Verb: search | get | list
+    type: str = "video",      # Resource: video | channel | playlist | transcript
     query: str = "",          # For action=search: search term
-    video_id: str = "",       # For action=video|transcript: YouTube video ID
-    channel_name: str = "",   # For action=channel: @handle, handle, or UCID
-    playlist_id: str = "",    # For action=playlist: playlist ID
+    video_id: str = "",       # For action=get + type=video|transcript
+    channel_name: str = "",   # For action=list + type=channel
+    playlist_id: str = "",    # For action=list + type=playlist
     max_results: Optional[int] = None,  # If omitted, falls back to UserValve default_results
-    sort: str = "relevance",  # For search|channel: sort order (relevance, views, date, duration)
-    type: str = "video", # For action=search: video, playlist, or channel
-    language: Optional[str] = None,  # If omitted, falls back to UserValve preferred_language
-    __event_emitter__=None,   # Injected by Open WebUI for status/progress events
+    sort: str = "relevance",  # Sort order
+    language: Optional[str] = None,  # For get+transcript
+    __event_emitter__=None,   # Injected by Open WebUI
 ) -> str:
     """
-    Unified tool for querying YouTube via the YT DLP API.
+    Unified tool for YouTube. action (verb) + type (resource) determine the call.
 
-    Dispatches to the correct API endpoint based on `action` and returns
-    formatted Markdown.
+    :param action: Verb: search | get | list
 
-    :param action: One of: search, video, channel, playlist, transcript
+        search + type=video     → search videos
+        search + type=channel   → search channels (returns @handle)
+        search + type=playlist  → search playlists
+        get + type=video        → video metadata (likes, date, tags)
+        get + type=transcript   → timed transcript
+        list + type=channel     → list channel videos (needs @handle)
+        list + type=playlist    → list playlist videos (needs id)
+
+    :param type: Resource type: video, channel, playlist, transcript
     :param query: Search term (required for action=search)
-    :param video_id: YouTube video ID (required for action=video|transcript)
-    :param channel_name: @handle, handle, or UCID (required for action=channel)
-    :param playlist_id: Playlist ID (required for action=playlist)
-    :param max_results: Results requested by the LLM.
-        If omitted, falls back to UserValve default_results.
-        In any case, clamped by UserValve max_results (personal ceiling)
-        and AdminValve max_results (global ceiling).
-    :param sort: Sort order (relevance, views, date, duration)
-    :param type: Content type for search (video, playlist, channel)
-    :param language: Language code for transcript.
-        If omitted, falls back to UserValve preferred_language.
-        The UserValve does not override the LLM: if the agent passes an
-        explicit language, that takes precedence.
-    :param __event_emitter__: Injected by Open WebUI for emitting status events
+    :param video_id: YouTube video ID (required for get+video|transcript)
+    :param channel_name: @handle, handle, or UCID (required for list+channel).
+        Does NOT accept display names.
+    :param playlist_id: Playlist ID (required for list+playlist)
+    :param max_results: Max results. Resolved against UserValve/AdminValve.
+    :param sort: search+video → relevance/views/duration. list+channel → views/date/duration.
+    :param language: Language for get+transcript. Falls back to UserValve preferred_language.
+    :param __event_emitter__: Injected by Open WebUI
     """
 ```
 
@@ -687,13 +688,15 @@ await __event_emitter__(
 
 ### Actions
 
-| `action` | Required params | Optional params | Calls | Returns |
-|---|---|---|---|---|
-| `search` | `query` | `max_results`, `sort`, `type` | `GET /search` | List of results with `id`, `title`, `type`, etc. |
-| `video` | `video_id` | — | `GET /video` | Full video metadata (likes, date, tags) |
-| `channel` | `channel_name` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
-| `playlist` | `playlist_id` | `max_results` | `GET /playlist` | Playlist info + list of videos |
-| `transcript` | `video_id` | `language` | `GET /transcript` | Timed transcript fragments |
+| `action` | `type` | Required params | Optional params | Calls | Returns |
+|---|---|---|---|---|---|
+| `search` | `video` | `query` | `max_results`, `sort` | `GET /search` | List of videos |
+| `search` | `channel` | `query` | `max_results` | `GET /search` | List of channels with @handle |
+| `search` | `playlist` | `query` | `max_results` | `GET /search` | List of playlists with id |
+| `get` | `video` | `video_id` | — | `GET /video` | Full video metadata (likes, date, tags) |
+| `get` | `transcript` | `video_id` | `language` | `GET /transcript` | Timed transcript fragments |
+| `list` | `channel` | `channel_name` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
+| `list` | `playlist` | `playlist_id` | `max_results` | `GET /playlist` | Playlist info + list of videos |
 
 ### Error handling
 
@@ -713,23 +716,23 @@ On errors:
 ## Typical Usage Flows
 
 ### Flow 1: Search + metadata (videos)
-1. `youtube_tool(action="search", query="rick astley", max_results=3)`
-2. If likes or upload date needed → `youtube_tool(action="video", video_id="dQw4w9WgXcQ")`
+1. `youtube_tool(action="search", type="video", query="rick astley", max_results=3)`
+2. If likes or upload date needed → `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")`
 
 ### Flow 2: Search non-video content
-1. `youtube_tool(action="search", query="machine learning", max_results=3, type="playlist")`
-2. Get playlist contents → `youtube_tool(action="playlist", playlist_id="PL...", max_results=10)`
+1. `youtube_tool(action="search", type="playlist", query="machine learning", max_results=3)`
+2. Get playlist contents → `youtube_tool(action="list", type="playlist", playlist_id="PL...", max_results=10)`
 
-1. `youtube_tool(action="search", query="python", max_results=3, type="channel")`
-2. Get channel videos → `youtube_tool(action="channel", channel_name="@Fireship", max_results=10)`
+1. `youtube_tool(action="search", type="channel", query="python", max_results=3)`
+2. Get channel videos → `youtube_tool(action="list", type="channel", channel_name="@Fireship", max_results=10)`
 
 ### Flow 3: Explore channel or playlist
-1. `youtube_tool(action="channel", channel_name="@statquest", max_results=5, sort="views")`
-2. Get details of one video → `youtube_tool(action="video", video_id="h5o1n1QMcmM")`
-3. Get transcript → `youtube_tool(action="transcript", video_id="h5o1n1QMcmM", language="en")`
+1. `youtube_tool(action="list", type="channel", channel_name="@statquest", max_results=5, sort="views")`
+2. Get details of one video → `youtube_tool(action="get", type="video", video_id="h5o1n1QMcmM")`
+3. Get transcript → `youtube_tool(action="get", type="transcript", video_id="h5o1n1QMcmM", language="en")`
 
 ### Flow 4: Summarise
-1. `youtube_tool(action="transcript", video_id="dQw4w9WgXcQ", language="en")`
+1. `youtube_tool(action="get", type="transcript", video_id="dQw4w9WgXcQ", language="en")`
 2. LLM summarises the transcript text
 
 ---
@@ -738,28 +741,28 @@ On errors:
 
 | What the user asks | What the tool does |
 |---|---|
-| "Search for Rick Astley videos" | `youtube_tool(action="search", query="rick astley", max_results=5)` |
-| "Find the most viewed ones on this topic" | `youtube_tool(action="search", query="topic", max_results=5, sort="views")` |
-| "Show the longest videos about..." | `youtube_tool(action="search", query="...", max_results=5, sort="duration")` |
-| "Find playlists about machine learning" | `youtube_tool(action="search", query="machine learning", max_results=5, type="playlist")` |
-| "Find channels that teach Python" | `youtube_tool(action="search", query="python", max_results=5, type="channel")` |
-| "Show me what's on the @Fireship channel" | `youtube_tool(action="channel", channel_name="@Fireship", max_results=10, sort="views")` |
-| "List videos in this playlist..." | `youtube_tool(action="playlist", playlist_id="PLblh5JKOoLU...", max_results=20)` |
-| "How many views does this video have?" | `youtube_tool(action="video", video_id="dQw4w9WgXcQ")` → `views` |
-| "When was it published?" | `youtube_tool(action="video", video_id="dQw4w9WgXcQ")` → `upload_date` |
-| "Who uploaded it?" | `youtube_tool(action="video", video_id="dQw4w9WgXcQ")` → `channel` |
-| "What is this video about?" | `youtube_tool(action="video", video_id="dQw4w9WgXcQ")` → `description` |
-| "How long is it?" | `youtube_tool(action="video", ...)` or search → `duration` |
-| "Summarise this video" | `youtube_tool(action="transcript", video_id="...", language="en")` then LLM summarises |
-| "What did they say at minute 2?" | `youtube_tool(action="transcript", video_id="...", language="en")` → filter around 120s |
+| "Search for Rick Astley videos" | `youtube_tool(action="search", type="video", query="rick astley", max_results=5)` |
+| "Find the most viewed ones on this topic" | `youtube_tool(action="search", type="video", query="topic", max_results=5, sort="views")` |
+| "Show the longest videos about..." | `youtube_tool(action="search", type="video", query="...", max_results=5, sort="duration")` |
+| "Find playlists about machine learning" | `youtube_tool(action="search", type="playlist", query="machine learning", max_results=5)` |
+| "Find channels that teach Python" | `youtube_tool(action="search", type="channel", query="python", max_results=5)` |
+| "Show me what's on the @Fireship channel" | `youtube_tool(action="list", type="channel", channel_name="@Fireship", max_results=10, sort="views")` |
+| "List videos in this playlist..." | `youtube_tool(action="list", type="playlist", playlist_id="PLblh5JKOoLU...", max_results=20)` |
+| "How many views does this video have?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `views` |
+| "When was it published?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `upload_date` |
+| "Who uploaded it?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `channel` |
+| "What is this video about?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `description` |
+| "How long is it?" | `youtube_tool(action="get", type="video", ...)` or search → `duration` |
+| "Summarise this video" | `youtube_tool(action="get", type="transcript", video_id="...", language="en")` then LLM summarises |
+| "What did they say at minute 2?" | `youtube_tool(action="get", type="transcript", video_id="...", language="en")` → filter around 120s |
 | "Give me the link to that video" | Reconstruct URL: `https://www.youtube.com/watch?v={id}` |
 
 **Flow tips for the LLM:**
 - For lists with sorting (`views`, `duration`), present results ordered from highest to lowest.
-- `likes` and `upload_date` are only available via `action="video"`, not via search. If the user asks about them, always call `action="video"`.
+- `likes` and `upload_date` are only available via `action="get"` + `type="video"`, not via search. If the user asks about them, always call `get+video`.
 - When the user provides a video URL, extract the 11-character video ID after `v=` and use it as `video_id`.
 - The API does not return `url` fields. Always construct URLs using the patterns in the URL Construction section.
-- Playlist and channel search results don't include per-video stats. Use `action="playlist"` or `action="channel"` to get those.
+- Playlist and channel search results don't include per-video stats. Use `list` with the appropriate type to get those.
 - `channel_name` accepts @handle (`@statquest`), handle without @ (`statquest`), or UCID.
 
 ---

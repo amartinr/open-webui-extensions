@@ -104,49 +104,50 @@ class Tools:
 
     def _build_request(self, action: str, **kwargs) -> tuple[str, dict]:
         base = self.valves.api_base_url.rstrip("/")
+        rtype = kwargs.get("type", "video")
 
         if action == "search":
             params = {
                 "query": kwargs["query"],
                 "max_results": self._resolve_max_results(kwargs.get("max_results")),
-                "type": kwargs.get("type", "video"),
+                "type": rtype,
             }
-            if kwargs.get("sort") and kwargs.get("type", "video") in ("video", ""):
+            if kwargs.get("sort") and rtype in ("video", ""):
                 params["sort"] = kwargs["sort"]
             return f"{base}/search", params
 
-        elif action == "video":
-            return f"{base}/video", {"video_id": kwargs["video_id"]}
+        elif action == "get":
+            if rtype == "video":
+                return f"{base}/video", {"video_id": kwargs["video_id"]}
+            elif rtype == "transcript":
+                params = {"video_id": kwargs["video_id"]}
+                lang = (
+                    kwargs.get("language")
+                    if kwargs.get("language") is not None
+                    else self.user_valves.preferred_language
+                )
+                if lang:
+                    params["language"] = lang
+                return f"{base}/transcript", params
 
-        elif action == "channel":
-            params = {
-                "name": kwargs["channel_name"],
-                "max_results": self._resolve_max_results(kwargs.get("max_results")),
-            }
-            channel_sorts = ("views", "date", "duration")
-            if kwargs.get("sort") in channel_sorts:
-                params["sort"] = kwargs["sort"]
-            return f"{base}/channel", params
+        elif action == "list":
+            if rtype == "channel":
+                params = {
+                    "name": kwargs["channel_name"],
+                    "max_results": self._resolve_max_results(kwargs.get("max_results")),
+                }
+                channel_sorts = ("views", "date", "duration")
+                if kwargs.get("sort") in channel_sorts:
+                    params["sort"] = kwargs["sort"]
+                return f"{base}/channel", params
+            elif rtype == "playlist":
+                params = {
+                    "id": kwargs["playlist_id"],
+                    "max_results": self._resolve_max_results(kwargs.get("max_results")),
+                }
+                return f"{base}/playlist", params
 
-        elif action == "playlist":
-            params = {
-                "id": kwargs["playlist_id"],
-                "max_results": self._resolve_max_results(kwargs.get("max_results")),
-            }
-            return f"{base}/playlist", params
-
-        elif action == "transcript":
-            params = {"video_id": kwargs["video_id"]}
-            lang = (
-                kwargs.get("language")
-                if kwargs.get("language") is not None
-                else self.user_valves.preferred_language
-            )
-            if lang:
-                params["language"] = lang
-            return f"{base}/transcript", params
-
-        raise ValueError(f"Unknown action: {action}")
+        raise ValueError(f"Unknown action/type: {action}/{rtype}")
 
     # ------------------------------------------------------------------ #
     # HTTP call
@@ -387,105 +388,108 @@ class Tools:
     async def youtube_tool(
         self,
         action: str,
+        type: str = "video",
         query: str = "",
         video_id: str = "",
         channel_name: str = "",
         playlist_id: str = "",
         max_results: Optional[int] = None,
         sort: str = "relevance",
-        type: str = "video",
         language: Optional[str] = None,
         __event_emitter__=None,
     ) -> str:
         """
         Unified tool for querying YouTube via the YT DLP API.
 
-        Dispatches to the correct API endpoint based on `action` and returns
-        formatted Markdown.
+        action (verb) + type (resource) determine what happens.
+        verb is always an action, type is always the thing being acted on.
 
-        :param action: One of: search, video, channel, playlist, transcript
+        :param action: Verb: search | get | list
 
-            - Use ``search`` to find videos, playlists, or channels by keyword.
-            - Use ``video`` to get detailed metadata (likes, upload date, tags) for a single video.
-            - Use ``channel`` to **list videos** from a channel you already identified.
-              This action does NOT search or find channels — it only lists.
-            - Use ``playlist`` to list videos from a playlist.
-            - Use ``transcript`` to get timed transcript fragments.
+            **search** — find content by keyword.
+              Needs ``query``. ``type`` selects what to search for.
+              Returns matching items with metadata.
+
+              * type=video  → search videos (supports sort)
+              * type=channel → search channels (returns @handle)
+              * type=playlist → search playlists (returns id)
+
+            **get** — fetch detailed info for a single item.
+              Needs ``video_id``.
+
+              * type=video → likes, upload_date, tags, description
+              * type=transcript → timed transcript fragments (supports language)
+
+            **list** — enumerate videos from a known resource.
+              Does NOT search. You need the identifier first.
+
+              * type=channel → needs channel_name (@handle, handle, or UCID)
+              * type=playlist → needs playlist_id
 
             **Workflow for channels:**
-            1. First call ``action="search"`` with ``type="channel"`` to find the channel
-               and get its @handle (e.g. ``@NateGentile7``).
-            2. Then call ``action="channel"`` with ``channel_name="@NateGentile7"`` to list its videos.
+              1. action=search, type=channel, query="Nate Gentile"
+                 → returns @NateGentile7
+              2. action=list, type=channel, channel_name="@NateGentile7"
+                 → lists his videos
 
-            Do NOT pass display names (e.g. ``"Nate Gentile"``) to ``channel_name`` —
-            they will not resolve. Always discover the handle first.
-
+        :param type: Resource type: video (default), channel, playlist, transcript.
         :param query: Search term (required for action=search)
-        :param video_id: YouTube video ID (required for action=video|transcript)
-        :param channel_name: Channel identifier (required for action=channel).
+        :param video_id: YouTube video ID (required for action=get with type=video|transcript)
+        :param channel_name: Channel identifier (required for action=list with type=channel).
             Accepts @handle (``@NateGentile7``), handle without @ (``NateGentile7``),
             or UCID (``UC36xmz34q...``).
-            Does NOT accept display names (e.g. ``"Nate Gentile"``) —
-            use ``action="search"`` with ``type="channel"`` to find the handle first.
-        :param playlist_id: Playlist ID (required for action=playlist)
-        :param max_results: Results requested by the LLM.
-            If omitted, falls back to UserValve default_results.
-            In any case, clamped by UserValve max_results (personal ceiling)
-            and AdminValve max_results (global ceiling).
-        :param sort: Sort order. For ``search`` (videos): relevance, views, duration.
-            For ``channel``: views, date, duration. ``relevance`` only applies to search.
-        :param type: Content type for search: video (default), playlist, channel.
-            Use ``channel`` to find a channel by name and get its @handle.
-        :param language: Language code for transcript.
-            If omitted, falls back to UserValve preferred_language.
-            The UserValve does not override the LLM: if the agent passes an
-            explicit language, that takes precedence.
+            Does NOT accept display names — use ``action=search, type=channel`` to find
+            the @handle first.
+        :param playlist_id: Playlist ID (required for action=list with type=playlist)
+        :param max_results: Max results. If omitted, UserValve default_results is used.
+            Clamped by UserValve max_results (personal ceiling) and AdminValve
+            max_results (global ceiling).
+        :param sort: Sort order.
+            search+video: relevance (default), views, duration
+            list+channel: views (default), date, duration
+        :param language: Language for transcripts. If omitted, UserValve preferred_language.
+            Only applies to get+transcript.
         :param __event_emitter__: Injected by Open WebUI for emitting status events
         """
         # --- status labels ---
-        status_labels = {
-            "search": "Searching YouTube...",
-            "video": "Fetching video metadata...",
-            "channel": "Fetching channel info...",
-            "playlist": "Fetching playlist info...",
-            "transcript": "Fetching transcript...",
-
+        status_map = {
+            ("search", "video"): "Searching videos...",
+            ("search", "channel"): "Searching channels...",
+            ("search", "playlist"): "Searching playlists...",
+            ("get", "video"): "Fetching video metadata...",
+            ("get", "transcript"): "Fetching transcript...",
+            ("list", "channel"): "Fetching channel videos...",
+            ("list", "playlist"): "Fetching playlist videos...",
         }
-
-        await self._emit_status(
-            __event_emitter__,
-            status_labels.get(action, "Processing..."),
-        )
+        label = status_map.get((action, type), "Processing...")
+        await self._emit_status(__event_emitter__, label)
 
         # --- build request ---
         try:
             url, params = self._build_request(
                 action=action,
+                type=type,
                 query=query,
                 video_id=video_id,
                 channel_name=channel_name,
                 playlist_id=playlist_id,
                 max_results=max_results,
                 sort=sort,
-                type=type,
                 language=language,
             )
         except ValueError as e:
-            await self._emit_status(
-                __event_emitter__, status_labels.get(action, "Processing..."), done=True
-            )
-            return self._fmt_error("invalid_action", str(e))
+            await self._emit_status(__event_emitter__, label, done=True)
+            return self._fmt_error("invalid_action", f"{action}/{type}: {e}")
 
         # --- call API ---
         data = await self._call_api(url, params, __event_emitter__)
-
-        await self._emit_status(
-            __event_emitter__, status_labels.get(action, "Processing..."), done=True
-        )
+        await self._emit_status(__event_emitter__, label, done=True)
 
         # --- handle API error ---
         if "error" in data:
-            if action == "channel" and data["error"] == "channel_not_found":
+            if action == "list" and type == "channel" and data["error"] in (
+                "channel_not_found", "channel_failed"
+            ):
                 return self._fmt_error(
                     data["error"],
                     "Use search with type='channel' to find the exact @handle first",
@@ -494,25 +498,24 @@ class Tools:
 
         # --- format response ---
         if action == "search":
-            st = params.get("type", "video")
             results = data.get("results", [])
-            if st == "playlist":
+            if type == "playlist":
                 return self._fmt_search_playlists(query, results)
-            elif st == "channel":
+            elif type == "channel":
                 return self._fmt_search_channels(query, results)
             else:
                 return self._fmt_search_videos(query, results)
 
-        elif action == "video":
-            return self._fmt_video(data)
+        elif action == "get":
+            if type == "video":
+                return self._fmt_video(data)
+            elif type == "transcript":
+                return self._fmt_transcript(data)
 
-        elif action == "channel":
-            return self._fmt_channel(data)
+        elif action == "list":
+            if type == "channel":
+                return self._fmt_channel(data)
+            elif type == "playlist":
+                return self._fmt_playlist(data)
 
-        elif action == "playlist":
-            return self._fmt_playlist(data)
-
-        elif action == "transcript":
-            return self._fmt_transcript(data)
-
-        return self._fmt_error("unexpected", f"Unhandled action: {action}")
+        return self._fmt_error("unexpected", f"Unhandled action/type: {action}/{type}")
