@@ -487,11 +487,7 @@ class Tools:
         if "error" in data:
             detail = data.get("detail", "")
             if action == "channel" and data["error"] == "channel_not_found":
-                hint = (
-                    " Use action='search' with search_type='channel' first "
-                    "to find the channel's @handle, then use action='channel' "
-                    "with that handle."
-                )
+                hint = (". Use search (search_type='channel') to find the @handle first")
                 detail = detail + hint
             return self._fmt_error(data["error"], detail)
 
