@@ -396,6 +396,7 @@ The tool must convert the API's JSON response into **Markdown** before returning
 ## Search results for "{query}" (channels)
 
 ### 1. [{title}](https://youtube.com/@{handle})
+- **Handle:** {handle}
 - **Subscribers:** {subscriber_count}
 - **Thumbnail:** {thumbnail}
 

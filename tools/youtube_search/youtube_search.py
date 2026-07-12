@@ -273,10 +273,13 @@ class Tools:
         for i, r in enumerate(results, 1):
             title = r.get("title", "Untitled")
             url = self._fmt_url(r)
+            handle = r.get("handle", "")
             subs = r.get("subscriber_count")
             thumb = r.get("thumbnail", "")
 
             lines.append(f"\n### {i}. [{title}]({url})")
+            if handle:
+                lines.append(f"- **Handle:** {handle}")
             if subs:
                 lines.append(f"- **Subscribers:** {subs}")
             if thumb:
