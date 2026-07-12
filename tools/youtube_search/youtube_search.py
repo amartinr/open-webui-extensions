@@ -203,13 +203,13 @@ class Tools:
 
     @staticmethod
     def _fmt_number(n: int) -> str:
-        return f"{n:,}"
+        return str(n)
 
     @staticmethod
-    def _fmt_date(yyyymmdd: str) -> str:
-        if not yyyymmdd or len(yyyymmdd) != 8:
-            return yyyymmdd
-        return f"{yyyymmdd[:4]}-{yyyymmdd[4:6]}-{yyyymmdd[6:]}"
+    def _fmt_date(yyyymmdd: Optional[str]) -> str:
+        if not yyyymmdd:
+            return ""
+        return yyyymmdd
 
     @staticmethod
     def _fmt_url(item: dict, default_type: str = "") -> str:
@@ -280,8 +280,8 @@ class Tools:
             lines.append(f"\n### {i}. [{title}]({url})")
             if handle:
                 lines.append(f"- **Handle:** {handle}")
-            if subs:
-                lines.append(f"- **Subscribers:** {subs}")
+            if subs is not None:
+                lines.append(f"- **Subscribers:** {self._fmt_number(subs)}")
             if thumb:
                 lines.append(f"- **Thumbnail:** {thumb}")
         return "\n".join(lines)
@@ -323,8 +323,8 @@ class Tools:
         lines = [f"## {name}"]
         if handle:
             lines.append(f"- **Handle:** {handle}")
-        if subs:
-            lines.append(f"- **Subscribers:** {subs}")
+        if subs is not None:
+            lines.append(f"- **Subscribers:** {self._fmt_number(subs)}")
         if url:
             lines.append(f"- **URL:** {url}")
 
