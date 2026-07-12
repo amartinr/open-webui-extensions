@@ -16,9 +16,6 @@ import httpx
 from pydantic import BaseModel, Field
 
 
-HARD_LIMIT = 50
-
-
 class Tools:
     class Valves(BaseModel):
         api_base_url: str = Field(
@@ -31,9 +28,8 @@ class Tools:
         )
         max_results: int = Field(
             default=20,
-            description="Hard limit on results. Cannot exceed 50.",
+            description="Hard limit on results.",
             ge=1,
-            le=50,
         )
 
     class UserValves(BaseModel):
@@ -100,7 +96,6 @@ class Tools:
             base,
             self.user_valves.max_results,
             self.valves.max_results,
-            HARD_LIMIT,
         )
 
     # ------------------------------------------------------------------ #

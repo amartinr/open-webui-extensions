@@ -544,7 +544,7 @@ Infrastructure configuration set once by the administrator.
 |---|---|---|---|
 | `api_base_url` | `"http://localhost:8700/"` | — | Base URL of the YT DLP API service |
 | `request_timeout` | `30` | — | HTTP request timeout in seconds |
-| `max_results` | `20` | 1–50 | **Global ceiling.** No endpoint returns more results than this. |
+| `max_results` | `20` | ≥ 1 | **Global ceiling.** No endpoint returns more results than this. |
 
 ### UserValves (user — Chat > ⚙️)
 
@@ -557,7 +557,7 @@ Personal preferences that each user configures from their chat session.
 | `default_results` | `10` | 1 – `max_results` | Default results when the LLM doesn't specify `max_results` |
 | `max_results` | `10` | 1 – `max_results` (admin) | **Personal ceiling.** Cannot exceed the admin valve |
 
-**Invariant:** `default_results ≤ user.max_results ≤ admin.max_results ≤ 50`
+**Invariant:** `default_results ≤ user.max_results ≤ admin.max_results`
 
 ### Parameter resolution logic
 
@@ -570,14 +570,12 @@ lang = language if language is not None else self.user_valves.preferred_language
 **Results** — the UserValve `max_results` is a limit the LLM cannot exceed:
 
 ```python
-HARD_LIMIT = 50
-
 def resolve_max_results(self, llm_param: int | None) -> int:
     # If the LLM didn't pass anything, use the user default
     base = llm_param if llm_param is not None else self.user_valves.default_results
 
-    # Clamp by personal ceiling, admin ceiling, and hard limit
-    return min(base, self.user_valves.max_results, self.valves.max_results, HARD_LIMIT)
+    # Clamp by personal ceiling and admin ceiling
+    return min(base, self.user_valves.max_results, self.valves.max_results)
 ```
 
 | Nature | Parameter | UserValve | Behaviour |
@@ -605,9 +603,8 @@ class Tools:
         )
         max_results: int = Field(
             default=20,
-            description="Hard limit on results. Cannot exceed 50.",
+            description="Hard limit on results.",
             ge=1,
-            le=50,
         )
 
     class UserValves(BaseModel):
