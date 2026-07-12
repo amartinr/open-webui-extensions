@@ -407,7 +407,8 @@ class Tools:
 
             - Use ``search`` to find videos, playlists, or channels by keyword.
             - Use ``video`` to get detailed metadata (likes, upload date, tags) for a single video.
-            - Use ``channel`` to list videos from a channel.
+            - Use ``channel`` to **list videos** from a channel you already identified.
+              This action does NOT search or find channels — it only lists.
             - Use ``playlist`` to list videos from a playlist.
             - Use ``transcript`` to get timed transcript fragments.
 
