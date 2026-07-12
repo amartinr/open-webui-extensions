@@ -123,7 +123,8 @@ class Tools:
                 "name": kwargs["channel_name"],
                 "max_results": self._resolve_max_results(kwargs.get("max_results")),
             }
-            if kwargs.get("sort"):
+            channel_sorts = ("views", "date", "duration")
+            if kwargs.get("sort") in channel_sorts:
                 params["sort"] = kwargs["sort"]
             return f"{base}/channel", params
 
@@ -403,16 +404,37 @@ class Tools:
         formatted Markdown.
 
         :param action: One of: search, video, channel, playlist, transcript
+
+            - Use ``search`` to find videos, playlists, or channels by keyword.
+            - Use ``video`` to get detailed metadata (likes, upload date, tags) for a single video.
+            - Use ``channel`` to list videos from a channel.
+            - Use ``playlist`` to list videos from a playlist.
+            - Use ``transcript`` to get timed transcript fragments.
+
+            **Workflow for channels:**
+            1. First call ``action="search"`` with ``search_type="channel"`` to find the channel
+               and get its @handle (e.g. ``@NateGentile7``).
+            2. Then call ``action="channel"`` with ``channel_name="@NateGentile7"`` to list its videos.
+
+            Do NOT pass display names (e.g. ``"Nate Gentile"``) to ``channel_name`` —
+            they will not resolve. Always discover the handle first.
+
         :param query: Search term (required for action=search)
         :param video_id: YouTube video ID (required for action=video|transcript)
-        :param channel_name: @handle, handle, or UCID (required for action=channel)
+        :param channel_name: Channel identifier (required for action=channel).
+            Accepts @handle (``@NateGentile7``), handle without @ (``NateGentile7``),
+            or UCID (``UC36xmz34q...``).
+            Does NOT accept display names (e.g. ``"Nate Gentile"``) —
+            use ``action="search"`` with ``search_type="channel"`` to find the handle first.
         :param playlist_id: Playlist ID (required for action=playlist)
         :param max_results: Results requested by the LLM.
             If omitted, falls back to UserValve default_results.
             In any case, clamped by UserValve max_results (personal ceiling)
             and AdminValve max_results (global ceiling).
-        :param sort: Sort order (relevance, views, date, duration)
-        :param search_type: Content type for search (video, playlist, channel)
+        :param sort: Sort order. For ``search`` (videos): relevance, views, duration.
+            For ``channel``: views, date, duration. ``relevance`` only applies to search.
+        :param search_type: Content type for search: video (default), playlist, channel.
+            Use ``channel`` to find a channel by name and get its @handle.
         :param language: Language code for transcript.
             If omitted, falls back to UserValve preferred_language.
             The UserValve does not override the LLM: if the agent passes an
