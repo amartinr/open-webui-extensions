@@ -847,7 +847,7 @@ async def _emit_notification(self, __event_emitter__, message: str, level: str =
         await __event_emitter__(
             {
                 "type": "notification",
-                "data": {"message": message, "type": level},
+                "data": {"content": message, "type": level},
             }
         )
 ```

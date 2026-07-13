@@ -78,7 +78,7 @@ class Tools:
             await __event_emitter__(
                 {
                     "type": "notification",
-                    "data": {"message": message, "type": level},
+                    "data": {"content": message, "type": level},
                 }
             )
 
