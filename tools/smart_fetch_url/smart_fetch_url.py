@@ -37,6 +37,18 @@ DEFAULT_MAX_CHARS = 16_384
 DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
 DEFAULT_BATCH_REQUESTS_PER_SEC = 10
+
+# ── Valve descriptions (defined once for consistency) ─────────────────
+_DESC_BROWSER = "Browser fingerprint profile"
+_DESC_PROXY = "Proxy URL (http://user:pass@host:port or socks5://host:port). Admin-only."
+_DESC_MAX_CHARS = f"Maximum characters to return (default: {DEFAULT_MAX_CHARS})"
+_DESC_TIMEOUT = f"Request timeout in milliseconds (default: {DEFAULT_TIMEOUT_MS})"
+_DESC_BATCH_CONCURRENCY = f"Concurrency for batch fetches (default: {DEFAULT_BATCH_CONCURRENCY})"
+_DESC_REQS_PER_SEC = f"Max requests per second in batch fetches (default: {DEFAULT_BATCH_REQUESTS_PER_SEC})"
+_DESC_BLOCKED_DOMAINS = "Domains to block, comma or newline separated. Blocks the domain and all its subdomains."
+_DESC_BLOCKED_DOMAINS_USER = "Additional domains to block, comma or newline separated (added to admin list)."
+_DESC_VERBOSE = "Emit detailed status events during fetch"
+
 THREAD_POOL_WORKERS = 8
 THREAD_TIMEOUT_SEC = 5
 MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK = 30
@@ -70,7 +82,7 @@ class Tools:
 
         default_browser: str = Field(
             DEFAULT_BROWSER,
-            description="Browser fingerprint profile",
+            description=_DESC_BROWSER,
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -85,32 +97,31 @@ class Tools:
         )
         proxy: Optional[str] = Field(
             None,
-            description="Proxy URL for all requests (http://user:pass@host:port or socks5://host:port). Admin-only.",
+            description=_DESC_PROXY,
         )
         max_chars: int = Field(
             DEFAULT_MAX_CHARS,
-            description=f"Default maximum characters to return (default: {DEFAULT_MAX_CHARS})",
+            description=_DESC_MAX_CHARS,
         )
         timeout_ms: int = Field(
             DEFAULT_TIMEOUT_MS,
-            description=f"Default request timeout in milliseconds (default: {DEFAULT_TIMEOUT_MS})",
+            description=_DESC_TIMEOUT,
         )
         batch_concurrency: int = Field(
             DEFAULT_BATCH_CONCURRENCY,
-            description=f"Default concurrency for batch fetches (default: {DEFAULT_BATCH_CONCURRENCY})",
+            description=_DESC_BATCH_CONCURRENCY,
         )
         requests_per_second: int = Field(
             DEFAULT_BATCH_REQUESTS_PER_SEC,
-            description=f"Max requests per second in batch fetches (default: {DEFAULT_BATCH_REQUESTS_PER_SEC})",
+            description=_DESC_REQS_PER_SEC,
         )
         blocked_domains: str = Field(
             "",
-            description="Blocked domains, comma or newline separated. "
-            "Blocks the domain and all its subdomains (e.g. 'youtube.com' blocks www.youtube.com).",
+            description=_DESC_BLOCKED_DOMAINS,
         )
         verbose: bool = Field(
             True,
-            description="Emit detailed status events during fetch",
+            description=_DESC_VERBOSE,
         )
 
     class UserValves(BaseModel):
@@ -118,7 +129,7 @@ class Tools:
 
         default_browser: str = Field(
             "inherit",
-            description="Browser fingerprint profile",
+            description=_DESC_BROWSER,
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -134,23 +145,23 @@ class Tools:
         )
         max_chars: Optional[int] = Field(
             None,
-            description=f"Maximum characters to return (default: {DEFAULT_MAX_CHARS}, overrides admin setting)",
+            description=_DESC_MAX_CHARS,
         )
         timeout_ms: Optional[int] = Field(
             None,
-            description=f"Request timeout in milliseconds (default: {DEFAULT_TIMEOUT_MS}, overrides admin setting)",
+            description=_DESC_TIMEOUT,
         )
         batch_concurrency: Optional[int] = Field(
             None,
-            description=f"Concurrency for batch fetches (default: {DEFAULT_BATCH_CONCURRENCY}, overrides admin setting)",
+            description=_DESC_BATCH_CONCURRENCY,
         )
         blocked_domains: Optional[str] = Field(
             None,
-            description="Additional domains to block (added to admin list).",
+            description=_DESC_BLOCKED_DOMAINS_USER,
         )
         verbose: bool = Field(
             True,
-            description="Emit detailed status events during fetch",
+            description=_DESC_VERBOSE,
         )
 
     def __init__(self):
