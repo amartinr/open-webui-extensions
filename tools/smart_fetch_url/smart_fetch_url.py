@@ -110,7 +110,7 @@ class Tools:
         )
         default_browser: Optional[Literal["firefox", "chrome", "edge", "safari"]] = Field(
             None,
-            description="Browser fingerprint profile (overrides admin setting; dropdown: firefox, chrome, edge, safari)",
+            description="Browser fingerprint profile. Leave empty to inherit from admin. (dropdown: firefox, chrome, edge, safari)",
         )
         batch_concurrency: Optional[int] = Field(
             None,
@@ -216,7 +216,7 @@ class Tools:
         timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         browser = (uv.default_browser if uv else None) or self.valves.default_browser
 
-        # Validate browser (resolved from Valves — model can't override)
+        # Validate browser (safety net — Literal should prevent invalid values)
         if browser not in VALID_BROWSERS:
             return f"Error: Invalid browser '{browser}'. Must be one of: {', '.join(sorted(VALID_BROWSERS))}."
 
