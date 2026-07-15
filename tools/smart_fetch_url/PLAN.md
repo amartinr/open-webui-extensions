@@ -16,7 +16,7 @@ Three sequential proposals. Each returns control to the user for review.
 
 ```
 ✅ #1 — Remove remove_images + permanent base64 stripping
-⬜ #2 — default_browser as fixed selector
+✅ #2 — default_browser as fixed selector
 ⬜ #3 — blocked_domains (domain blocklist)
 ```
 

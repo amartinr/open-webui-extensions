@@ -30,36 +30,6 @@ logger = logging.getLogger(__name__)
 #  Browser TLS profiles (fingerprints)
 # ──────────────────────────────────────────────
 
-# Valid browser impersonate profiles from curl_cffi.
-# These are the exact strings accepted by AsyncSession(impersonate=...).
-# Source: curl_cffi/requests/impersonate.py ``BrowserTypeLiteral``.
-BROWSER_PROFILES: frozenset = frozenset({
-    # Edge
-    "edge99", "edge101",
-    # Chrome
-    "chrome99", "chrome100", "chrome101", "chrome104", "chrome107",
-    "chrome110", "chrome116", "chrome119", "chrome120", "chrome123",
-    "chrome124", "chrome131", "chrome133a", "chrome136", "chrome142",
-    "chrome145", "chrome146",
-    # Chrome Android
-    "chrome99_android", "chrome131_android",
-    # Safari
-    "safari153", "safari155", "safari170", "safari180", "safari184",
-    "safari260", "safari2601",
-    # Safari iOS
-    "safari172_ios", "safari180_ios", "safari184_ios", "safari260_ios",
-    # Firefox
-    "firefox133", "firefox135", "firefox144", "firefox147",
-    # Tor
-    "tor145",
-    # Generic aliases (curl_cffi resolves to latest version)
-    "chrome", "edge", "safari", "safari_ios", "safari_beta",
-    "safari_ios_beta", "chrome_android", "firefox",
-    # Deprecated aliases (still accepted by curl_cffi)
-    "safari15_3", "safari15_5", "safari17_0", "safari17_2_ios",
-    "safari18_0", "safari18_0_ios", "safari18_4", "safari18_4_ios",
-})
-
 VALID_FORMATS = frozenset({"skimmd", "markdown", "html", "txt", "json", "raw"})
 DEFAULT_BROWSER = "firefox"
 DEFAULT_MAX_CHARS = 16_384
@@ -105,9 +75,9 @@ class Tools:
             DEFAULT_TIMEOUT_MS,
             description="Default request timeout in milliseconds",
         )
-        default_browser: str = Field(
+        default_browser: Literal["firefox", "chrome", "edge", "safari"] = Field(
             DEFAULT_BROWSER,
-            description="Default browser fingerprint profile",
+            description="Browser fingerprint profile (dropdown: firefox, chrome, edge, safari)",
         )
         batch_concurrency: int = Field(
             DEFAULT_BATCH_CONCURRENCY,
@@ -137,9 +107,9 @@ class Tools:
             None,
             description="Request timeout in milliseconds (overrides admin setting)",
         )
-        default_browser: Optional[str] = Field(
+        default_browser: Optional[Literal["firefox", "chrome", "edge", "safari"]] = Field(
             None,
-            description="Browser fingerprint profile (overrides admin setting)",
+            description="Browser fingerprint profile (overrides admin setting; dropdown: firefox, chrome, edge, safari)",
         )
         batch_concurrency: Optional[int] = Field(
             None,
@@ -211,7 +181,7 @@ class Tools:
         urls: list[str],
         format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "skimmd",
         max_chars: Optional[int] = None,
-        browser: Optional[str] = None,
+        browser: Optional[Literal["firefox", "chrome", "edge", "safari"]] = None,
         timeout_ms: Optional[int] = None,
         include_replies: bool = False,
         concurrency: Optional[int] = None,
@@ -621,12 +591,6 @@ class Tools:
         document extraction (PDF, DOCX, etc.).
         """
         resolved_browser = browser
-        if resolved_browser not in BROWSER_PROFILES:
-            logger.warning(
-                "Browser profile '%s' is not in the known curl_cffi list; "
-                "passing through to curl_cffi anyway",
-                resolved_browser,
-            )
 
         # Build headers
         request_headers = {}
