@@ -48,8 +48,8 @@ _DESC_REQS_PER_SEC = f"Max requests per second in batch fetches (default: {DEFAU
 _DESC_BLOCKED_DOMAINS = "Domains to block, comma or newline separated. Blocks the domain and all its subdomains."
 _DESC_BLOCKED_DOMAINS_USER = "Additional domains to block, comma or newline separated (added to admin list)."
 _DESC_VERBOSE = "Emit detailed status events during fetch"
-MAX_BATCH_SIZE = 10
-MAX_BATCH_TOTAL_CHARS = 50_000
+MAX_BATCH_LENGTH = 10
+MAX_BATCH_CHARS = 50_000
 
 THREAD_POOL_WORKERS = 8
 THREAD_TIMEOUT_SEC = 5
@@ -285,13 +285,13 @@ class Tools:
                 return f"Error: Invalid URL protocol. Only http/https are supported: {u}"
             cleaned.append(u)
 
-        # Truncate to max batch size (gracefully, no error)
+        # Truncate to max batch length (gracefully, no error)
         _truncation_note = ""
-        if len(cleaned) > MAX_BATCH_SIZE:
+        if len(cleaned) > MAX_BATCH_LENGTH:
             original_count = len(cleaned)
-            cleaned = cleaned[:MAX_BATCH_SIZE]
-            _truncation_note = f"> Warning: Batch truncated from {original_count} to {MAX_BATCH_SIZE} URLs (max batch size).\n\n"
-            await self._emit_status(__event_emitter__, f"⚠️ Batch truncated from {original_count} to {MAX_BATCH_SIZE} URLs", done=False)
+            cleaned = cleaned[:MAX_BATCH_LENGTH]
+            _truncation_note = f"> Warning: Batch truncated from {original_count} to {MAX_BATCH_LENGTH} URLs (max batch length).\n\n"
+            await self._emit_status(__event_emitter__, f"⚠️ Batch truncated from {original_count} to {MAX_BATCH_LENGTH} URLs", done=False)
         urls = cleaned
 
         # ── Resolve blocked domains (additive: admin + user) ──────────
@@ -320,7 +320,7 @@ class Tools:
 
         # ── Batch path ──────────────────────────────────────────────
         if len(urls) > 1:
-            concurrency = max(1, min(concurrency, MAX_BATCH_SIZE))
+            concurrency = max(1, min(concurrency, MAX_BATCH_LENGTH))
             requests_per_second = max(1, self.valves.requests_per_second)
 
             semaphore = asyncio.Semaphore(concurrency)
@@ -413,7 +413,7 @@ class Tools:
                     header = r[:header_end]
                     body = r[header_end:]
 
-                if total + len(body) > MAX_BATCH_TOTAL_CHARS:
+                if total + len(body) > MAX_BATCH_CHARS:
                     dropped += 1
                     # Don't append anything — result is fully omitted
                 else:
@@ -421,7 +421,7 @@ class Tools:
                     joined_parts.append(r)
 
             if dropped:
-                trunc_msg = f"> Warning: {dropped} result(s) omitted — total batch output exceeded {MAX_BATCH_TOTAL_CHARS:,} characters.\n\n"
+                trunc_msg = f"> Warning: {dropped} result(s) omitted — total batch output exceeded {MAX_BATCH_CHARS:,} characters.\n\n"
                 _truncation_note = _truncation_note + trunc_msg if _truncation_note else trunc_msg
             joined = "".join(joined_parts)
             return _truncation_note + joined
