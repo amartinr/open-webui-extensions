@@ -48,7 +48,7 @@ _DESC_REQS_PER_SEC = f"Max requests per second in batch fetches (default: {DEFAU
 _DESC_BLOCKED_DOMAINS = "Domains to block, comma or newline separated. Blocks the domain and all its subdomains."
 _DESC_BLOCKED_DOMAINS_USER = "Additional domains to block, comma or newline separated (added to admin list)."
 _DESC_VERBOSE = "Emit detailed status events during fetch"
-_DESC_BATCH_CHARS = "Maximum total characters for batch output"
+_DESC_BATCH_CHARS = "Maximum total characters for the entire batch output"
 MAX_BATCH_LENGTH = 10
 MAX_BATCH_CHARS = 50_000
 
@@ -102,13 +102,17 @@ class Tools:
             None,
             description=_DESC_PROXY,
         )
+        timeout_ms: int = Field(
+            DEFAULT_TIMEOUT_MS,
+            description=_DESC_TIMEOUT,
+        )
         max_chars: int = Field(
             DEFAULT_MAX_CHARS,
             description=_DESC_MAX_CHARS,
         )
-        timeout_ms: int = Field(
-            DEFAULT_TIMEOUT_MS,
-            description=_DESC_TIMEOUT,
+        max_batch_chars: int = Field(
+            MAX_BATCH_CHARS,
+            description=_DESC_BATCH_CHARS,
         )
         batch_concurrency: int = Field(
             DEFAULT_BATCH_CONCURRENCY,
@@ -121,10 +125,6 @@ class Tools:
         blocked_domains: str = Field(
             "",
             description=_DESC_BLOCKED_DOMAINS,
-        )
-        batch_chars: int = Field(
-            MAX_BATCH_CHARS,
-            description=_DESC_BATCH_CHARS,
         )
         verbose: bool = Field(
             True,
@@ -273,7 +273,7 @@ class Tools:
 
         concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
         verbose = uv.verbose if uv else self.valves.verbose
-        batch_chars = self.valves.batch_chars
+        max_batch_chars = self.valves.max_batch_chars
 
         # Validate
         if format not in VALID_FORMATS:
@@ -419,7 +419,7 @@ class Tools:
                     header = r[:header_end]
                     body = r[header_end:]
 
-                if total + len(body) > batch_chars:
+                if total + len(body) > max_batch_chars:
                     dropped += 1
                     # Don't append anything — result is fully omitted
                 else:
@@ -427,7 +427,7 @@ class Tools:
                     joined_parts.append(r)
 
             if dropped:
-                trunc_msg = f"> Warning: {dropped} result(s) omitted — total batch output exceeded {batch_chars:,} characters.\n\n"
+                trunc_msg = f"> Warning: {dropped} result(s) omitted — total batch output exceeded {max_batch_chars:,} characters.\n\n"
                 _truncation_note = _truncation_note + trunc_msg if _truncation_note else trunc_msg
             joined = "".join(joined_parts)
             return _truncation_note + joined
