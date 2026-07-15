@@ -273,8 +273,6 @@ class Tools:
             return f"Error: Invalid format '{format}'. Must be one of: {', '.join(sorted(VALID_FORMATS))}."
         if not urls or not isinstance(urls, list):
             return "Error: A list of URLs is required."
-        if len(urls) > MAX_BATCH_SIZE:
-            return f"Error: Maximum {MAX_BATCH_SIZE} URLs per batch, got {len(urls)}."
 
         # Validate and clean each URL
         cleaned: list[str] = []
@@ -285,6 +283,12 @@ class Tools:
             if not u.startswith(("http://", "https://")):
                 return f"Error: Invalid URL protocol. Only http/https are supported: {u}"
             cleaned.append(u)
+
+        # Truncate to max batch size (gracefully, no error)
+        if len(cleaned) > MAX_BATCH_SIZE:
+            original_count = len(cleaned)
+            cleaned = cleaned[:MAX_BATCH_SIZE]
+            await self._emit_status(__event_emitter__, f"⚠️ Batch truncated from {original_count} to {MAX_BATCH_SIZE} URLs", done=False)
         urls = cleaned
 
         # ── Resolve blocked domains (additive: admin + user) ──────────
