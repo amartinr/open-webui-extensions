@@ -82,7 +82,12 @@ class Tools:
             json_schema_extra={
                 "input": {
                     "type": "select",
-                    "options": ["firefox", "chrome", "edge", "safari"],
+                    "options": [
+                        {"value": "firefox", "label": "Firefox"},
+                        {"value": "chrome", "label": "Chrome"},
+                        {"value": "edge", "label": "Edge"},
+                        {"value": "safari", "label": "Safari"},
+                    ],
                 }
             },
         )
@@ -114,13 +119,14 @@ class Tools:
             None,
             description="Request timeout in milliseconds (overrides admin setting)",
         )
-        default_browser: Optional[str] = Field(
-            None,
-            description="Browser fingerprint profile. Leave empty to inherit from admin.",
+        default_browser: str = Field(
+            "inherit",
+            description="Browser fingerprint profile. Choose a browser or 'Inherit from admin'.",
             json_schema_extra={
                 "input": {
                     "type": "select",
                     "options": [
+                        {"value": "inherit", "label": "— Inherit from admin —"},
                         {"value": "firefox", "label": "Firefox"},
                         {"value": "chrome", "label": "Chrome"},
                         {"value": "edge", "label": "Edge"},
@@ -231,7 +237,8 @@ class Tools:
         uv = self._get_user_valves(__user__)
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
         timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
-        browser = (uv.default_browser if uv else None) or self.valves.default_browser
+        uv_browser = uv.default_browser if uv else "inherit"
+        browser = self.valves.default_browser if uv_browser == "inherit" else uv_browser
 
         # Validate browser (safety net — json_schema_extra should prevent invalid values)
         if browser not in VALID_BROWSERS:
