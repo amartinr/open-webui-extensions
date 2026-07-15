@@ -399,12 +399,33 @@ class Tools:
             await self._emit_sources(__event_emitter__, urls)
             await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
 
-            # Truncate batch output if total content exceeds limit
-            joined = "".join(results)
-            if len(joined) > MAX_BATCH_TOTAL_CHARS:
-                joined = joined[:MAX_BATCH_TOTAL_CHARS]
-                trunc_msg = f"> Note: Batch output truncated at {MAX_BATCH_TOTAL_CHARS:,} characters.\n\n"
+            # Truncate batch output by dropping entire results beyond limit
+            joined_parts: list[str] = []
+            total = 0
+            dropped = 0
+            for r in results:
+                # Each result starts with "## [N/M] url\n\n" — extract header
+                header_end = r.find("\n\n")
+                if header_end == -1:
+                    header = ""
+                    body = r
+                else:
+                    header = r[:header_end]
+                    body = r[header_end:]
+
+                if total + len(body) > MAX_BATCH_TOTAL_CHARS:
+                    dropped += 1
+                    joined_parts.append(
+                        f"{header}\n\n> Status: truncated\n> Note: Result omitted — batch output exceeded {MAX_BATCH_TOTAL_CHARS:,} characters.\n\n---\n"
+                    )
+                else:
+                    total += len(body)
+                    joined_parts.append(r)
+
+            if dropped:
+                trunc_msg = f"> Note: {dropped} result(s) omitted — total batch output exceeded {MAX_BATCH_TOTAL_CHARS:,} characters.\n\n"
                 _truncation_note = _truncation_note + trunc_msg if _truncation_note else trunc_msg
+            joined = "".join(joined_parts)
             return _truncation_note + joined
 
         # ── Single URL path ─────────────────────────────────────────
