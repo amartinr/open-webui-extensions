@@ -40,7 +40,7 @@ DEFAULT_BATCH_REQUESTS_PER_SEC = 10
 
 # ── Valve descriptions (defined once for consistency) ─────────────────
 _DESC_BROWSER = "Browser fingerprint profile"
-_DESC_PROXY = "Proxy URL (http://user:pass@host:port or socks5://host:port). Admin-only."
+_DESC_PROXY = "Proxy URL (http://user:pass@host:port or socks5://host:port)."
 _DESC_MAX_CHARS = f"Maximum characters to return (default: {DEFAULT_MAX_CHARS})"
 _DESC_TIMEOUT = f"Request timeout in milliseconds (default: {DEFAULT_TIMEOUT_MS})"
 _DESC_BATCH_CONCURRENCY = f"Concurrency for batch fetches (default: {DEFAULT_BATCH_CONCURRENCY})"
