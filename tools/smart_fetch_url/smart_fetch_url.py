@@ -121,12 +121,12 @@ class Tools:
         )
         default_browser: str = Field(
             "inherit",
-            description="Browser fingerprint profile. Choose a browser or 'Inherit from admin'.",
+            description="Browser fingerprint profile. Select 'System default' to use the admin-configured browser.",
             json_schema_extra={
                 "input": {
                     "type": "select",
                     "options": [
-                        {"value": "inherit", "label": "— Inherit from admin —"},
+                        {"value": "inherit", "label": "— System default —"},
                         {"value": "firefox", "label": "Firefox"},
                         {"value": "chrome", "label": "Chrome"},
                         {"value": "edge", "label": "Edge"},
