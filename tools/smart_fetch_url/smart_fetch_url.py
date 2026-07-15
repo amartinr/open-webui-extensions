@@ -213,7 +213,6 @@ class Tools:
         max_chars: Optional[int] = None,
         browser: Optional[str] = None,
         timeout_ms: Optional[int] = None,
-        remove_images: bool = False,
         include_replies: bool = False,
         concurrency: Optional[int] = None,
         __event_emitter__: Optional[Any] = None,
@@ -235,7 +234,6 @@ class Tools:
         :param max_chars: Max response chars
         :param browser: Browser profile
         :param timeout_ms: Timeout in ms per request
-        :param remove_images: Strip image references
         :param include_replies: Include replies/comments from feed/forum sites
         :param concurrency: Max concurrent fetches for batch (default: 8)
         :param __event_emitter__: Internal — for UI progress updates
@@ -292,7 +290,6 @@ class Tools:
                                 timeout_ms=timeout_ms,
                                 format=format,
                                 max_chars=max_chars,
-                                remove_images=remove_images,
                                 include_replies=include_replies,
                                 verbose=verbose,
                                 __event_emitter__=None,  # suppress per-item events
@@ -355,7 +352,6 @@ class Tools:
                     timeout_ms=timeout_ms,
                     format=format,
                     max_chars=max_chars,
-                    remove_images=remove_images,
                     include_replies=include_replies,
                     verbose=verbose,
                     __event_emitter__=__event_emitter__,
@@ -400,7 +396,6 @@ class Tools:
         timeout_ms: int,
         format: str,
         max_chars: int,
-        remove_images: bool,
         include_replies: bool,
         verbose: bool,
         __event_emitter__: Optional[Any],
@@ -552,7 +547,6 @@ class Tools:
             raw_html=raw_html,
             url=final_url,
             format=format,
-            remove_images=remove_images,
             include_replies=include_replies,
         )
 
@@ -570,7 +564,6 @@ class Tools:
                 timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
                 format=format,
-                remove_images=remove_images,
             )
             alternate_urls = alternates_used or []
 
@@ -778,7 +771,6 @@ class Tools:
         raw_html: str,
         url: str,
         format: str,
-        remove_images: bool = False,
         include_replies: bool = True,
     ) -> dict:
         """
@@ -808,7 +800,7 @@ class Tools:
         if content_category == "feed":
             # Feed/forum/listing: use selectolax for full content.
             # Trafilatura would only extract the first post.
-            content = await self._basic_extract(raw_html, format, remove_images, tree=content_tree)
+            content = await self._basic_extract(raw_html, format, tree=content_tree)
             word_count = len(content.split()) if content else 0
             return {
                 "content": content or "",
@@ -848,7 +840,6 @@ class Tools:
                     url=url,
                     output_format=format if format in ("markdown", "html", "txt") else "markdown",
                     include_links=True,
-                    include_images=not remove_images,
                     include_tables=True,
                     include_comments=include_replies,
                 )
@@ -871,7 +862,7 @@ class Tools:
                     type(raw_html).__name__,
                 )
                 raw_html = ""
-            content = await self._basic_extract(raw_html, format, remove_images)
+            content = await self._basic_extract(raw_html, format)
 
         # Fallback: just return raw text
         if not content:
@@ -1074,7 +1065,7 @@ class Tools:
             )
             return "unknown", None
 
-    async def _basic_extract(self, html: str, format: str, remove_images: bool, tree=None) -> str:
+    async def _basic_extract(self, html: str, format: str, tree=None) -> str:
         """Basic HTML extraction fallback using selectolax or regex.
 
         If *tree* is provided (a pre-parsed selectolax HTMLParser), it is used
@@ -1094,10 +1085,6 @@ class Tools:
                 # Remove unwanted elements
                 for tag in ("script", "style", "nav", "header", "footer", "aside"):
                     for node in tree.css(tag):
-                        node.decompose()
-
-                if remove_images:
-                    for node in tree.css("img"):
                         node.decompose()
 
                 if format == "html":
@@ -1143,7 +1130,6 @@ class Tools:
         timeout_ms: int,
         proxy: Optional[str],
         format: str,
-        remove_images: bool,
     ) -> tuple[dict, list[str]]:
         """
         When the extracted content is too thin, look for <link rel="alternate">
@@ -1202,7 +1188,6 @@ class Tools:
                         raw_html=alt_raw,
                         url=alt_final,
                         format=format,
-                        remove_images=remove_images,
                     )
                     if alt_extracted.get("word_count", 0) > MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK:
                         alternates_used.append(alt_final)
@@ -1517,6 +1502,12 @@ class Tools:
         fields["Browser"] = browser
         if note:
             fields["Note"] = note
+
+        # ── Strip base64 from content (always) ─────────────────────────
+        # Base64-encoded images/videos are pure token waste — the LLM
+        # cannot render them. Replace with empty-image Markdown.
+        if content and not error:
+            content = _strip_base64(content)
 
         # ── JSON ───────────────────────────────────────────────────────
         if format == "json":
@@ -1913,7 +1904,10 @@ class _SkimmdParser(HTMLParser):
         if tag == "img":
             src = attrs.get("src", "")
             alt = attrs.get("alt", "")
-            self._emit(f"![{alt}]({src})")
+            if src.startswith("data:"):
+                self._emit(f"![{alt}]()")
+            else:
+                self._emit(f"![{alt}]({src})")
             self._buf_has_internal = True
             return
         # video
@@ -1922,9 +1916,13 @@ class _SkimmdParser(HTMLParser):
             poster = attrs.get("poster", "")
             parts: list[str] = []
             if poster:
-                parts.append(f"![Poster]({poster})")
+                poster_md = f"![Poster]()" if poster.startswith("data:") else f"![Poster]({poster})"
+                parts.append(poster_md)
             if src:
-                parts.append(f"[Video]({src})")
+                if src.startswith("data:"):
+                    parts.append("[Video]")
+                else:
+                    parts.append(f"[Video]({src})")
             if parts:
                 self._emit(" ".join(parts))
                 self._buf_has_internal = True
@@ -2032,6 +2030,28 @@ class _SkimmdParser(HTMLParser):
         text = re.sub(r"  +", " ", text)
         text = re.sub(r"\n\s*\n", "\n\n", text)
         return text.strip()
+
+
+def _strip_base64(text: str) -> str:
+    """Strip base64-encoded image/video URLs from Markdown content.
+
+    Base64 blobs are pure token waste — the LLM cannot render them.
+    This replaces ``![alt](data:...)`` with ``![alt]()`` in all text-based
+    output formats, regardless of any ``remove_images``-style flag.
+    """
+    # Markdown image: ![alt](data:image/...base64,...)  →  ![alt]()
+    text = re.sub(
+        r'!\[([^\]]*)\]\(data:(?:image|video)[^\)]+\)',
+        r'![\1]()',
+        text,
+    )
+    # Markdown video: [Video](data:...)  →  [Video]
+    text = re.sub(
+        r'\[Video\]\(data:[^\)]+\)',
+        '[Video]',
+        text,
+    )
+    return text
 
 
 def _skimmd_parse(html: str, base_url: str | None = None, *, strip_external: bool = True) -> str:

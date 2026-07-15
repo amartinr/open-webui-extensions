@@ -292,7 +292,10 @@ class SkimmdParser(HTMLParser):
         if tag == "img":
             src = attrs.get("src", "")
             alt = attrs.get("alt", "")
-            self._emit(f"![{alt}]({src})")
+            if src.startswith("data:"):
+                self._emit(f"![{alt}]()")
+            else:
+                self._emit(f"![{alt}]({src})")
             self._buf_has_internal = True
             return
 
@@ -301,12 +304,15 @@ class SkimmdParser(HTMLParser):
             poster = attrs.get("poster", "")
             parts: list[str] = []
             if poster:
-                parts.append(f"![Poster]({poster})")
+                poster_md = f"![Poster]()" if poster.startswith("data:") else f"![Poster]({poster})"
+                parts.append(poster_md)
             if src:
-                parts.append(f"[Video]({src})")
-            result = " ".join(parts)
-            if result:
-                self._emit(result)
+                if src.startswith("data:"):
+                    parts.append("[Video]")
+                else:
+                    parts.append(f"[Video]({src})")
+            if parts:
+                self._emit(" ".join(parts))
                 self._buf_has_internal = True
             return
 
