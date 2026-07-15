@@ -107,6 +107,11 @@ class Tools:
             None,
             description="Proxy URL for all requests (http://user:pass@host:port or socks5://host:port). Admin-only.",
         )
+        blocked_domains: str = Field(
+            "",
+            description="Blocked domains, comma or newline separated. "
+            "Blocks the domain and all its subdomains (e.g. 'youtube.com' blocks www.youtube.com).",
+        )
 
     class UserValves(BaseModel):
         """Per-user overrides for fetch settings. Configured from the chat session."""
@@ -142,6 +147,10 @@ class Tools:
         verbose: Optional[bool] = Field(
             None,
             description="Emit detailed status events during fetch (overrides admin setting)",
+        )
+        blocked_domains: Optional[str] = Field(
+            None,
+            description="Additional domains to block (added to admin list).",
         )
 
     def __init__(self):
@@ -267,6 +276,30 @@ class Tools:
             cleaned.append(u)
         urls = cleaned
 
+        # ── Resolve blocked domains (additive: admin + user) ──────────
+        blocked_raw = self.valves.blocked_domains
+        if uv and uv.blocked_domains:
+            if blocked_raw:
+                blocked_raw += "\n" + uv.blocked_domains
+            else:
+                blocked_raw = uv.blocked_domains
+        blocked_patterns = [
+            p.strip() for p in re.split(r"[\n,]+", blocked_raw) if p.strip()
+        ] if blocked_raw else []
+
+        # ── Single URL: check upfront ────────────────────────────────
+        if len(urls) == 1 and blocked_patterns:
+            from urllib.parse import urlparse
+            hostname = urlparse(urls[0]).hostname or ""
+            if self._is_domain_blocked(hostname, blocked_patterns):
+                await self._emit_status(__event_emitter__, f"🚫 {urls[0]} (blocked by policy)", done=True)
+                return self._format_output(
+                    url=urls[0], final_url=urls[0], title="", author="",
+                    site="", language="", published="", content="",
+                    format=format, word_count=0, browser=browser, status_code=0,
+                    error={"error_type": "forbidden", "message": f"Domain blocked by policy: {hostname}"},
+                )
+
         # ── Batch path ──────────────────────────────────────────────
         if len(urls) > 1:
             concurrency = max(1, min(concurrency, 50))
@@ -276,6 +309,19 @@ class Tools:
             rate_limiter = _RateLimiter(requests_per_second)
 
             async def fetch_one(index: int, single_url: str) -> str:
+                # Check blocked domains before acquiring semaphore
+                if blocked_patterns:
+                    from urllib.parse import urlparse
+                    hostname = urlparse(single_url).hostname or ""
+                    if self._is_domain_blocked(hostname, blocked_patterns):
+                        await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] 🚫 {single_url} (blocked)", done=False)
+                        err_result = self._format_output(
+                            url=single_url, final_url=single_url, title="", author="",
+                            site="", language="", published="", content="",
+                            format=format, word_count=0, browser=browser, status_code=0,
+                            error={"error_type": "forbidden", "message": f"Domain blocked by policy: {hostname}"},
+                        )
+                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
                 async with semaphore:
                     await rate_limiter.acquire()
                     try:
@@ -1693,6 +1739,23 @@ class Tools:
     # ──────────────────────────────────────────────
     #  Internal: Error formatting
     # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _is_domain_blocked(hostname: str, blocked_patterns: list[str]) -> bool:
+        """Check if a hostname matches any blocked domain pattern (suffix match).
+
+        Blocks the domain and all its subdomains.
+        E.g. ``youtube.com`` matches ``youtube.com``, ``www.youtube.com``,
+        ``m.youtube.com``, but not ``fakyoutube.com``.
+        """
+        hostname = hostname.lower()
+        for pattern in blocked_patterns:
+            pattern = pattern.strip().lower()
+            if not pattern:
+                continue
+            if hostname == pattern or hostname.endswith("." + pattern):
+                return True
+        return False
 
     def _format_error(self, error: Exception, _url: str = "") -> dict[str, str]:
         """Classify an exception into a structured error dict.
