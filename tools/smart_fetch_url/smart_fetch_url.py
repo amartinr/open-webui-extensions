@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────
 
 VALID_FORMATS = frozenset({"skimmd", "markdown", "html", "txt", "json", "raw"})
+VALID_BROWSERS = frozenset({"firefox", "chrome", "edge", "safari"})
 DEFAULT_BROWSER = "firefox"
 DEFAULT_MAX_CHARS = 16_384
 DEFAULT_TIMEOUT_MS = 15_000
@@ -202,7 +203,7 @@ class Tools:
                        "markdown" (MD), "html" (cleaned HTML), "txt" (plain text),
                        "json" (structured), "raw" (full server response)
         :param max_chars: Max response chars
-        :param browser: Browser profile
+        :param browser: Browser profile (one of: firefox, chrome, edge, safari)
         :param timeout_ms: Timeout in ms per request
         :param include_replies: Include replies/comments from feed/forum sites
         :param concurrency: Max concurrent fetches for batch (default: 8)
@@ -216,6 +217,11 @@ class Tools:
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
         timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
+
+        # Validate browser (defensive — model can bypass the Literal hint)
+        if browser not in VALID_BROWSERS:
+            return f"Error: Invalid browser '{browser}'. Must be one of: {', '.join(sorted(VALID_BROWSERS))}."
+
         concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
         uv_verbose = uv.verbose if uv else None
         verbose = uv_verbose if uv_verbose is not None else self.valves.verbose
