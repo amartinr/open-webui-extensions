@@ -89,19 +89,19 @@ class Tools:
         )
         max_chars: int = Field(
             DEFAULT_MAX_CHARS,
-            description="Default maximum characters to return",
+            description=f"Default maximum characters to return (default: {DEFAULT_MAX_CHARS})",
         )
         timeout_ms: int = Field(
             DEFAULT_TIMEOUT_MS,
-            description="Default request timeout in milliseconds",
+            description=f"Default request timeout in milliseconds (default: {DEFAULT_TIMEOUT_MS})",
         )
         batch_concurrency: int = Field(
             DEFAULT_BATCH_CONCURRENCY,
-            description="Default concurrency for batch fetches",
+            description=f"Default concurrency for batch fetches (default: {DEFAULT_BATCH_CONCURRENCY})",
         )
         requests_per_second: int = Field(
             DEFAULT_BATCH_REQUESTS_PER_SEC,
-            description="Max requests per second in batch fetches",
+            description=f"Max requests per second in batch fetches (default: {DEFAULT_BATCH_REQUESTS_PER_SEC})",
         )
         blocked_domains: str = Field(
             "",
@@ -134,15 +134,15 @@ class Tools:
         )
         max_chars: Optional[int] = Field(
             None,
-            description="Maximum characters to return (overrides admin setting)",
+            description=f"Maximum characters to return (default: {DEFAULT_MAX_CHARS}, overrides admin setting)",
         )
         timeout_ms: Optional[int] = Field(
             None,
-            description="Request timeout in milliseconds (overrides admin setting)",
+            description=f"Request timeout in milliseconds (default: {DEFAULT_TIMEOUT_MS}, overrides admin setting)",
         )
         batch_concurrency: Optional[int] = Field(
             None,
-            description="Concurrency for batch fetches (overrides admin setting)",
+            description=f"Concurrency for batch fetches (default: {DEFAULT_BATCH_CONCURRENCY}, overrides admin setting)",
         )
         blocked_domains: Optional[str] = Field(
             None,
