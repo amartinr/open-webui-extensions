@@ -182,7 +182,6 @@ class Tools:
         urls: list[str],
         format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "skimmd",
         max_chars: Optional[int] = None,
-        browser: Optional[Literal["firefox", "chrome", "edge", "safari"]] = None,
         timeout_ms: Optional[int] = None,
         include_replies: bool = False,
         concurrency: Optional[int] = None,
@@ -203,7 +202,6 @@ class Tools:
                        "markdown" (MD), "html" (cleaned HTML), "txt" (plain text),
                        "json" (structured), "raw" (full server response)
         :param max_chars: Max response chars
-        :param browser: Browser profile (one of: firefox, chrome, edge, safari)
         :param timeout_ms: Timeout in ms per request
         :param include_replies: Include replies/comments from feed/forum sites
         :param concurrency: Max concurrent fetches for batch (default: 8)
@@ -216,9 +214,9 @@ class Tools:
         uv = self._get_user_valves(__user__)
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
         timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
-        browser = browser or (uv.default_browser if uv else None) or self.valves.default_browser
+        browser = (uv.default_browser if uv else None) or self.valves.default_browser
 
-        # Validate browser (defensive — model can bypass the Literal hint)
+        # Validate browser (resolved from Valves — model can't override)
         if browser not in VALID_BROWSERS:
             return f"Error: Invalid browser '{browser}'. Must be one of: {', '.join(sorted(VALID_BROWSERS))}."
 
