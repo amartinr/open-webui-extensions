@@ -49,6 +49,7 @@ _DESC_BLOCKED_DOMAINS = "Domains to block, comma or newline separated. Blocks th
 _DESC_BLOCKED_DOMAINS_USER = "Additional domains to block, comma or newline separated (added to admin list)."
 _DESC_VERBOSE = "Emit detailed status events during fetch"
 MAX_BATCH_SIZE = 10
+MAX_BATCH_TOTAL_CHARS = 50_000
 
 THREAD_POOL_WORKERS = 8
 THREAD_TIMEOUT_SEC = 5
@@ -397,7 +398,14 @@ class Tools:
 
             await self._emit_sources(__event_emitter__, urls)
             await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
-            return _truncation_note + "".join(results)
+
+            # Truncate batch output if total content exceeds limit
+            joined = "".join(results)
+            if len(joined) > MAX_BATCH_TOTAL_CHARS:
+                joined = joined[:MAX_BATCH_TOTAL_CHARS]
+                trunc_msg = f"> Note: Batch output truncated at {MAX_BATCH_TOTAL_CHARS:,} characters.\n\n"
+                _truncation_note = _truncation_note + trunc_msg if _truncation_note else trunc_msg
+            return _truncation_note + joined
 
         # ── Single URL path ─────────────────────────────────────────
         url = urls[0]
