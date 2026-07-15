@@ -415,9 +415,7 @@ class Tools:
 
                 if total + len(body) > MAX_BATCH_TOTAL_CHARS:
                     dropped += 1
-                    joined_parts.append(
-                        f"{header}\n\n> Status: truncated\n\n---\n"
-                    )
+                    # Don't append anything — result is fully omitted
                 else:
                     total += len(body)
                     joined_parts.append(r)
