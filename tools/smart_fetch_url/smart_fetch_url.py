@@ -48,6 +48,7 @@ _DESC_REQS_PER_SEC = f"Max requests per second in batch fetches (default: {DEFAU
 _DESC_BLOCKED_DOMAINS = "Domains to block, comma or newline separated. Blocks the domain and all its subdomains."
 _DESC_BLOCKED_DOMAINS_USER = "Additional domains to block, comma or newline separated (added to admin list)."
 _DESC_VERBOSE = "Emit detailed status events during fetch"
+MAX_BATCH_SIZE = 50
 
 THREAD_POOL_WORKERS = 8
 THREAD_TIMEOUT_SEC = 5
@@ -272,8 +273,8 @@ class Tools:
             return f"Error: Invalid format '{format}'. Must be one of: {', '.join(sorted(VALID_FORMATS))}."
         if not urls or not isinstance(urls, list):
             return "Error: A list of URLs is required."
-        if len(urls) > 50:
-            return f"Error: Maximum 50 URLs per batch, got {len(urls)}."
+        if len(urls) > MAX_BATCH_SIZE:
+            return f"Error: Maximum {MAX_BATCH_SIZE} URLs per batch, got {len(urls)}."
 
         # Validate and clean each URL
         cleaned: list[str] = []
@@ -312,7 +313,7 @@ class Tools:
 
         # ── Batch path ──────────────────────────────────────────────
         if len(urls) > 1:
-            concurrency = max(1, min(concurrency, 50))
+            concurrency = max(1, min(concurrency, MAX_BATCH_SIZE))
             requests_per_second = max(1, self.valves.requests_per_second)
 
             semaphore = asyncio.Semaphore(concurrency)
