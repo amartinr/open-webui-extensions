@@ -121,6 +121,10 @@ class Tools:
             "",
             description=_DESC_BLOCKED_DOMAINS,
         )
+        batch_chars: int = Field(
+            MAX_BATCH_CHARS,
+            description=_DESC_BATCH_CHARS,
+        )
         verbose: bool = Field(
             True,
             description=_DESC_VERBOSE,
@@ -268,6 +272,7 @@ class Tools:
 
         concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
         verbose = uv.verbose if uv else self.valves.verbose
+        batch_chars = self.valves.batch_chars
 
         # Validate
         if format not in VALID_FORMATS:
@@ -413,7 +418,7 @@ class Tools:
                     header = r[:header_end]
                     body = r[header_end:]
 
-                if total + len(body) > MAX_BATCH_CHARS:
+                if total + len(body) > batch_chars:
                     dropped += 1
                     # Don't append anything — result is fully omitted
                 else:
@@ -421,7 +426,7 @@ class Tools:
                     joined_parts.append(r)
 
             if dropped:
-                trunc_msg = f"> Warning: {dropped} result(s) omitted — total batch output exceeded {MAX_BATCH_CHARS:,} characters.\n\n"
+                trunc_msg = f"> Warning: {dropped} result(s) omitted — total batch output exceeded {batch_chars:,} characters.\n\n"
                 _truncation_note = _truncation_note + trunc_msg if _truncation_note else trunc_msg
             joined = "".join(joined_parts)
             return _truncation_note + joined
