@@ -19,6 +19,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional
+from enum import StrEnum
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
@@ -27,12 +28,20 @@ logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────
-#  Browser TLS profiles (fingerprints)
+#  Browser profiles & formats
 # ──────────────────────────────────────────────
 
 VALID_FORMATS = frozenset({"skimmd", "markdown", "html", "txt", "json", "raw"})
-VALID_BROWSERS = frozenset({"firefox", "chrome", "edge", "safari"})
-DEFAULT_BROWSER = "firefox"
+class BrowserOption(StrEnum):
+    """Valid browser profiles for TLS fingerprinting."""
+    firefox = "firefox"
+    chrome = "chrome"
+    edge = "edge"
+    safari = "safari"
+
+
+VALID_BROWSERS = frozenset(BrowserOption)
+DEFAULT_BROWSER = BrowserOption.firefox
 DEFAULT_MAX_CHARS = 16_384
 DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
@@ -76,7 +85,7 @@ class Tools:
             DEFAULT_TIMEOUT_MS,
             description="Default request timeout in milliseconds",
         )
-        default_browser: Literal["firefox", "chrome", "edge", "safari"] = Field(
+        default_browser: BrowserOption = Field(
             DEFAULT_BROWSER,
             description="Browser fingerprint profile (dropdown: firefox, chrome, edge, safari)",
         )
@@ -108,7 +117,7 @@ class Tools:
             None,
             description="Request timeout in milliseconds (overrides admin setting)",
         )
-        default_browser: Optional[Literal["firefox", "chrome", "edge", "safari"]] = Field(
+        default_browser: Optional[BrowserOption] = Field(
             None,
             description="Browser fingerprint profile. Leave empty to inherit from admin. (dropdown: firefox, chrome, edge, safari)",
         )
@@ -216,9 +225,9 @@ class Tools:
         timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         browser = (uv.default_browser if uv else None) or self.valves.default_browser
 
-        # Validate browser (safety net — Literal should prevent invalid values)
+        # Validate browser (safety net — Enum should prevent invalid values)
         if browser not in VALID_BROWSERS:
-            return f"Error: Invalid browser '{browser}'. Must be one of: {', '.join(sorted(VALID_BROWSERS))}."
+            return f"Error: Invalid browser '{browser}'. Must be one of: {', '.join(sorted(b.value for b in BrowserOption))}."
 
         concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
         uv_verbose = uv.verbose if uv else None
