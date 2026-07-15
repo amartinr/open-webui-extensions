@@ -68,14 +68,6 @@ class Tools:
     class Valves(BaseModel):
         """Configuration settings for this tool (admin-set, server-side)."""
 
-        max_chars: int = Field(
-            DEFAULT_MAX_CHARS,
-            description="Default maximum characters to return",
-        )
-        timeout_ms: int = Field(
-            DEFAULT_TIMEOUT_MS,
-            description="Default request timeout in milliseconds",
-        )
         default_browser: str = Field(
             DEFAULT_BROWSER,
             description="Browser fingerprint profile",
@@ -91,6 +83,18 @@ class Tools:
                 }
             },
         )
+        proxy: Optional[str] = Field(
+            None,
+            description="Proxy URL for all requests (http://user:pass@host:port or socks5://host:port). Admin-only.",
+        )
+        max_chars: int = Field(
+            DEFAULT_MAX_CHARS,
+            description="Default maximum characters to return",
+        )
+        timeout_ms: int = Field(
+            DEFAULT_TIMEOUT_MS,
+            description="Default request timeout in milliseconds",
+        )
         batch_concurrency: int = Field(
             DEFAULT_BATCH_CONCURRENCY,
             description="Default concurrency for batch fetches",
@@ -99,31 +103,19 @@ class Tools:
             DEFAULT_BATCH_REQUESTS_PER_SEC,
             description="Max requests per second in batch fetches",
         )
-        verbose: bool = Field(
-            True,
-            description="Emit detailed status events during fetch",
-        )
-        proxy: Optional[str] = Field(
-            None,
-            description="Proxy URL for all requests (http://user:pass@host:port or socks5://host:port). Admin-only.",
-        )
         blocked_domains: str = Field(
             "",
             description="Blocked domains, comma or newline separated. "
             "Blocks the domain and all its subdomains (e.g. 'youtube.com' blocks www.youtube.com).",
         )
+        verbose: bool = Field(
+            True,
+            description="Emit detailed status events during fetch",
+        )
 
     class UserValves(BaseModel):
         """Per-user overrides for fetch settings. Configured from the chat session."""
 
-        max_chars: Optional[int] = Field(
-            None,
-            description="Maximum characters to return (overrides admin setting)",
-        )
-        timeout_ms: Optional[int] = Field(
-            None,
-            description="Request timeout in milliseconds (overrides admin setting)",
-        )
         default_browser: str = Field(
             "inherit",
             description="Browser fingerprint profile",
@@ -140,17 +132,25 @@ class Tools:
                 }
             },
         )
+        max_chars: Optional[int] = Field(
+            None,
+            description="Maximum characters to return (overrides admin setting)",
+        )
+        timeout_ms: Optional[int] = Field(
+            None,
+            description="Request timeout in milliseconds (overrides admin setting)",
+        )
         batch_concurrency: Optional[int] = Field(
             None,
             description="Concurrency for batch fetches (overrides admin setting)",
         )
-        verbose: bool = Field(
-            True,
-            description="Emit detailed status events during fetch",
-        )
         blocked_domains: Optional[str] = Field(
             None,
             description="Additional domains to block (added to admin list).",
+        )
+        verbose: bool = Field(
+            True,
+            description="Emit detailed status events during fetch",
         )
 
     def __init__(self):
