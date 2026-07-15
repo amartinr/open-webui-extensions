@@ -99,18 +99,9 @@ class Tools:
             DEFAULT_BATCH_REQUESTS_PER_SEC,
             description="Max requests per second in batch fetches",
         )
-        verbose: str = Field(
-            "false",
+        verbose: bool = Field(
+            False,
             description="Emit detailed status events during fetch",
-            json_schema_extra={
-                "input": {
-                    "type": "select",
-                    "options": [
-                        {"value": "false", "label": "Off"},
-                        {"value": "true", "label": "On"},
-                    ],
-                }
-            },
         )
         proxy: Optional[str] = Field(
             None,
@@ -153,19 +144,9 @@ class Tools:
             None,
             description="Concurrency for batch fetches (overrides admin setting)",
         )
-        verbose: str = Field(
-            "inherit",
-            description="Verbose status events",
-            json_schema_extra={
-                "input": {
-                    "type": "select",
-                    "options": [
-                        {"value": "inherit", "label": "System default"},
-                        {"value": "false", "label": "Off"},
-                        {"value": "true", "label": "On"},
-                    ],
-                }
-            },
+        verbose: Optional[bool] = Field(
+            None,
+            description="Emit detailed status events during fetch (overrides admin setting)",
         )
         blocked_domains: Optional[str] = Field(
             None,
@@ -273,9 +254,8 @@ class Tools:
             return f"Error: Invalid browser '{browser}'. Must be one of: {', '.join(sorted(VALID_BROWSERS))}."
 
         concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
-        uv_verbose = uv.verbose if uv else "inherit"
-        verbose_str = self.valves.verbose if uv_verbose == "inherit" else uv_verbose
-        verbose = verbose_str == "true"
+        uv_verbose = uv.verbose if uv else None
+        verbose = uv_verbose if uv_verbose is not None else self.valves.verbose
 
         # Validate
         if format not in VALID_FORMATS:
