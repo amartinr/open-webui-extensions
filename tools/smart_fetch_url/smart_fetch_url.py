@@ -48,7 +48,7 @@ _DESC_REQS_PER_SEC = f"Max requests per second in batch fetches (default: {DEFAU
 _DESC_BLOCKED_DOMAINS = "Domains to block, comma or newline separated. Blocks the domain and all its subdomains."
 _DESC_BLOCKED_DOMAINS_USER = "Additional domains to block, comma or newline separated (added to admin list)."
 _DESC_VERBOSE = "Emit detailed status events during fetch"
-MAX_BATCH_SIZE = 50
+MAX_BATCH_SIZE = 10
 
 THREAD_POOL_WORKERS = 8
 THREAD_TIMEOUT_SEC = 5
