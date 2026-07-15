@@ -150,13 +150,13 @@ class Tools:
                 }
             },
         )
-        max_chars: Optional[int] = Field(
-            None,
-            description=_DESC_MAX_CHARS,
-        )
         timeout_ms: Optional[int] = Field(
             None,
             description=_DESC_TIMEOUT,
+        )
+        max_chars: Optional[int] = Field(
+            None,
+            description=_DESC_MAX_CHARS,
         )
         batch_concurrency: Optional[int] = Field(
             None,
