@@ -285,9 +285,11 @@ class Tools:
             cleaned.append(u)
 
         # Truncate to max batch size (gracefully, no error)
+        _truncation_note = ""
         if len(cleaned) > MAX_BATCH_SIZE:
             original_count = len(cleaned)
             cleaned = cleaned[:MAX_BATCH_SIZE]
+            _truncation_note = f"> Note: Batch truncated from {original_count} to {MAX_BATCH_SIZE} URLs (max batch size).\n\n"
             await self._emit_status(__event_emitter__, f"⚠️ Batch truncated from {original_count} to {MAX_BATCH_SIZE} URLs", done=False)
         urls = cleaned
 
@@ -395,7 +397,7 @@ class Tools:
 
             await self._emit_sources(__event_emitter__, urls)
             await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
-            return "".join(results)
+            return _truncation_note + "".join(results)
 
         # ── Single URL path ─────────────────────────────────────────
         url = urls[0]
