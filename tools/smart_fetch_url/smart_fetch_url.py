@@ -1538,6 +1538,8 @@ class Tools:
         browser: str,
     ) -> str:
         """Build raw format response with metadata prefix."""
+        raw_html = _strip_base64_raw(raw_html)
+
         lines = [
             f"> Status: ok",
             f"> URL: {final_url}",
@@ -2032,6 +2034,13 @@ class _SkimmdParser(HTMLParser):
         return text.strip()
 
 
+# 1×1 white transparent GIF in base64 — used as a tiny placeholder for
+# stripped base64 images in ``raw`` format output.
+_BASE64_PLACEHOLDER_GIF = (
+    "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw=="
+)
+
+
 def _strip_base64(text: str) -> str:
     """Strip base64-encoded image/video URLs from Markdown content.
 
@@ -2052,6 +2061,33 @@ def _strip_base64(text: str) -> str:
         text,
     )
     return text
+
+
+def _strip_base64_raw(html: str) -> str:
+    """Replace base64 data URIs in raw HTML with a tiny 1×1 white pixel.
+
+    Used in ``raw`` format output — preserves HTML structure (valid image
+    references) while eliminating multi-kilobyte base64 blobs.
+    """
+    # <img src="data:image/...base64,..."  →  <img src="pixel.gif"
+    html = re.sub(
+        r'src=[\'"]data:(?:image|video)[^\'"]+[\'"]',
+        f'src="{_BASE64_PLACEHOLDER_GIF}"',
+        html,
+    )
+    # <source src="data:..."  →  <source src="pixel.gif"
+    html = re.sub(
+        r'src=[\'"]data:[^\'"]+[\'"]',
+        f'src="{_BASE64_PLACEHOLDER_GIF}"',
+        html,
+    )
+    # poster="data:..."  →  poster="pixel.gif"
+    html = re.sub(
+        r'poster=[\'"]data:[^\'"]+[\'"]',
+        f'poster="{_BASE64_PLACEHOLDER_GIF}"',
+        html,
+    )
+    return html
 
 
 def _skimmd_parse(html: str, base_url: str | None = None, *, strip_external: bool = True) -> str:
