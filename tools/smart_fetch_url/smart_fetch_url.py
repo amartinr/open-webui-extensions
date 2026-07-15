@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.9.5
+version: 0.9.6
 licence: MIT
 """
 
@@ -243,18 +243,13 @@ class Tools:
         with one element for a single fetch, or multiple URLs for concurrent
         batch fetching.
 
-        :param urls: URL(s) to fetch (http/https only).  A single-item list
-                     runs the full single-fetch pipeline; multiple URLs are
-                     fetched concurrently with bounded concurrency.
-        :param format: Output format: "skimmd" (default, cleaned MD)
-                       "markdown" (MD), "html" (cleaned HTML), "txt" (plain text),
-                       "json" (structured), "raw" (full server response)
+        :param urls: URL(s) to fetch (http/https only). One URL = full pipeline. Multiple = batch with bounded concurrency.
+        :param format: "skimmd" (default) Skimmed MD — feeds, listings, Reddit, forums. "markdown" — articles, blogs (trafilatura). "html" — cleaned HTML for structure. "txt" — plain text, min tokens. "json" — structured output. "raw" — full server response.
         :param max_chars: Max response chars
         :param include_replies: Include replies/comments from feed/forum sites
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
-        :returns: Extracted content with metadata header (single) or
-                  labeled results separated by ``---`` lines (batch)
+        :returns: Extracted content with metadata header (single URL) or labeled results separated by --- lines (batch)
         """
 
         uv = self._get_user_valves(__user__)
