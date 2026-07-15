@@ -232,9 +232,7 @@ class Tools:
         urls: list[str],
         format: Literal["skimmd", "markdown", "html", "txt", "json", "raw"] = "skimmd",
         max_chars: Optional[int] = None,
-        timeout_ms: Optional[int] = None,
         include_replies: bool = False,
-        concurrency: Optional[int] = None,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
     ) -> str:
@@ -252,9 +250,7 @@ class Tools:
                        "markdown" (MD), "html" (cleaned HTML), "txt" (plain text),
                        "json" (structured), "raw" (full server response)
         :param max_chars: Max response chars
-        :param timeout_ms: Timeout in ms per request
         :param include_replies: Include replies/comments from feed/forum sites
-        :param concurrency: Max concurrent fetches for batch (default: 8)
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
         :returns: Extracted content with metadata header (single) or
@@ -263,7 +259,7 @@ class Tools:
 
         uv = self._get_user_valves(__user__)
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
-        timeout_ms = timeout_ms or (uv.timeout_ms if uv else None) or self.valves.timeout_ms
+        timeout_ms = (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         uv_browser = uv.default_browser if uv else "inherit"
         browser = self.valves.default_browser if uv_browser == "inherit" else uv_browser
 
@@ -271,7 +267,7 @@ class Tools:
         if browser not in VALID_BROWSERS:
             return f"Error: Invalid browser '{browser}'. Must be one of: {', '.join(sorted(VALID_BROWSERS))}."
 
-        concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
+        concurrency = (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
         verbose = uv.verbose if uv else self.valves.verbose
         max_batch_chars = self.valves.max_batch_chars
 
