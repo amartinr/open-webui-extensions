@@ -100,7 +100,7 @@ class Tools:
             description="Max requests per second in batch fetches",
         )
         verbose: bool = Field(
-            False,
+            True,
             description="Emit detailed status events during fetch",
         )
         proxy: Optional[str] = Field(
@@ -144,9 +144,9 @@ class Tools:
             None,
             description="Concurrency for batch fetches (overrides admin setting)",
         )
-        verbose: Optional[bool] = Field(
-            None,
-            description="Emit detailed status events during fetch (overrides admin setting)",
+        verbose: bool = Field(
+            True,
+            description="Emit detailed status events during fetch",
         )
         blocked_domains: Optional[str] = Field(
             None,
@@ -254,8 +254,7 @@ class Tools:
             return f"Error: Invalid browser '{browser}'. Must be one of: {', '.join(sorted(VALID_BROWSERS))}."
 
         concurrency = concurrency or (uv.batch_concurrency if uv else None) or self.valves.batch_concurrency
-        uv_verbose = uv.verbose if uv else None
-        verbose = uv_verbose if uv_verbose is not None else self.valves.verbose
+        verbose = uv.verbose if uv else self.valves.verbose
 
         # Validate
         if format not in VALID_FORMATS:
