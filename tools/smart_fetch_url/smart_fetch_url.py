@@ -290,7 +290,7 @@ class Tools:
         if len(cleaned) > MAX_BATCH_SIZE:
             original_count = len(cleaned)
             cleaned = cleaned[:MAX_BATCH_SIZE]
-            _truncation_note = f"> Note: Batch truncated from {original_count} to {MAX_BATCH_SIZE} URLs (max batch size).\n\n"
+            _truncation_note = f"> Warning: Batch truncated from {original_count} to {MAX_BATCH_SIZE} URLs (max batch size).\n\n"
             await self._emit_status(__event_emitter__, f"⚠️ Batch truncated from {original_count} to {MAX_BATCH_SIZE} URLs", done=False)
         urls = cleaned
 
@@ -416,14 +416,14 @@ class Tools:
                 if total + len(body) > MAX_BATCH_TOTAL_CHARS:
                     dropped += 1
                     joined_parts.append(
-                        f"{header}\n\n> Status: truncated\n> Note: Result omitted — batch output exceeded {MAX_BATCH_TOTAL_CHARS:,} characters.\n\n---\n"
+                        f"{header}\n\n> Status: truncated\n> Content omitted — batch output exceeded {MAX_BATCH_TOTAL_CHARS:,} total characters.\n\n---\n"
                     )
                 else:
                     total += len(body)
                     joined_parts.append(r)
 
             if dropped:
-                trunc_msg = f"> Note: {dropped} result(s) omitted — total batch output exceeded {MAX_BATCH_TOTAL_CHARS:,} characters.\n\n"
+                trunc_msg = f"> Warning: {dropped} result(s) omitted — total batch output exceeded {MAX_BATCH_TOTAL_CHARS:,} characters.\n\n"
                 _truncation_note = _truncation_note + trunc_msg if _truncation_note else trunc_msg
             joined = "".join(joined_parts)
             return _truncation_note + joined
