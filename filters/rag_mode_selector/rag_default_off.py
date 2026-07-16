@@ -98,6 +98,37 @@ async def _persist_injection_record(
     await _mutate_chat_meta(chat_id, full_files_injected=record)
 
 
+def _find_injection_marker(
+    messages: list[dict], record: dict | None
+) -> bool:
+    """Check whether the injection marker ``[injection:<id>]`` is actually
+    present in any system message.
+
+    This is the safety net against context compaction: the record in
+    ``chat.meta`` survives compaction, but the actual message content may
+    have been dropped.  When the marker is absent we must re-inject.
+    """
+    if not record:
+        return False
+    marker = f"[injection:{record['id']}]"
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str) and marker in content:
+            return True
+        if isinstance(content, list):
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                    and marker in block["text"]
+                ):
+                    return True
+    return False
+
+
 def _build_full_content_block(
     content_parts: list[tuple[str, str]], injection_id: str
 ) -> str:
@@ -259,8 +290,11 @@ class Filter:
 
         if inject_refs:
             existing_record = await _read_injection_record(__chat_id__)
+            marker_still_present = _find_injection_marker(
+                messages, existing_record
+            )
 
-            if existing_record:
+            if existing_record and marker_still_present:
                 log.info(
                     "rag_default_off: already injected (id=%s) — skip",
                     existing_record["id"],
@@ -275,6 +309,11 @@ class Filter:
                         },
                     )
             else:
+                if existing_record and not marker_still_present:
+                    log.info(
+                        "rag_default_off: record exists but block missing "
+                        "(compaction?) — re-injecting"
+                    )
                 messages, record = await _resolve_and_inject(
                     messages, inject_refs
                 )
