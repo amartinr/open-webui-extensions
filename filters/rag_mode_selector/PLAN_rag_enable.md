@@ -144,32 +144,44 @@ The references stored by Filter A match the format the frontend sends and that `
 
 ## 5. Removing the Full Content Block
 
-Filter A embeds an injection marker `[injection:<uuid>]` at the start of the system message and stores the id in `chat.meta["full_files_injected"]`:
+Filter A injects the content without any unique markers or UUIDs — the content
+is purely deterministic for a given set of files.  Filter A stores a record
+in ``chat.meta["full_files_injected"]``:
 
 ```json
-{"id": "a1b2c3d4-e5f6-...", "at": 1746000000, "files": [...]}
+{"at": 1746000000, "files": [{"id": "abc", "name": "doc.pdf"}]}
 ```
 
-Filter B:
-1. Reads the injection id from `chat.meta["full_files_injected"]`.
-2. Scans system messages for `[injection:<id>]`.
-3. Removes the entire system message that contains it.
+Filter B reads ``chat.meta["rag_mode_files"]`` to know which filenames are
+associated with this conversation, then scans system messages for lines
+starting with ``--- <filename> ---`` to identify the block:
 
 ```python
-def _remove_injection_block(messages: list[dict], injection_id: str) -> list[dict]:
-    """Remove the system message containing [injection:<id>].
+def _remove_full_content_block(
+    messages: list[dict], filenames: list[str]
+) -> list[dict]:
+    """Remove the system message containing full file content.
+
+    Scans system messages for lines starting with ``--- <filename> ---``
+    for any of the known filenames.  Since the block is always injected
+    as its own system message at position 0, a single match is sufficient.
 
     Args:
         messages: Current message list.
-        injection_id: The UUID to search for.
+        filenames: Known filenames from ``chat.meta["rag_mode_files"]``.
 
     Returns:
         A new list with the matching message removed.
     """
-    if not injection_id:
+    if not filenames:
         return messages
 
-    marker = f"[injection:{injection_id}]"
+    def _has_any_filename(content: str) -> bool:
+        for name in filenames:
+            if f"--- {name} ---" in content:
+                return True
+        return False
+
     filtered = []
     for msg in messages:
         if msg.get("role") != "system":
@@ -177,7 +189,7 @@ def _remove_injection_block(messages: list[dict], injection_id: str) -> list[dic
             continue
         content = msg.get("content", "")
         found = False
-        if isinstance(content, str) and marker in content:
+        if isinstance(content, str) and _has_any_filename(content):
             found = True
         elif isinstance(content, list):
             for block in content:
@@ -185,7 +197,7 @@ def _remove_injection_block(messages: list[dict], injection_id: str) -> list[dic
                     isinstance(block, dict)
                     and block.get("type") == "text"
                     and isinstance(block.get("text"), str)
-                    and marker in block["text"]
+                    and _has_any_filename(block["text"])
                 ):
                     found = True
                     break
@@ -203,7 +215,8 @@ The full content block is always injected as its own system message at position 
 messages.insert(0, {"role": "system", "content": block})
 ```
 
-So removing the entire message that contains the marker is correct. We never inject the marker inline inside another system message.
+So removing the entire message that contains a matching filename header is
+correct.  We never inject content inline inside another system message.
 
 ---
 

@@ -12,7 +12,6 @@ description: >
 import logging
 import time
 from typing import Callable
-from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -98,26 +97,23 @@ async def _persist_injection_record(
     await _mutate_chat_meta(chat_id, full_files_injected=record)
 
 
-def _build_full_content_block(
-    content_parts: list[tuple[str, str]], injection_id: str
-) -> str:
-    """Build the full content block with an embedded injection ID.
+def _build_full_content_block(content_parts: list[tuple[str, str]]) -> str:
+    """Build the full content block.
 
-    Filter B locates this block by scanning messages for
-    ``[injection:<id>]``.
+    No unique markers or UUIDs are injected — the content is deterministic
+    for a given set of files, allowing provider-side prefix caching
+    (e.g. DeepSeek) to work across conversations sharing the same document.
 
     Args:
         content_parts: List of ``(filename, content)`` tuples.
-        injection_id: UUID that Filter B uses to locate this block.
 
     Returns:
-        A single string with the ID marker followed by all file contents.
+        A single string with all file contents, separated by filename headers.
     """
     sections = []
     for filename, content in content_parts:
         sections.append(f"--- {filename} ---\n{content}")
-    body = "\n\n".join(sections)
-    return f"[injection:{injection_id}]\n{body}"
+    return "\n\n".join(sections)
 
 
 async def _resolve_and_inject(
@@ -132,7 +128,7 @@ async def _resolve_and_inject(
 
     Returns:
         ``(updated_messages, injection_record)``.
-        ``injection_record`` is ``{"id": str, "at": int, "files": [...]}``.
+        ``injection_record`` is ``{"at": int, "files": [...]}``.
     """
     if not file_refs:
         return messages, {}
@@ -159,12 +155,10 @@ async def _resolve_and_inject(
     if not content_parts:
         return messages, {}
 
-    injection_id = str(uuid4())
-    block = _build_full_content_block(content_parts, injection_id)
+    block = _build_full_content_block(content_parts)
     messages.insert(0, {"role": "system", "content": block})
 
     record = {
-        "id": injection_id,
         "at": int(time.time()),
         "files": file_refs,
     }
@@ -193,7 +187,8 @@ class Filter:
     1.  File references persisted to ``chat.meta["rag_mode_files"]``.
     2.  ``body["metadata"]["files"]`` and ``body["files"]`` cleared
         (suppresses the built-in RAG pipeline).
-    3.  Full document content injected as a system message.
+    3.  Full document content injected as a system message (deterministic
+        content without unique markers, preserving provider prefix cache).
     4.  An injection record stored in ``chat.meta["full_files_injected"]``
         so Filter B can later locate and remove the block.
     5.  ``body["metadata"]["rag_mode"]`` set to ``"full_files"`` for
@@ -261,10 +256,9 @@ class Filter:
             existing_record = await _read_injection_record(__chat_id__)
 
             if existing_record:
-                # Compare file IDs, not message markers.  chat.meta persists
-                # between turns; body["messages"] does NOT include system
-                # messages added by filters in previous inlets.  Scanning
-                # messages for a marker would always miss it and re-inject.
+                # Compare file IDs stored in the record against current refs.
+                # If the same files are already recorded, the content is
+                # already in the conversation history served to the LLM.
                 existing_ids = {f["id"] for f in existing_record.get("files", [])}
                 current_ids = {f["id"] for f in inject_refs}
 
@@ -282,13 +276,9 @@ class Filter:
                                 "done": True,
                             },
                         )
-                    # Inject nothing — content from a previous turn is
-                    # already in the conversation history served to the LLM.
-                    # Skip to flag setting.
                     metadata["rag_mode"] = "full_files"
                     return body
 
-                # Different files — content has changed, inject again.
                 log.info(
                     "rag_default_off: files changed - re-injecting "
                     "(old=%s, new=%s)",
@@ -302,8 +292,7 @@ class Filter:
             body["messages"] = messages
             await _persist_injection_record(__chat_id__, record)
             log.info(
-                "rag_default_off: injected full content - id=%s, %d file(s)",
-                record["id"],
+                "rag_default_off: injected full content - %d file(s)",
                 len(inject_refs),
             )
             if __event_emitter__:

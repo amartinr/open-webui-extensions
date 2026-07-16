@@ -91,7 +91,7 @@ inlet(body)
 │
 ├── 5. Inject full content (if needed)
 │     └── For each file ref: Files.get_file_by_id(id) → data.get("content", "")
-│     └── Build block with embedded [injection:<uuid>] marker
+│     └── Build block with embedded filename header marker
 │         (via _resolve_and_inject)
 │     └── Insert as {"role": "system", "content": block} at position 0
 │     └── Persist injection record to chat.meta["full_files_injected"]
@@ -162,12 +162,11 @@ If `__chat_id__` is `None` (direct API call, temporary chat), skip persistence e
 
 ## 5. Full Content Injection
 
-### 5.1 Injection markers
+### 5.1 Content format
 
-No magic strings like `[ FULL_FILES_START ]` / `[ FULL_FILES_END ]`. Instead, Filter A uses a **unique injection ID** per injection, embedded directly in the content:
+The content block is purely deterministic — no unique markers or UUIDs are embedded. This preserves provider-side prefix caching (e.g. DeepSeek):
 
 ```
-[injection:a1b2c3d4-e5f6-...]
 --- document.pdf ---
 Full content of the first file...
 
@@ -176,7 +175,7 @@ Full content of the second file...
 ```
 
 - The ID (`a1b2c3d4-e5f6-...`) is a `uuid4()` generated per injection.
-- Filter B locates the block by reading the injection id from `chat.meta["full_files_injected"]` and scanning messages for `[injection:<id>]`.
+- Filter B locates the block by reading the injection id from `chat.meta["full_files_injected"]` and scanning messages for `filename header`.
 
 ### 5.2 Injection record
 
@@ -184,7 +183,6 @@ Each injection creates a record stored in `chat.meta["full_files_injected"]`:
 
 ```json
 {
-  "id": "a1b2c3d4-e5f6-...",
   "at": 1746000000,
   "files": [{"id": "abc", "name": "doc.pdf"}, ...]
 }
@@ -207,7 +205,7 @@ This dual check is robust against context compaction, which drops message conten
 def _build_full_content_block(
     content_parts: list[tuple[str, str]], injection_id: str
 ) -> str:
-    """Build the full content block with an embedded injection ID."""
+    """Build the full content block with an deterministic filename header (no unique markers)."""
     sections = []
     for filename, content in content_parts:
         sections.append(f"--- {filename} ---\n{content}")
@@ -294,10 +292,10 @@ Requirements:
 | **Direct API call, no `__chat_id__`** | No DB persistence. Refs come from `body["metadata"]["files"]` only. Subsequent turns lose refs. |
 | **File not found in DB** | `Files.get_file_by_id()` returns `None` → skip that file, continue with others. |
 | **Empty content** | `data["content"]` is `None` or `""` → skip that file. |
-| **Injection record exists + marker found** | Content is in context → skip re-injection. |
-| **Injection record exists + marker missing** | Content was dropped (compaction) → re-inject with new id. |
+| **Injection record exists + same file IDs** | Already injected → skip re-injection. |
+| **Injection record exists + different file IDs** | Files changed → re-inject. |
 | **Multimodal content** | Scan for text blocks inside content lists (marker detection). |
-| **Context compaction** | If Open WebUI compacts messages and drops the injected block, the record survives but the marker is lost. Next turn: re-injects. |
+| **Context compaction** | File ID comparison survives compaction — no unnecessary re-injection. |
 | **`Files.get_file_by_id` raises exception** | Catch, log, skip that file, continue. |
 
 ---
@@ -337,7 +335,6 @@ description: >
 import logging
 import time
 from typing import Callable
-from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -376,12 +373,12 @@ from open_webui.internal.db import get_async_db_context  # async session
 
 | # | Scenario | Steps | Expected result |
 |---|---|---|---|
-| 1 | Upload file, send message | 1. Upload a PDF<br>2. Ask "What does this document say?" | Built-in RAG does NOT run. Full PDF content appears as a system message with `[injection:<uuid>]` marker. |
-| 2 | Follow-up message | 3. Ask "Summarise point 3" | Injection record found + marker present → no re-injection. Content still available. |
+| 1 | Upload file, send message | 1. Upload a PDF<br>2. Ask "What does this document say?" | Built-in RAG does NOT run. Full PDF content appears as a system message with ``--- <filename> ---`` marker. |
+| 2 | Follow-up message | 3. Ask "Summarise point 3" | Injection record found + same file IDs → no re-injection. Content still available. |
 | 3 | No files | Start a new chat with no attachments | Filter A is a no-op. No injection. |
 | 4 | Multiple files | Upload 2 PDFs + 1 DOCX | All 3 documents are injected in the block. |
 | 5 | File deleted from DB | Upload file, delete it from DB, send message | That file is skipped. Others are injected. |
-| 6 | Context compaction | Long conversation triggers compaction | Record survives but marker is absent from messages → re-injects with new id. |
+| 6 | Context compaction | Long conversation triggers compaction | Record survives → same file IDs → still skip injection. |
 
 ---
 
