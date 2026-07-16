@@ -27,11 +27,16 @@ rag_default_off.py
 │   │   └── (no self.toggle — always active, no UI surface)
 │   └── async def inlet(self, body, __chat_id__, __user__, __event_emitter__) -> dict
 └── Module-level helper functions (outside the class)
-    ├── _get_file_references(body, chat_meta) -> list[dict]
-    ├── _persist_file_references(chat_id, files)
-    ├── _has_full_files_marker(messages) -> bool
-    ├── _build_full_files_block(files_content) -> str
-    └── _inject_full_content(messages, file_refs, user) -> list[dict]
+    ├── _normalize_refs(files) -> list[dict]
+    ├── _mutate_chat_meta(chat_id, **updates)
+    ├── _persist_file_references(chat_id, refs)
+    ├── _read_persisted_refs(chat_id) -> list[dict] | None
+    ├── _read_injection_record(chat_id) -> dict | None
+    ├── _persist_injection_record(chat_id, record)
+    ├── _find_injection_marker(messages, record) -> bool
+    ├── _build_full_content_block(content_parts, injection_id) -> str
+    ├── _resolve_and_inject(messages, file_refs) -> tuple[list[dict], dict]
+    └── _safe_emit(event_emitter, event_type, data)
 ```
 
 ---
@@ -63,35 +68,42 @@ inlet(body)
 ├── 1. Extract files from body
 │     ├── Read body["metadata"].get("files", [])  (frontend-provided references)
 │     └── Read chat.meta["rag_mode_files"]         (persisted references from previous turns)
-│     └── Merge: prefer body files for current turn, fall back to persisted
+│     └── Prefer body files for current turn, fall back to persisted
 │
 ├── 2. Persist file references (if there are files AND __chat_id__)
 │     └── Write to chat.meta["rag_mode_files"] = [{"id": "...", "name": "..."}, ...]
-│     └── Use async DB: get Chat row → mutate meta → commit
+│     └── Use async DB: get Chat ORM row → mutate meta → commit
+│         (via _mutate_chat_meta helper)
 │
 ├── 3. Clear files from body (suppress built-in RAG)
 │     └── body["metadata"].pop("files", None)
 │     └── body.pop("files", None)
 │
-├── 4. Check for [ FULL_FILES_START ] marker in system messages
-│     ├── If FOUND → skip injection (content already in context, possibly surviving compaction)
-│     └── If NOT FOUND →
-│         ├── Resolve file references to actual content
-│         │   └── For each ref: Files.get_file_by_id(id) → data.get("content", "")
-│         ├── Build delimited block:
-│         │   [ FULL_FILES_START ]
-│         │   --- filename.ext ---
-│         │   full content...
-│         │   [ FULL_FILES_END ]
-│         └── Insert as {"role": "system", "content": block} at position 0
+├── 4. Check whether content has already been injected
+│     ├── Read chat.meta["full_files_injected"] (the injection record)
+│     ├── If record exists:
+│     │   └── Scan messages for [injection:<record.id>] marker
+│     │       (via _find_injection_marker)
+│     │   ├── If marker FOUND → skip injection (content still in context)
+│     │   └── If marker ABSENT → content was dropped (compaction),
+│     │       must re-inject (proceed to injection)
+│     └── If no record → first injection, proceed
 │
-├── 5. Set rag_mode flag for downstream consumers (Pipe)
+├── 5. Inject full content (if needed)
+│     └── For each file ref: Files.get_file_by_id(id) → data.get("content", "")
+│     └── Build block with embedded [injection:<uuid>] marker
+│         (via _resolve_and_inject)
+│     └── Insert as {"role": "system", "content": block} at position 0
+│     └── Persist injection record to chat.meta["full_files_injected"]
+│         = {"id": str(uuid4), "at": int(timestamp), "files": [...]}
+│
+├── 6. Set rag_mode flag for downstream consumers (Pipe)
 │     └── body["metadata"]["rag_mode"] = "full_files"
 │
 └── return body
 ```
 
-### 3.1 Detailed: Resolving file references (step 4)
+### 3.1 Resolving file references
 
 The filter needs files from **two sources**:
 
@@ -118,39 +130,29 @@ else:
 
 **Problem identified during code review:** There is no `Chats.update_chat_meta()` method. The existing `update_chat_by_id()` only updates `chat` and `title`, not `meta`.
 
-**Solution:** Follow the pattern used by `Chats.update_chat_tags_by_id()` (see `models/chats.py` lines 519-520): fetch the Chat row, mutate `chat_item.meta` in-place, and commit.
+**Solution:** Use a generic `_mutate_chat_meta(chat_id, **updates)` that follows the pattern from `Chats.update_chat_tags_by_id()` (see `models/chats.py` lines 519-520): fetch the Chat ORM row, mutate `chat_item.meta` in-place with `**updates`, and commit.
 
 ```python
-async def _persist_file_references(chat_id: str, files: list[dict]) -> None:
-    """Write file references to chat.meta['rag_mode_files'].
-
-    Uses the same in-place mutation pattern as update_chat_tags_by_id.
-    """
-    if not chat_id or not files:
+async def _mutate_chat_meta(chat_id: str | None, **updates) -> None:
+    """Atomically merge updates into chat.meta."""
+    if not chat_id or not updates:
         return
 
-    from open_webui.models.chats import Chat
     from open_webui.internal.db import get_async_db_context
+    from open_webui.models.chats import Chat
 
     async with get_async_db_context() as db:
         chat_item = await db.get(Chat, chat_id)
         if chat_item is None:
             return
-        # Build the refs without the full data.content blob
-        refs = [
-            {"id": f.get("id"), "name": f.get("name", "unknown")}
-            for f in files
-            if f.get("id")
-        ]
-        chat_item.mata  # [sic — actual field is `meta`, but we use the column name]
         chat_item.meta = {
             **(chat_item.meta or {}),
-            "rag_mode_files": refs,
+            **updates,
         }
         await db.commit()
 ```
 
-> **Note:** The field name in the Chat model is `meta` (column `meta` of type `JSON`). The DESIGN.md references it correctly as `chat.meta`.
+Both `_persist_file_references` and `_persist_injection_record` delegate to this helper.
 
 ### 4.1 Fallback: No chat_id
 
@@ -160,70 +162,76 @@ If `__chat_id__` is `None` (direct API call, temporary chat), skip persistence e
 
 ## 5. Full Content Injection
 
-### 5.1 Marker detection
+### 5.1 Injection markers
 
-```python
-def _has_full_files_marker(messages: list[dict]) -> bool:
-    """Check if [ FULL_FILES_START ] marker exists in any system message.
+No magic strings like `[ FULL_FILES_START ]` / `[ FULL_FILES_END ]`. Instead, Filter A uses a **unique injection ID** per injection, embedded directly in the content:
 
-    Handles both string content and multimodal content (list of ContentParts).
-    """
-    marker = "[ FULL_FILES_START ]"
-    for msg in messages:
-        if msg.get("role") != "system":
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, str) and marker in content:
-            return True
-        if isinstance(content, list):
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and isinstance(block.get("text"), str)
-                    and marker in block["text"]
-                ):
-                    return True
-    return False
+```
+[injection:a1b2c3d4-e5f6-...]
+--- document.pdf ---
+Full content of the first file...
+
+--- notes.docx ---
+Full content of the second file...
 ```
 
-### 5.2 Block builder
+- The ID (`a1b2c3d4-e5f6-...`) is a `uuid4()` generated per injection.
+- Filter B locates the block by reading the injection id from `chat.meta["full_files_injected"]` and scanning messages for `[injection:<id>]`.
 
-```python
-def _build_full_files_block(files_content: list[tuple[str, str]]) -> str:
-    """Build the delimited full-files block.
+### 5.2 Injection record
 
-    Args:
-        files_content: list of (filename, content) tuples.
+Each injection creates a record stored in `chat.meta["full_files_injected"]`:
 
-    Returns:
-        A single string with markers and all file contents.
-    """
-    parts = ["[ FULL_FILES_START ]\n"]
-    for filename, content in files_content:
-        parts.append(f"\n--- {filename} ---\n{content}\n")
-    parts.append("\n[ FULL_FILES_END ]")
-    return "".join(parts)
+```json
+{
+  "id": "a1b2c3d4-e5f6-...",
+  "at": 1746000000,
+  "files": [{"id": "abc", "name": "doc.pdf"}, ...]
+}
 ```
 
-### 5.3 Content resolver
+### 5.3 Re-injection detection (dual check)
+
+On every turn, Filter A:
+
+1. Reads `chat.meta["full_files_injected"]` — if absent, no injection has happened yet.
+2. If the record exists, scans messages for `[injection:<record.id>]` via `_find_injection_marker()`.
+   - **Marker found** → content still in context → skip injection.
+   - **Marker absent** → content was dropped (compaction, manual message edit) → re-inject with a new id.
+
+This dual check is robust against context compaction, which drops message content but leaves `chat.meta` intact.
+
+### 5.4 Block builder
 
 ```python
-async def _inject_full_content(
+def _build_full_content_block(
+    content_parts: list[tuple[str, str]], injection_id: str
+) -> str:
+    """Build the full content block with an embedded injection ID."""
+    sections = []
+    for filename, content in content_parts:
+        sections.append(f"--- {filename} ---\n{content}")
+    body = "\n\n".join(sections)
+    return f"[injection:{injection_id}]\n{body}"
+```
+
+### 5.5 Content resolver
+
+```python
+async def _resolve_and_inject(
     messages: list[dict],
     file_refs: list[dict],
-    user: dict | None,
-) -> list[dict]:
-    """Inject full file content as a system message at position 0.
+) -> tuple[list[dict], dict]:
+    """Resolve file contents from the DB and inject as a system message.
 
-    Skips files that can't be found or have no content.
+    Returns (updated_messages, injection_record).
     """
     if not file_refs:
-        return messages
+        return messages, {}
 
     from open_webui.models.files import Files
 
-    files_content: list[tuple[str, str]] = []
+    content_parts: list[tuple[str, str]] = []
     for ref in file_refs:
         file_id = ref.get("id")
         if not file_id:
@@ -231,19 +239,28 @@ async def _inject_full_content(
         try:
             file_model = await Files.get_file_by_id(file_id)
             if file_model is None:
+                log.warning("rag_default_off: file not found in DB — %s", file_id)
                 continue
-            content = (file_model.data or {}).get("content", "")
-            if content:
-                files_content.append((ref.get("name", "unknown"), content))
+            raw = (file_model.data or {}).get("content", "")
+            if raw:
+                content_parts.append((ref.get("name", "unknown"), raw))
         except Exception:
+            log.exception("rag_default_off: error reading file %s", file_id)
             continue
 
-    if not files_content:
-        return messages
+    if not content_parts:
+        return messages, {}
 
-    block = _build_full_files_block(files_content)
+    injection_id = str(uuid4())
+    block = _build_full_content_block(content_parts, injection_id)
     messages.insert(0, {"role": "system", "content": block})
-    return messages
+
+    record = {
+        "id": injection_id,
+        "at": int(time.time()),
+        "files": file_refs,
+    }
+    return messages, record
 ```
 
 ---
@@ -264,7 +281,7 @@ Some providers (Gemini, Claude) use `content` as a list of `ContentPart` objects
 ```
 
 Requirements:
-- **Marker detection** (`_has_full_files_marker`): must scan both string and list formats.
+- **Marker detection** (`_find_injection_marker`): must scan both string and list formats in system messages.
 - **Injection**: always uses plain string format (`{"role": "system", "content": block}`), which is compatible with all providers.
 
 ---
@@ -277,9 +294,10 @@ Requirements:
 | **Direct API call, no `__chat_id__`** | No DB persistence. Refs come from `body["metadata"]["files"]` only. Subsequent turns lose refs. |
 | **File not found in DB** | `Files.get_file_by_id()` returns `None` → skip that file, continue with others. |
 | **Empty content** | `data["content"]` is `None` or `""` → skip that file. |
-| **Marker `FULL_FILES_START` present** | Don't re-inject. Content is already in context from a previous turn. |
-| **Multimodal content** | Scan for text blocks inside content lists. |
-| **Context compaction** | If Open WebUI compacts messages and drops the injected block, the marker is lost. Next turn: marker absent → re-injects. |
+| **Injection record exists + marker found** | Content is in context → skip re-injection. |
+| **Injection record exists + marker missing** | Content was dropped (compaction) → re-inject with new id. |
+| **Multimodal content** | Scan for text blocks inside content lists (marker detection). |
+| **Context compaction** | If Open WebUI compacts messages and drops the injected block, the record survives but the marker is lost. Next turn: re-injects. |
 | **`Files.get_file_by_id` raises exception** | Catch, log, skip that file, continue. |
 
 ---
@@ -317,7 +335,9 @@ description: >
 """
 
 import logging
+import time
 from typing import Callable
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -356,12 +376,12 @@ from open_webui.internal.db import get_async_db_context  # async session
 
 | # | Scenario | Steps | Expected result |
 |---|---|---|---|
-| 1 | Upload file, send message | 1. Upload a PDF<br>2. Ask "What does this document say?" | Built-in RAG does NOT run. Full PDF content appears as a system message. |
-| 2 | Follow-up message | 3. Ask "Summarise point 3" | Marker `[ FULL_FILES_START ]` already present → no re-injection. Content still available. |
+| 1 | Upload file, send message | 1. Upload a PDF<br>2. Ask "What does this document say?" | Built-in RAG does NOT run. Full PDF content appears as a system message with `[injection:<uuid>]` marker. |
+| 2 | Follow-up message | 3. Ask "Summarise point 3" | Injection record found + marker present → no re-injection. Content still available. |
 | 3 | No files | Start a new chat with no attachments | Filter A is a no-op. No injection. |
 | 4 | Multiple files | Upload 2 PDFs + 1 DOCX | All 3 documents are injected in the block. |
 | 5 | File deleted from DB | Upload file, delete it from DB, send message | That file is skipped. Others are injected. |
-| 6 | Context compaction | Long conversation triggers compaction | If block is dropped, marker is lost. Next turn re-injects. |
+| 6 | Context compaction | Long conversation triggers compaction | Record survives but marker is absent from messages → re-injects with new id. |
 
 ---
 

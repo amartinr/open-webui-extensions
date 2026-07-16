@@ -30,8 +30,10 @@ rag_enable.py
 │   │   └── self.icon = "..."      ← URL for the chip icon
 │   └── async def inlet(self, body, __chat_id__, __metadata__, __user__) -> dict
 └── Module-level helper functions (outside the class)
+    ├── _read_chat_meta_value(chat_id, key) -> any
     ├── _restore_file_references(chat_id) -> list[dict] | None
-    └── _remove_full_files_block(messages) -> list[dict]
+    ├── _read_injection_id(chat_id) -> str | None
+    └── _remove_injection_block(messages, injection_id) -> list[dict]
 ```
 
 ---
@@ -49,11 +51,11 @@ async def inlet(
 ```
 
 - **`body`**: The chat completion payload as left by Filter A. Contains the full-content block in `messages`, `rag_mode = "full_files"` in `metadata`, and empty/absent `files`.
-- **`__chat_id__`**: Conversation UUID. Needed to read `chat.meta["rag_mode_files"]`.
+- **`__chat_id__`**: Conversation UUID. Needed to read `chat.meta` keys.
 - **`__metadata__`**: Full metadata dict. Can be used as fallback for `chat_id`.
 - **`__user__`**: User dict for file permission checks if needed.
 
-> **Note on toggle behaviour:** When the user has the chip **OFF** (RAG disabled, full_files mode), this filter's `inlet()` is **not called at all**. The gating happens at dispatch time (`filter.py` lines 37-40: `if getattr(function_module, 'toggle', None): return filter_id in (enabled_filter_ids or set())`). So there is no need for an early return or `if not self.toggle` check inside `inlet()` — when this method runs, the chip is always ON.
+> **Note on toggle behaviour:** When the user has the chip **OFF** (RAG disabled, full_files mode), this filter's `inlet()` is **not called at all**. The gating happens at dispatch time (`filter.py` lines 37-40). So there is no need for an early return or `if not self.toggle` check inside `inlet()` — when this method runs, the chip is always ON.
 
 ---
 
@@ -73,8 +75,12 @@ inlet(body)   ← ONLY runs when user has the chip ON
 │     └── (This signals the Pipe to NOT filter KB tools)
 │
 ├── 3. Remove the full content block from messages
-│     └── Scan all system messages for [ FULL_FILES_START ]...[ FULL_FILES_END ]
-│     └── Remove the entire matching message from the list
+│     ├── Read chat.meta["full_files_injected"] → {"id": "...", "at": ..., "files": [...]}
+│     │   └── (populated by Filter A when it injected the content)
+│     ├── If record exists:
+│     │   └── Scan all system messages for [injection:<record.id>]
+│     │   └── Remove the entire matching message from the list
+│     └── If no record or marker not found: no-op
 │     └── (Avoids confusing the LLM with both full content and RAG chunks)
 │
 └── return body
@@ -82,7 +88,7 @@ inlet(body)   ← ONLY runs when user has the chip ON
 
 ---
 
-## 4. Detailed: Restoring File References
+## 4. Restoring File References
 
 Filter A persists references as `chat.meta["rag_mode_files"]` in this format:
 
@@ -128,8 +134,6 @@ The references stored by Filter A match the format the frontend sends and that `
 # Each item must have "id" (file UUID)
 # "name" is optional but used for display
 
-# The handler accesses item.get('context') for full-context mode,
-# and item.get('collection_names') for knowledge collections.
 # Since we are restoring manually uploaded files (not collections),
 # only "id" and "name" are needed.
 ```
@@ -138,19 +142,34 @@ The references stored by Filter A match the format the frontend sends and that `
 
 ---
 
-## 5. Detailed: Removing the Full Content Block
+## 5. Removing the Full Content Block
+
+Filter A embeds an injection marker `[injection:<uuid>]` at the start of the system message and stores the id in `chat.meta["full_files_injected"]`:
+
+```json
+{"id": "a1b2c3d4-e5f6-...", "at": 1746000000, "files": [...]}
+```
+
+Filter B:
+1. Reads the injection id from `chat.meta["full_files_injected"]`.
+2. Scans system messages for `[injection:<id>]`.
+3. Removes the entire system message that contains it.
 
 ```python
-def _remove_full_files_block(messages: list[dict]) -> list[dict]:
-    """Remove the system message containing [ FULL_FILES_START ]...[ FULL_FILES_END ].
+def _remove_injection_block(messages: list[dict], injection_id: str) -> list[dict]:
+    """Remove the system message containing [injection:<id>].
 
-    Scans system messages for the start marker and removes the entire
-    message. Returns a new list (does not mutate in place to avoid
-    iteration issues).
+    Args:
+        messages: Current message list.
+        injection_id: The UUID to search for.
 
-    Handles both string content and multimodal content formats.
+    Returns:
+        A new list with the matching message removed.
     """
-    marker = "[ FULL_FILES_START ]"
+    if not injection_id:
+        return messages
+
+    marker = f"[injection:{injection_id}]"
     filtered = []
     for msg in messages:
         if msg.get("role") != "system":
@@ -193,23 +212,25 @@ So removing the entire message that contains the marker is correct. We never inj
 | Case | Behaviour |
 |---|---|
 | **`chat.meta["rag_mode_files"]` is empty** | Nothing to restore. No files are put back. RAG will run on nothing → effectively same as full_files. |
-| **No `__chat_id__`** (API direct call) | Can't read `chat.meta`. No file restoration. Filter B becomes a no-op for file restoration but still removes the rag_mode flag and content block. |
-| **Chat doesn't exist in DB** | `db.get(Chat, chat_id)` returns None → no file restoration. |
-| **No full content block in messages** | `_remove_full_files_block` returns messages unchanged. |
-| **Messages emptied after block removal** | If the only message was the full-content block (unlikely but possible), the resulting messages list would be empty. The RAG pipeline would still run because files are restored, but there's no user prompt. The LLM call would likely produce an empty or error response. This is the same behaviour as if a user sent an empty message — not our problem. |
-| **Multimodal content block** | `_remove_full_files_block` scans text parts inside content lists. |
-| **Filter B enabled mid-conversation** (toggle ON after several turns) | Works. Filter B reads `chat.meta["rag_mode_files"]` (persisted by Filter A on an earlier turn), restores files, removes the block. On the next turn, `chat_completion_files_handler` sees files and runs RAG. |
+| **`chat.meta["full_files_injected"]` is absent** | Nothing to remove from messages. Filter B still restores files and removes rag_mode flag. |
+| **Injection id found but marker not in messages** | No-op for block removal (message may have been removed by compaction). |
+| **No `__chat_id__`** (API direct call) | Can't read `chat.meta`. No file restoration, no block removal. Filter B becomes a no-op for everything except removing the (absent) rag_mode flag. |
+| **Chat doesn't exist in DB** | `db.get(Chat, chat_id)` returns None → no file restoration, no injection id. |
+| **Messages emptied after block removal** | If the only message was the full-content block, the resulting messages list would be empty. The RAG pipeline would still run because files are restored, but there's no user prompt. This is the same behaviour as if a user sent an empty message. |
+| **Multimodal content block** | `_remove_injection_block` scans text parts inside content lists. |
+| **Filter B enabled mid-conversation** (toggle ON after several turns) | Works. Filter B reads `chat.meta["rag_mode_files"]` (persisted by Filter A on an earlier turn), restores files, reads injection id, removes the block. On the next turn, `chat_completion_files_handler` sees files and runs RAG. |
 
 ---
 
 ## 7. Interaction with Filter A
 
-The two filters coordinate through two keys — no shared references, no internal state:
+The two filters coordinate through **three** keys — no shared references, no internal state:
 
 | Key | Written by | Read by |
 |---|---|---|
 | `chat.meta["rag_mode_files"]` | Filter A (step 2) | Filter B (step 1) |
-| `body["metadata"]["rag_mode"]` | Filter A (step 5) | Filter B removes it (step 2); Pipe reads it |
+| `chat.meta["full_files_injected"]` | Filter A (step 5) | Filter B (step 3) |
+| `body["metadata"]["rag_mode"]` | Filter A (step 6) | Filter B removes it (step 2); Pipe reads it |
 
 Execution order (thanks to priority):
 
@@ -217,9 +238,11 @@ Execution order (thanks to priority):
 Request arrives
   └─> compact_messages_for_request
   └─> Filter A inlet (prio=0)
-  │     Persists refs, clears files, injects content, sets rag_mode
+  │     Persists refs, clears files, injects content,
+  │     stores injection record, sets rag_mode flag
   └─> Filter B inlet (prio=1) — ONLY if chip is ON
-  │     Restores files, removes rag_mode, removes content block
+  │     Restores files, removes rag_mode flag,
+  │     reads injection id, removes content block from messages
   └─> chat_completion_files_handler
   │     If body["metadata"]["files"] is non-empty → runs RAG
   │     If empty → skipped
@@ -270,7 +293,7 @@ description: >
 """
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from pydantic import BaseModel
 
@@ -310,11 +333,11 @@ from open_webui.internal.db import get_async_db_context
 | # | Scenario | Prerequisites | Steps | Expected result |
 |---|---|---|---|---|
 | 1 | RAG mode — first turn | Filter A + B assigned to model, Filter B chip ON | 1. Upload a PDF<br>2. Ask a question | RAG runs. Retrieval chunks appear. Full content block is absent. |
-| 2 | Switch to full_files mid-conversation | After step 1, toggle Filter B OFF | 3. Ask a follow-up | Marker `[ FULL_FILES_START ]` injected. Full content appears. RAG suppressed. |
-| 3 | Switch back to RAG | After step 2, toggle Filter B ON | 4. Ask another question | Files restored from `chat.meta`, full content block removed, RAG runs again. |
-| 4 | RAG mode — no files | Filter B ON, no files uploaded | Ask any question | No file restoration (nothing in meta). Filter B is a no-op for files but removes the (absent) rag_mode flag. |
+| 2 | Switch to full_files mid-conversation | After step 1, toggle Filter B OFF | 3. Ask a follow-up | Injection record exists but marker absent from messages → Filter A re-injects. Full content appears. RAG suppressed. |
+| 3 | Switch back to RAG | After step 2, toggle Filter B ON | 4. Ask another question | Files restored from `chat.meta`, injection block removed via `[injection:<id>]`, RAG runs again. |
+| 4 | RAG mode — no files | Filter B ON, no files uploaded | Ask any question | No file restoration (nothing in meta). Filter B is a no-op for files but removes the (absent) rag_mode flag and (absent) injection block. |
 | 5 | Multiple uploads in RAG mode | Filter B ON | Upload 2 files, ask question | Both files processed by RAG pipeline. |
-| 6 | Toggle ON at chat start | Filter B ON, no prior messages | Upload file, ask question | RAG runs immediately. Filter A persists refs. Filter B restores them and removes the content block Filter A just injected. |
+| 6 | Toggle ON at chat start | Filter B ON, no prior messages | Upload file, ask question | RAG runs immediately. Filter A persists refs and injects content. Filter B restores refs and removes the injection block before `chat_completion_files_handler` runs. |
 
 ---
 
@@ -323,6 +346,7 @@ from open_webui.internal.db import get_async_db_context
 Filter B **requires** Filter A to be active on the same model. Without Filter A:
 
 - `chat.meta["rag_mode_files"]` is never populated → Filter B has nothing to restore.
+- `chat.meta["full_files_injected"]` is never populated → Filter B has no injection id to search for.
 - The full content block never exists → Filter B has nothing to remove.
 - The `rag_mode` flag is never set → Filter B removes a non-existent key.
 - Files pass through normally → the built-in RAG runs regardless of Filter B's state.
