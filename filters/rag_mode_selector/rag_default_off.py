@@ -98,37 +98,6 @@ async def _persist_injection_record(
     await _mutate_chat_meta(chat_id, full_files_injected=record)
 
 
-def _find_injection_marker(
-    messages: list[dict], record: dict | None
-) -> bool:
-    """Check whether the injection marker ``[injection:<id>]`` is actually
-    present in any system message.
-
-    This is the safety net against context compaction: the record in
-    ``chat.meta`` survives compaction, but the actual message content may
-    have been dropped.  When the marker is absent we must re-inject.
-    """
-    if not record:
-        return False
-    marker = f"[injection:{record['id']}]"
-    for msg in messages:
-        if msg.get("role") != "system":
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, str) and marker in content:
-            return True
-        if isinstance(content, list):
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and isinstance(block.get("text"), str)
-                    and marker in block["text"]
-                ):
-                    return True
-    return False
-
-
 def _build_full_content_block(
     content_parts: list[tuple[str, str]], injection_id: str
 ) -> str:
@@ -290,51 +259,64 @@ class Filter:
 
         if inject_refs:
             existing_record = await _read_injection_record(__chat_id__)
-            marker_still_present = _find_injection_marker(
-                messages, existing_record
-            )
 
-            if existing_record and marker_still_present:
-                log.info(
-                    "rag_default_off: already injected (id=%s) - skip",
-                    existing_record["id"],
-                )
-                if __event_emitter__:
-                    await _safe_emit(
-                        __event_emitter__,
-                        "status",
-                        {
-                            "description": "Full files mode (cached)",
-                            "done": True,
-                        },
-                    )
-            else:
-                if existing_record and not marker_still_present:
+            if existing_record:
+                # Compare file IDs, not message markers.  chat.meta persists
+                # between turns; body["messages"] does NOT include system
+                # messages added by filters in previous inlets.  Scanning
+                # messages for a marker would always miss it and re-inject.
+                existing_ids = {f["id"] for f in existing_record.get("files", [])}
+                current_ids = {f["id"] for f in inject_refs}
+
+                if existing_ids == current_ids:
                     log.info(
-                        "rag_default_off: record exists but block missing "
-                        "(compaction?) - re-injecting"
+                        "rag_default_off: already injected (%d file(s)) - skip",
+                        len(inject_refs),
                     )
-                messages, record = await _resolve_and_inject(
-                    messages, inject_refs
-                )
-                body["messages"] = messages
-                await _persist_injection_record(__chat_id__, record)
+                    if __event_emitter__:
+                        await _safe_emit(
+                            __event_emitter__,
+                            "status",
+                            {
+                                "description": "Full files mode (cached)",
+                                "done": True,
+                            },
+                        )
+                    # Inject nothing — content from a previous turn is
+                    # already in the conversation history served to the LLM.
+                    # Skip to flag setting.
+                    metadata["rag_mode"] = "full_files"
+                    return body
+
+                # Different files — content has changed, inject again.
                 log.info(
-                    "rag_default_off: injected full content - id=%s, %d file(s)",
-                    record["id"],
-                    len(inject_refs),
+                    "rag_default_off: files changed - re-injecting "
+                    "(old=%s, new=%s)",
+                    existing_ids,
+                    current_ids,
                 )
-                if __event_emitter__:
-                    await _safe_emit(
-                        __event_emitter__,
-                        "status",
-                        {
-                            "description": (
-                                f"Full files mode - {len(inject_refs)} file(s)"
-                            ),
-                            "done": True,
-                        },
-                    )
+
+            messages, record = await _resolve_and_inject(
+                messages, inject_refs
+            )
+            body["messages"] = messages
+            await _persist_injection_record(__chat_id__, record)
+            log.info(
+                "rag_default_off: injected full content - id=%s, %d file(s)",
+                record["id"],
+                len(inject_refs),
+            )
+            if __event_emitter__:
+                await _safe_emit(
+                    __event_emitter__,
+                    "status",
+                    {
+                        "description": (
+                            f"Full files mode - {len(inject_refs)} file(s)"
+                        ),
+                        "done": True,
+                    },
+                )
         else:
             log.info("rag_default_off: no files - no-op")
 
