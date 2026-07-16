@@ -300,7 +300,7 @@ class Filter:
                     existing_record["id"],
                 )
                 if __event_emitter__:
-                    _safe_emit(
+                    await _safe_emit(
                         __event_emitter__,
                         "status",
                         {
@@ -325,7 +325,7 @@ class Filter:
                     len(inject_refs),
                 )
                 if __event_emitter__:
-                    _safe_emit(
+                    await _safe_emit(
                         __event_emitter__,
                         "status",
                         {
