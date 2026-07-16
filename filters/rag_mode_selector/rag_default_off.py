@@ -149,6 +149,14 @@ async def _inject_full_content(
     return messages
 
 
+async def _safe_emit(event_emitter: Callable, event_type: str, data: dict) -> None:
+    """Emit an event, swallowing any error so a UI glitch never crashes the filter."""
+    try:
+        await event_emitter({"type": event_type, "data": data})
+    except Exception:
+        log.debug("rag_default_off: event_emitter failed (non-fatal)")
+
+
 # ---------------------------------------------------------------------------
 # Filter
 # ---------------------------------------------------------------------------
@@ -180,6 +188,8 @@ class Filter:
         __user__: dict | None = None,
         __event_emitter__: Callable | None = None,
     ) -> dict:
+        log.info("rag_default_off: inlet — chat_id=%s", __chat_id__)
+
         # ---- 0. Guard: ensure metadata is a writable dict ------------------
         metadata = body.get("metadata")
         if not isinstance(metadata, dict):
@@ -195,9 +205,19 @@ class Filter:
         new_refs = _normalize_refs(files_from_body) if files_from_body else None
         persisted_refs = None
 
-        if not new_refs:
+        if new_refs:
+            log.info(
+                "rag_default_off: fresh files from body — %d file(s)",
+                len(new_refs),
+            )
+        else:
             # No fresh files — try the persisted store (subsequent turn)
             persisted_refs = await _read_persisted_refs(__chat_id__)
+            if persisted_refs:
+                log.info(
+                    "rag_default_off: restored %d file(s) from chat.meta",
+                    len(persisted_refs),
+                )
 
         # The refs to use for content injection:
         inject_refs = new_refs or persisted_refs or []
@@ -205,12 +225,42 @@ class Filter:
         # ---- 2. Persist fresh references (first turn with files) ---------
         if new_refs:
             await _persist_file_references(__chat_id__, new_refs)
+            log.info(
+                "rag_default_off: persisted %d file(s) to chat.meta",
+                len(new_refs),
+            )
 
         # ---- 3. Inject full content (if not already present) --------------
         messages = body.get("messages", [])
-        if inject_refs and not _has_full_files_marker(messages):
-            messages = await _inject_full_content(messages, inject_refs)
-            body["messages"] = messages
+        if inject_refs:
+            if _has_full_files_marker(messages):
+                log.info(
+                    "rag_default_off: [FULL_FILES_START] already present — skip injection",
+                )
+                if __event_emitter__:
+                    _safe_emit(
+                        __event_emitter__,
+                        "status",
+                        {"description": "Full files mode (cached)", "done": True},
+                    )
+            else:
+                messages = await _inject_full_content(messages, inject_refs)
+                body["messages"] = messages
+                log.info(
+                    "rag_default_off: injected full content for %d file(s)",
+                    len(inject_refs),
+                )
+                if __event_emitter__:
+                    _safe_emit(
+                        __event_emitter__,
+                        "status",
+                        {
+                            "description": f"Full files mode — {len(inject_refs)} file(s)",
+                            "done": True,
+                        },
+                    )
+        else:
+            log.info("rag_default_off: no files — no-op")
 
         # ---- 4. Set flag for downstream consumers ------------------------
         metadata["rag_mode"] = "full_files"
