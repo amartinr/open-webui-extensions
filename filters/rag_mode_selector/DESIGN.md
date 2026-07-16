@@ -142,19 +142,35 @@ Every time the inlet runs:
 2. **Clear files from body.**
    Pop `files` from both `body["metadata"]` and `body`. This causes `chat_completion_files_handler()` at line 1779 of `middleware.py` to see no files and skip the entire retrieval + reranking step. Uses `.pop(key, None)` so the operation is safe even if a key is absent.
 
-3. **Inject full content (if not already present).**
-   Check `chat.meta["full_files_injected"]`. If a record exists **and** the same file IDs are present in the current references, the content was injected on a previous turn - skip injection. If either the record is absent or the marker is missing from messages (e.g. dropped by context compaction), retrieve the full content of each referenced file from the `file` table (via `open_webui.models.files.Files`, field `data.content`) and prepend a system message to `body["messages"]`.
+3. **Inject full content (with in-memory guard and cache).**
+   Check the in-memory `_injection_guard[chat_id]` — a `frozenset` of
+   file IDs from the last injection. If the guard exists **and** the
+   file IDs match the current references **and** a lightweight heuristic
+   (`_is_content_still_in_messages`) confirms the content block is still
+   present in `messages[0]`, skip injection entirely.
 
-   The dual check (record + message marker) ensures that if context compaction drops the injected block, the content is **re-injected** on the next turn even though the `chat.meta` record survives.
+   On a miss (first turn, file set changed, or content block removed),
+   retrieve the full content of each referenced file. The first read
+   goes to the database (`Files.get_file_by_id`) and populates the
+   in-memory `_file_content_cache[file_id]`; subsequent reads hit the
+   cache without touching the DB. The content is then formatted and
+   prepended as a deterministic `{"role": "system", "content": ...}`
+   message at position 0.
 
 4. **Set the `rag_mode` flag.**
    Set `body["metadata"]["rag_mode"] = "full_files"`. This is the signal the Pipe reads to decide whether to filter semantic KB tools.
+
+5. **Invalidate caches on new file upload.**
+   When fresh files arrive in `body["metadata"]["files"]`, clear the
+   module-level `_file_content_cache` (so new content is read from DB)
+   and remove the per-chat entry from `_injection_guard` (so the next
+   turn re-injects with the updated file set).
 
 ### 3.3 File reference persistence
 
 `chat.meta["rag_mode_files"]` is stored in the `meta` JSON column on the `Chat` table (`models/chats.py` - `Column(JSON, server_default='{}')`). It survives server restarts.
 
-Filter A writes to it whenever files are present in the body. Filter B reads from it when the user enables RAG mode. No other component writes to or reads from this key.
+Filter A writes to it whenever files are present in the body. Both reads and writes use a targeted `SELECT meta` / `UPDATE ... SET meta` pattern that avoids loading the full `Chat` row (the `chat` JSON column can grow large with conversation history). Filter B reads from it when the user enables RAG mode. No other component writes to or reads from this key.
 
 ### 3.4 Injection markers
 
@@ -170,9 +186,14 @@ Full content of the first file...
 Full content of the second file...
 ```
 
-- Filter A stores a record in ``chat.meta["full_files_injected"]`` with
-  ``{"at": <timestamp>, "files": [{"id": ..., "name": ...}]}`` for
-  re-injection detection (comparing file IDs, not scanning messages).
+- Filter A maintains an **in-memory** `_injection_guard` mapping
+  `chat_id → frozenset(file_ids)` for re-injection detection.
+  The guard also runs a lightweight heuristic check
+  (`_is_content_still_in_messages`) on `messages[0]` to detect
+  whether the content block survived context compaction.
+- Filter A also maintains an **in-memory** `_file_content_cache`
+  (`file_id → content`) so that re-injection on subsequent turns
+  reads from RAM instead of the database.
 - Filter B reads ``chat.meta["rag_mode_files"]`` for the known filenames
   and scans messages for ``--- <filename> ---`` to locate and remove the
   entire system message.
@@ -237,10 +258,11 @@ FILTER A (prio=0):
   1. chat.meta["rag_mode_files"] ← [{"id": "abc", "name": "doc.pdf"}]
   2. body["metadata"]["files"] ← []          (cleared)
   3. body["files"] ← {}                       (cleared)
-  4. content retrieved from Files.get_file_by_id("abc").data["content"]
+  4. _file_content_cache["abc"] ← content retrieved from
+     Files.get_file_by_id("abc").data["content"]  (first and only DB read)
   5. body["messages"] ← [system: --- doc.pdf ---doc content...,
                          user: "Review this contract"]
-     chat.meta["full_files_injected"] ← {"id": "abc-...", "at": ..., "files": [...]}
+     _injection_guard["chat-123"] ← frozenset({"abc"})
   6. body["metadata"]["rag_mode"] ← "full_files"
 
 FILTER B (prio=1, OFF):
@@ -266,10 +288,12 @@ doc content...,
                       user: "What about clause 4?"]
 
 FILTER A (prio=0):
-  1. body["metadata"]["files"] is empty → no new persistence needed
+  1. body["metadata"]["files"] is empty → _read_persisted_refs() →
      chat.meta["rag_mode_files"] still holds the refs from turn 1
   2. body["metadata"]["files"] already empty → no-op
-  3. Record exists — compare file IDs: same as current → skip
+  3. IN-MEMORY GUARD: _injection_guard.get("chat-123") == frozenset({"abc"})
+     AND _is_content_still_in_messages() → "--- doc.pdf ---" in messages[0]
+     → GUARD HIT — skip injection entirely (no DB, no string rebuild)
   4. body["metadata"]["rag_mode"] ← "full_files"
 
 FILTER B (prio=1, OFF):
@@ -326,10 +350,14 @@ BEFORE FILTERS:
   (No injection block - Filter B removed it on turn 3)
 
 FILTER A (prio=0):
-  1. No files in body → no new persistence
+  1. No files in body → _read_persisted_refs() → chat.meta still has refs
   2. Already empty → no-op
-  3. chat.meta["full_files_injected"] exists but file IDs don't match
-     NOT found in messages (was removed) → RE-INJECTS content
+  3. IN-MEMORY GUARD:
+     _injection_guard.get("chat-123") → still frozenset({"abc"})
+     _is_content_still_in_messages() → "--- doc.pdf ---" NOT in messages[0]
+     → GUARD MISS (content was removed by Filter B on turn 3)
+     → RE-INJECTS content (from _file_content_cache, no DB read)
+     _injection_guard["chat-123"] → frozenset({"abc"})  (unchanged)
   4. body["metadata"]["rag_mode"] ← "full_files"
 
 FILTER B (prio=1, OFF):
@@ -398,15 +426,16 @@ No new valves. The Pipe's `Valves`, `UserValves`, and `pipes()` method remain un
 
 ## 7. Filter ↔ Pipe coordination
 
-The two filters and the Pipe share no state or direct references. They coordinate through **three** keys on the same mutable objects:
+The two filters and the Pipe share no state or direct references. They coordinate through **four** keys on the same mutable objects:
 
 ```
-chat.meta["rag_mode_files"]          ← Filter A writes, Filter B reads
-chat.meta["full_files_injected"]     ← Filter A writes, Filter B reads
+chat.meta["rag_mode_files"]          ← Filter A writes (targeted UPDATE), Filter B reads
+_injection_guard[chat_id]              ← Filter A writes (in-memory, not persisted)
+_file_content_cache[file_id]           ← Filter A writes (in-memory, not persisted)
 body["metadata"]["rag_mode"]         ← Filter A sets, Filter B removes, Pipe reads
 ```
 
-- **Filter A**: persists file refs to `chat.meta`, clears files from body, injects content (deterministic block without unique markers), stores the injection record in `chat.meta["full_files_injected"]`, and sets `body["metadata"]["rag_mode"] = "full_files"`. Always.
+- **Filter A**: persists file refs to `chat.meta` (targeted `SELECT meta`/`UPDATE`), clears files from body, injects content (deterministic block without unique markers), maintains an in-memory injection guard (`_injection_guard`) and file content cache (`_file_content_cache`), and sets `body["metadata"]["rag_mode"] = "full_files"`. Always.
 - **Filter B** (when ON): restores file refs from `chat.meta` into body, removes `rag_mode` from metadata, reads the known filenames from `chat.meta["rag_mode_files"]`, and removes the system message containing `--- <filename> ---` from messages.
 - **Pipe**: reads `body["metadata"].get("rag_mode")`. If the value is `"full_files"`, it removes semantic KB tools. If the key is absent or has any other value, it does nothing.
 
@@ -494,7 +523,9 @@ This design intentionally uses the "naive" approach. Reasons:
 
 ### 10.2 Context compaction and content loss
 
-Open WebUI's `compact_messages_for_request` runs **before** filter inlets in `process_chat_payload` (compaction at ~line 2370, filters at ~line 2430). Filter A does not rely on message scanning — it compares file IDs stored in `chat.meta["full_files_injected"]` against the current references. If the file IDs are the same, injection is skipped regardless of whether the message content survived compaction.
+Open WebUI's `compact_messages_for_request` runs **before** filter inlets in `process_chat_payload` (compaction at ~line 2370, filters at ~line 2430). Filter A uses an in-memory guard (`_injection_guard`) combined with a lightweight heuristic scan of `messages[0]` (`_is_content_still_in_messages`) to detect whether the content block survived compaction. If the guard file IDs match but the content block is missing from `messages[0]` (e.g. dropped by compaction), the guard misses and the content is re-injected from the in-memory file content cache (`_file_content_cache`) — no DB reads required.
+
+Because the filter executes **before** the request reaches the provider, the re-injection happens before the provider ever sees the compacted body. The content block is always present in the request sent to the provider, so the KV cache prefix remains stable across turns regardless of compaction activity.
 
 The persisted references in `chat.meta["rag_mode_files"]` are unaffected by compaction. Switching to RAG mode from any turn still works - Filter B restores the references and the built-in pipeline takes over.
 
@@ -508,7 +539,7 @@ Non-semantic KB tools (`view_knowledge_file`, `grep_knowledge_files`, `search_kn
 
 ### 10.5 File upload mid-conversation
 
-If the user uploads a new file while `full_files` mode is active, Filter A detects it in `body["metadata"]["files"]`, persists the reference to `chat.meta["rag_mode_files"]`, and injects its content on the next turn. The previous injected content block is left unchanged - the new content is appended.
+If the user uploads a new file while `full_files` mode is active, Filter A detects it in `body["metadata"]["files"]`, persists the reference to `chat.meta["rag_mode_files"]`, and invalidates both in-memory caches (`_file_content_cache.clear()`, `_injection_guard.pop(chat_id)`). On the next turn, the content block is rebuilt from scratch with all files (old + new), re-read from the database since the cache was cleared.
 
 ---
 
@@ -524,7 +555,9 @@ If the user uploads a new file while `full_files` mode is active, Filter A detec
 | Mode switching | User toggles Filter B on/off |
 | File reference persistence | `chat.meta["rag_mode_files"]` |
 | Injection markers | ``--- filename.ext ---`` (deterministic, no UUIDs) |
-| Re-injection detection | Compare file IDs in chat.meta vs current refs |
+| Re-injection detection | In-memory guard: frozenset of file IDs + heuristic scan of messages[0] |
+| Injection guard persistence | In-memory only (no DB writes for guard state) |
+| File content cache | In-memory dict keyed by file_id, populated on first DB read, cleared on new uploads |
 | RAG suppression mechanism | Pop `files` from `body["metadata"]` and `body` |
 | `file_handler` module attribute | Rejected - static, inhibits mode switching |
 | Semantic KB tools in `full_files` | Removed by Pipe |
