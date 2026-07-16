@@ -10,7 +10,6 @@ description: >
 """
 
 import logging
-import time
 from typing import Callable
 
 from pydantic import BaseModel
@@ -32,13 +31,13 @@ def _normalize_refs(files: list[dict]) -> list[dict]:
     ]
 
 
-async def _mutate_chat_meta(chat_id: str | None, **updates) -> None:
-    """Atomically merge ``updates`` into ``chat.meta``.
+async def _persist_file_references(chat_id: str | None, refs: list[dict]) -> None:
+    """Write file references to ``chat.meta['rag_mode_files']``.
 
     Uses the same in-place mutation pattern as
     ``Chats.update_chat_tags_by_id``.
     """
-    if not chat_id or not updates:
+    if not chat_id or not refs:
         return
 
     from open_webui.internal.db import get_async_db_context
@@ -50,14 +49,9 @@ async def _mutate_chat_meta(chat_id: str | None, **updates) -> None:
             return
         chat_item.meta = {
             **(chat_item.meta or {}),
-            **updates,
+            "rag_mode_files": refs,
         }
         await db.commit()
-
-
-async def _persist_file_references(chat_id: str | None, refs: list[dict]) -> None:
-    """Write file references to ``chat.meta['rag_mode_files']``."""
-    await _mutate_chat_meta(chat_id, rag_mode_files=refs)
 
 
 async def _read_persisted_refs(chat_id: str | None) -> list[dict] | None:
@@ -75,40 +69,18 @@ async def _read_persisted_refs(chat_id: str | None) -> list[dict] | None:
         return (chat_item.meta or {}).get("rag_mode_files")
 
 
-async def _read_injection_record(chat_id: str | None) -> dict | None:
-    """Read ``chat.meta['full_files_injected']``, return ``None`` if absent."""
-    if not chat_id:
-        return None
-
-    from open_webui.internal.db import get_async_db_context
-    from open_webui.models.chats import Chat
-
-    async with get_async_db_context() as db:
-        chat_item = await db.get(Chat, chat_id)
-        if chat_item is None:
-            return None
-        return (chat_item.meta or {}).get("full_files_injected")
-
-
-async def _persist_injection_record(
-    chat_id: str | None, record: dict
-) -> None:
-    """Store the injection record in ``chat.meta['full_files_injected']``."""
-    await _mutate_chat_meta(chat_id, full_files_injected=record)
-
-
 def _build_full_content_block(content_parts: list[tuple[str, str]]) -> str:
-    """Build the full content block.
+    """Build a deterministic full-content block.
 
-    No unique markers or UUIDs are injected — the content is deterministic
-    for a given set of files, allowing provider-side prefix caching
-    (e.g. DeepSeek) to work across conversations sharing the same document.
+    No unique markers or UUIDs — the content is purely a function of the
+    file set, allowing provider-side prefix caching (e.g. DeepSeek) to
+    work across conversations that share the same document.
 
     Args:
         content_parts: List of ``(filename, content)`` tuples.
 
     Returns:
-        A single string with all file contents, separated by filename headers.
+        A single string with all file contents separated by filename headers.
     """
     sections = []
     for filename, content in content_parts:
@@ -119,19 +91,23 @@ def _build_full_content_block(content_parts: list[tuple[str, str]]) -> str:
 async def _resolve_and_inject(
     messages: list[dict],
     file_refs: list[dict],
-) -> tuple[list[dict], dict]:
+) -> list[dict]:
     """Resolve file contents from the DB and inject as a system message.
+
+    Open WebUI does not preserve filter-injected system messages between
+    turns in ``body["messages"]``, so the content is re-injected on every
+    request.  The content is deterministic (no UUIDs), so this does not
+    break provider-side prefix caching.
 
     Args:
         messages: Current message list (will be prepended to).
         file_refs: List of ``{"id": ..., "name": ...}``.
 
     Returns:
-        ``(updated_messages, injection_record)``.
-        ``injection_record`` is ``{"at": int, "files": [...]}``.
+        Updated message list with the content block at position 0.
     """
     if not file_refs:
-        return messages, {}
+        return messages
 
     from open_webui.models.files import Files
 
@@ -153,16 +129,11 @@ async def _resolve_and_inject(
             continue
 
     if not content_parts:
-        return messages, {}
+        return messages
 
     block = _build_full_content_block(content_parts)
     messages.insert(0, {"role": "system", "content": block})
-
-    record = {
-        "at": int(time.time()),
-        "files": file_refs,
-    }
-    return messages, record
+    return messages
 
 
 async def _safe_emit(
@@ -184,14 +155,13 @@ class Filter:
     """Always-on filter (priority 0) that enforces *full_files* mode.
 
     Every request with attached files gets:
-    1.  File references persisted to ``chat.meta["rag_mode_files"]``.
+    1.  File references persisted to ``chat.meta["rag_mode_files"]``
+        (needed when the frontend stops re-sending file refs).
     2.  ``body["metadata"]["files"]`` and ``body["files"]`` cleared
         (suppresses the built-in RAG pipeline).
-    3.  Full document content injected as a system message (deterministic
-        content without unique markers, preserving provider prefix cache).
-    4.  An injection record stored in ``chat.meta["full_files_injected"]``
-        so Filter B can later locate and remove the block.
-    5.  ``body["metadata"]["rag_mode"]`` set to ``"full_files"`` for
+    3.  Full document content injected as a system message at position 0.
+        Content is deterministic (no UUIDs), preserving prefix caching.
+    4.  ``body["metadata"]["rag_mode"]`` set to ``"full_files"`` for
         downstream consumers (e.g. the ``agent_loop_guard`` Pipe).
     """
 
@@ -249,48 +219,20 @@ class Filter:
                 len(new_refs),
             )
 
-        # ---- 3. Inject full content (if not already present) --------------
+        # ---- 3. Inject full content --------------------------------------
+        # Always inject on every turn.  Open WebUI does not preserve
+        # filter-injected system messages between turns, so the content
+        # must be re-supplied each time.
+        #
+        # The content is deterministic (no UUIDs), so this does not break
+        # provider-side prefix caching — two conversations sharing the
+        # same document produce the same first N tokens.
+
         messages = body.get("messages", [])
 
         if inject_refs:
-            existing_record = await _read_injection_record(__chat_id__)
-
-            if existing_record:
-                # Compare file IDs stored in the record against current refs.
-                # If the same files are already recorded, the content is
-                # already in the conversation history served to the LLM.
-                existing_ids = {f["id"] for f in existing_record.get("files", [])}
-                current_ids = {f["id"] for f in inject_refs}
-
-                if existing_ids == current_ids:
-                    log.info(
-                        "rag_default_off: already injected (%d file(s)) - skip",
-                        len(inject_refs),
-                    )
-                    if __event_emitter__:
-                        await _safe_emit(
-                            __event_emitter__,
-                            "status",
-                            {
-                                "description": "Full files mode (cached)",
-                                "done": True,
-                            },
-                        )
-                    metadata["rag_mode"] = "full_files"
-                    return body
-
-                log.info(
-                    "rag_default_off: files changed - re-injecting "
-                    "(old=%s, new=%s)",
-                    existing_ids,
-                    current_ids,
-                )
-
-            messages, record = await _resolve_and_inject(
-                messages, inject_refs
-            )
+            messages = await _resolve_and_inject(messages, inject_refs)
             body["messages"] = messages
-            await _persist_injection_record(__chat_id__, record)
             log.info(
                 "rag_default_off: injected full content - %d file(s)",
                 len(inject_refs),
