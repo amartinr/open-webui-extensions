@@ -10,7 +10,9 @@ description: >
 """
 
 import logging
+import time
 from typing import Callable
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -31,13 +33,13 @@ def _normalize_refs(files: list[dict]) -> list[dict]:
     ]
 
 
-async def _persist_file_references(chat_id: str | None, refs: list[dict]) -> None:
-    """Write file references to ``chat.meta['rag_mode_files']``.
+async def _mutate_chat_meta(chat_id: str | None, **updates) -> None:
+    """Atomically merge ``updates`` into ``chat.meta``.
 
-    Uses the same in-place mutation pattern as ``Chats.update_chat_tags_by_id``:
-    fetch the ORM row → mutate ``meta`` → commit.
+    Uses the same in-place mutation pattern as
+    ``Chats.update_chat_tags_by_id``.
     """
-    if not chat_id or not refs:
+    if not chat_id or not updates:
         return
 
     from open_webui.internal.db import get_async_db_context
@@ -49,9 +51,14 @@ async def _persist_file_references(chat_id: str | None, refs: list[dict]) -> Non
             return
         chat_item.meta = {
             **(chat_item.meta or {}),
-            "rag_mode_files": refs,
+            **updates,
         }
         await db.commit()
+
+
+async def _persist_file_references(chat_id: str | None, refs: list[dict]) -> None:
+    """Write file references to ``chat.meta['rag_mode_files']``."""
+    await _mutate_chat_meta(chat_id, rag_mode_files=refs)
 
 
 async def _read_persisted_refs(chat_id: str | None) -> list[dict] | None:
@@ -69,62 +76,70 @@ async def _read_persisted_refs(chat_id: str | None) -> list[dict] | None:
         return (chat_item.meta or {}).get("rag_mode_files")
 
 
-def _has_full_files_marker(messages: list[dict]) -> bool:
-    """Check whether ``[ FULL_FILES_START ]`` exists in any system message.
+async def _read_injection_record(chat_id: str | None) -> dict | None:
+    """Read ``chat.meta['full_files_injected']``, return ``None`` if absent."""
+    if not chat_id:
+        return None
 
-    Handles both plain-string content and multimodal content (list of
-    ``ContentPart`` objects used by Gemini, Claude, etc.).
-    """
-    marker = "[ FULL_FILES_START ]"
-    for msg in messages:
-        if msg.get("role") != "system":
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, str) and marker in content:
-            return True
-        if isinstance(content, list):
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and isinstance(block.get("text"), str)
-                    and marker in block["text"]
-                ):
-                    return True
-    return False
+    from open_webui.internal.db import get_async_db_context
+    from open_webui.models.chats import Chat
+
+    async with get_async_db_context() as db:
+        chat_item = await db.get(Chat, chat_id)
+        if chat_item is None:
+            return None
+        return (chat_item.meta or {}).get("full_files_injected")
 
 
-def _build_full_files_block(files_content: list[tuple[str, str]]) -> str:
-    """Build the delimited full-files block.
+async def _persist_injection_record(
+    chat_id: str | None, record: dict
+) -> None:
+    """Store the injection record in ``chat.meta['full_files_injected']``."""
+    await _mutate_chat_meta(chat_id, full_files_injected=record)
+
+
+def _build_full_content_block(
+    content_parts: list[tuple[str, str]], injection_id: str
+) -> str:
+    """Build the full content block with an embedded injection ID.
+
+    Filter B locates this block by scanning messages for
+    ``[injection:<id>]``.
 
     Args:
-        files_content: List of ``(filename, content)`` tuples.
+        content_parts: List of ``(filename, content)`` tuples.
+        injection_id: UUID that Filter B uses to locate this block.
 
     Returns:
-        A single string with start/end markers and all file contents.
+        A single string with the ID marker followed by all file contents.
     """
-    parts = ["[ FULL_FILES_START ]\n"]
-    for filename, content in files_content:
-        parts.append(f"\n--- {filename} ---\n{content}\n")
-    parts.append("\n[ FULL_FILES_END ]")
-    return "".join(parts)
+    sections = []
+    for filename, content in content_parts:
+        sections.append(f"--- {filename} ---\n{content}")
+    body = "\n\n".join(sections)
+    return f"[injection:{injection_id}]\n{body}"
 
 
-async def _inject_full_content(
+async def _resolve_and_inject(
     messages: list[dict],
     file_refs: list[dict],
-) -> list[dict]:
-    """Inject full file content as a system message at position 0.
+) -> tuple[list[dict], dict]:
+    """Resolve file contents from the DB and inject as a system message.
 
-    Skips files that can't be found in the DB or have empty content.
-    Each lookup failure is logged and does not abort the remaining files.
+    Args:
+        messages: Current message list (will be prepended to).
+        file_refs: List of ``{"id": ..., "name": ...}``.
+
+    Returns:
+        ``(updated_messages, injection_record)``.
+        ``injection_record`` is ``{"id": str, "at": int, "files": [...]}``.
     """
     if not file_refs:
-        return messages
+        return messages, {}
 
     from open_webui.models.files import Files
 
-    files_content: list[tuple[str, str]] = []
+    content_parts: list[tuple[str, str]] = []
     for ref in file_refs:
         file_id = ref.get("id")
         if not file_id:
@@ -134,23 +149,32 @@ async def _inject_full_content(
             if file_model is None:
                 log.warning("rag_default_off: file not found in DB — %s", file_id)
                 continue
-            content = (file_model.data or {}).get("content", "")
-            if content:
-                files_content.append((ref.get("name", "unknown"), content))
+            raw = (file_model.data or {}).get("content", "")
+            if raw:
+                content_parts.append((ref.get("name", "unknown"), raw))
         except Exception:
             log.exception("rag_default_off: error reading file %s", file_id)
             continue
 
-    if not files_content:
-        return messages
+    if not content_parts:
+        return messages, {}
 
-    block = _build_full_files_block(files_content)
+    injection_id = str(uuid4())
+    block = _build_full_content_block(content_parts, injection_id)
     messages.insert(0, {"role": "system", "content": block})
-    return messages
+
+    record = {
+        "id": injection_id,
+        "at": int(time.time()),
+        "files": file_refs,
+    }
+    return messages, record
 
 
-async def _safe_emit(event_emitter: Callable, event_type: str, data: dict) -> None:
-    """Emit an event, swallowing any error so a UI glitch never crashes the filter."""
+async def _safe_emit(
+    event_emitter: Callable, event_type: str, data: dict
+) -> None:
+    """Emit an event, swallowing errors so a UI glitch never crashes the filter."""
     try:
         await event_emitter({"type": event_type, "data": data})
     except Exception:
@@ -170,7 +194,9 @@ class Filter:
     2.  ``body["metadata"]["files"]`` and ``body["files"]`` cleared
         (suppresses the built-in RAG pipeline).
     3.  Full document content injected as a system message.
-    4.  ``body["metadata"]["rag_mode"]`` set to ``"full_files"`` for
+    4.  An injection record stored in ``chat.meta["full_files_injected"]``
+        so Filter B can later locate and remove the block.
+    5.  ``body["metadata"]["rag_mode"]`` set to ``"full_files"`` for
         downstream consumers (e.g. the ``agent_loop_guard`` Pipe).
     """
 
@@ -211,7 +237,6 @@ class Filter:
                 len(new_refs),
             )
         else:
-            # No fresh files — try the persisted store (subsequent turn)
             persisted_refs = await _read_persisted_refs(__chat_id__)
             if persisted_refs:
                 log.info(
@@ -219,7 +244,6 @@ class Filter:
                     len(persisted_refs),
                 )
 
-        # The refs to use for content injection:
         inject_refs = new_refs or persisted_refs or []
 
         # ---- 2. Persist fresh references (first turn with files) ---------
@@ -232,22 +256,33 @@ class Filter:
 
         # ---- 3. Inject full content (if not already present) --------------
         messages = body.get("messages", [])
+
         if inject_refs:
-            if _has_full_files_marker(messages):
+            existing_record = await _read_injection_record(__chat_id__)
+
+            if existing_record:
                 log.info(
-                    "rag_default_off: [FULL_FILES_START] already present — skip injection",
+                    "rag_default_off: already injected (id=%s) — skip",
+                    existing_record["id"],
                 )
                 if __event_emitter__:
                     _safe_emit(
                         __event_emitter__,
                         "status",
-                        {"description": "Full files mode (cached)", "done": True},
+                        {
+                            "description": "Full files mode (cached)",
+                            "done": True,
+                        },
                     )
             else:
-                messages = await _inject_full_content(messages, inject_refs)
+                messages, record = await _resolve_and_inject(
+                    messages, inject_refs
+                )
                 body["messages"] = messages
+                await _persist_injection_record(__chat_id__, record)
                 log.info(
-                    "rag_default_off: injected full content for %d file(s)",
+                    "rag_default_off: injected full content — id=%s, %d file(s)",
+                    record["id"],
                     len(inject_refs),
                 )
                 if __event_emitter__:
@@ -255,7 +290,9 @@ class Filter:
                         __event_emitter__,
                         "status",
                         {
-                            "description": f"Full files mode — {len(inject_refs)} file(s)",
+                            "description": (
+                                f"Full files mode — {len(inject_refs)} file(s)"
+                            ),
                             "done": True,
                         },
                     )
