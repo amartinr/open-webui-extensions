@@ -1,10 +1,10 @@
-# Implementation Plan — Filter B: `rag_enable`
+# Implementation Plan - Filter B: `rag_enable`
 
 **File:** `filters/rag_mode_selector/rag_enable.py`
 
 **Purpose:** Toggleable filter (`self.toggle = True`, priority 1) that appears as a clickable chip in the chat UI. When enabled by the user, it restores standard RAG behaviour: repopulates file references from `chat.meta["rag_mode_files"]` into `body["metadata"]["files"]`, removes the `rag_mode` flag, and strips the full-content block from messages.
 
-When disabled (chip off), the filter is a no-op — Filter A's decisions stand, and `full_files` mode remains active.
+When disabled (chip off), the filter is a no-op - Filter A's decisions stand, and `full_files` mode remains active.
 
 Filter B runs **after** Filter A (priority 1 > priority 0), so it receives `body` in the state Filter A left it. It reverses what it needs to.
 
@@ -55,11 +55,11 @@ async def inlet(
 - **`__metadata__`**: Full metadata dict. Can be used as fallback for `chat_id`.
 - **`__user__`**: User dict for file permission checks if needed.
 
-> **Note on toggle behaviour:** When the user has the chip **OFF** (RAG disabled, full_files mode), this filter's `inlet()` is **not called at all**. The gating happens at dispatch time (`filter.py` lines 37-40). So there is no need for an early return or `if not self.toggle` check inside `inlet()` — when this method runs, the chip is always ON.
+> **Note on toggle behaviour:** When the user has the chip **OFF** (RAG disabled, full_files mode), this filter's `inlet()` is **not called at all**. The gating happens at dispatch time (`filter.py` lines 37-40). So there is no need for an early return or `if not self.toggle` check inside `inlet()` - when this method runs, the chip is always ON.
 
 ---
 
-## 3. Inlet Flow — Step by Step
+## 3. Inlet Flow - Step by Step
 
 ```
 inlet(body)   ← ONLY runs when user has the chip ON
@@ -224,7 +224,7 @@ So removing the entire message that contains the marker is correct. We never inj
 
 ## 7. Interaction with Filter A
 
-The two filters coordinate through **three** keys — no shared references, no internal state:
+The two filters coordinate through **three** keys - no shared references, no internal state:
 
 | Key | Written by | Read by |
 |---|---|---|
@@ -240,7 +240,7 @@ Request arrives
   └─> Filter A inlet (prio=0)
   │     Persists refs, clears files, injects content,
   │     stores injection record, sets rag_mode flag
-  └─> Filter B inlet (prio=1) — ONLY if chip is ON
+  └─> Filter B inlet (prio=1) - ONLY if chip is ON
   │     Restores files, removes rag_mode flag,
   │     reads injection id, removes content block from messages
   └─> chat_completion_files_handler
@@ -332,10 +332,10 @@ from open_webui.internal.db import get_async_db_context
 
 | # | Scenario | Prerequisites | Steps | Expected result |
 |---|---|---|---|---|
-| 1 | RAG mode — first turn | Filter A + B assigned to model, Filter B chip ON | 1. Upload a PDF<br>2. Ask a question | RAG runs. Retrieval chunks appear. Full content block is absent. |
+| 1 | RAG mode - first turn | Filter A + B assigned to model, Filter B chip ON | 1. Upload a PDF<br>2. Ask a question | RAG runs. Retrieval chunks appear. Full content block is absent. |
 | 2 | Switch to full_files mid-conversation | After step 1, toggle Filter B OFF | 3. Ask a follow-up | Injection record exists but marker absent from messages → Filter A re-injects. Full content appears. RAG suppressed. |
 | 3 | Switch back to RAG | After step 2, toggle Filter B ON | 4. Ask another question | Files restored from `chat.meta`, injection block removed via `[injection:<id>]`, RAG runs again. |
-| 4 | RAG mode — no files | Filter B ON, no files uploaded | Ask any question | No file restoration (nothing in meta). Filter B is a no-op for files but removes the (absent) rag_mode flag and (absent) injection block. |
+| 4 | RAG mode - no files | Filter B ON, no files uploaded | Ask any question | No file restoration (nothing in meta). Filter B is a no-op for files but removes the (absent) rag_mode flag and (absent) injection block. |
 | 5 | Multiple uploads in RAG mode | Filter B ON | Upload 2 files, ask question | Both files processed by RAG pipeline. |
 | 6 | Toggle ON at chat start | Filter B ON, no prior messages | Upload file, ask question | RAG runs immediately. Filter A persists refs and injects content. Filter B restores refs and removes the injection block before `chat_completion_files_handler` runs. |
 
@@ -363,4 +363,4 @@ In this scenario, Filter B is effectively a no-op. The two filters form a matche
 4. Assign both filters to the same test model (A: prio 0, B: prio 1)
 5. Configure `rag_enable` to start OFF by default
 6. Run verification checklist (section 10)
-7. Proceed to Pipe integration (see DESIGN.md section 6 — out of scope for this project)
+7. Proceed to Pipe integration (see DESIGN.md section 6 - out of scope for this project)

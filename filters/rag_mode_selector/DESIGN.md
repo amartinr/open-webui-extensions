@@ -1,4 +1,4 @@
-# Design Document — RAG Mode Controller
+# Design Document - RAG Mode Controller
 
 **Two-filter system for per-conversation RAG toggling.**
 
@@ -8,16 +8,16 @@ The Pipe integration described in section 6 is documented for architectural comp
 
 ## Table of Contents
 
-1. [Preface — Rationale](#preface--rationale)
+1. [Preface - Rationale](#preface--rationale)
 2. [Purpose](#1-purpose)
 3. [Architecture](#2-architecture)
-4. [Filter A: rag_default_off — Full Files by Default](#3-filter-a-rag_default_off--full-files-by-default)
+4. [Filter A: rag_default_off - Full Files by Default](#3-filter-a-rag_default_off--full-files-by-default)
     - [Design rationale](#31-design-rationale)
     - [Responsibilities](#32-responsibilities)
     - [File reference persistence](#33-file-reference-persistence)
     - [Injection markers](#34-injection-markers)
     - [Knowledge Bases](#35-knowledge-bases)
-5. [Filter B: rag_enable — Restore RAG on Demand](#4-filter-b-rag_enable--restore-rag-on-demand)
+5. [Filter B: rag_enable - Restore RAG on Demand](#4-filter-b-rag_enable--restore-rag-on-demand)
     - [Design rationale](#41-design-rationale)
     - [Responsibilities](#42-responsibilities)
 6. [How the two filters interact](#5-how-the-two-filters-interact)
@@ -36,11 +36,11 @@ The Pipe integration described in section 6 is documented for architectural comp
 
 ---
 
-## Preface — Rationale
+## Preface - Rationale
 
 Open WebUI ships with a powerful global RAG pipeline: when a user attaches files to a chat, the system chunks them, generates embeddings, and on every message performs semantic retrieval plus reranking to inject the most relevant fragments as context into the LLM prompt.
 
-This default flow works well for general queries that need a synthesised answer drawn from multiple sources. It does not cover every use case, however. A lawyer reviewing contractual clauses, a doctor consulting a clinical protocol, or a researcher verifying a textual citation does not want reranked fragments — they want the complete document, intact, word for word, injected directly into context so the LLM can operate over it without information loss or reranking bias.
+This default flow works well for general queries that need a synthesised answer drawn from multiple sources. It does not cover every use case, however. A lawyer reviewing contractual clauses, a doctor consulting a clinical protocol, or a researcher verifying a textual citation does not want reranked fragments - they want the complete document, intact, word for word, injected directly into context so the LLM can operate over it without information loss or reranking bias.
 
 Open WebUI does not offer this capability natively. RAG is global and monolithic: semantic retrieval + reranking, always the same. There is no "full document" mode a user can toggle per task. The only workaround is the global env var `BYPASS_EMBEDDING_AND_RETRIEVAL`, which applies to every conversation of every user indiscriminately.
 
@@ -71,12 +71,12 @@ User → Open WebUI
     │  FILTER A (always-on, prio 0) │
     │  rag_default_off              │
     │                               │
-    │  — Always persists refs in    │
+    │  - Always persists refs in    │
     │    chat.meta                   │
-    │  — Always clears files[]      │
-    │  — Injects full content if    │
+    │  - Always clears files[]      │
+    │  - Injects full content if    │
     │    not already present         │
-    │  — Always sets rag_mode       │
+    │  - Always sets rag_mode       │
     │    = "full_files"             │
     └───────────┬──────────────────┘
                 │
@@ -86,10 +86,10 @@ User → Open WebUI
     │  rag_enable                   │
     │                               │
     │  If ON:                       │
-    │  — Restores files[] from      │
+    │  - Restores files[] from      │
     │    chat.meta                   │
-    │  — Removes rag_mode flag      │
-    │  — Removes full content block │
+    │  - Removes rag_mode flag      │
+    │  - Removes full content block │
     │  If OFF: passthrough           │
     └───────────┬──────────────────┘
                 │
@@ -104,14 +104,14 @@ User → Open WebUI
     │  PIPE (existing manifold)     │
     │  agent_loop_guard             │
     │                               │
-    │  — If rag_mode == "full_files":│
+    │  - If rag_mode == "full_files":│
     │    removes query_knowledge_    │
     │    files, query_knowledge_     │
     │    bases from tools[]         │
-    │  — If rag_mode absent:        │
+    │  - If rag_mode absent:        │
     │    no-op                      │
-    │  — All existing logic intact  │
-    │  — Proxies to gateway         │
+    │  - All existing logic intact  │
+    │  - Proxies to gateway         │
     └───────────┬──────────────────┘
                 │
                 ▼
@@ -120,7 +120,7 @@ User → Open WebUI
 
 ---
 
-## 3. Filter A: `rag_default_off` — Full Files by Default
+## 3. Filter A: `rag_default_off` - Full Files by Default
 
 **File:** `filters/rag_mode_selector/rag_default_off.py`
 
@@ -128,7 +128,7 @@ User → Open WebUI
 
 ### 3.1 Design rationale
 
-This filter represents the opinion that full-document context is the better default. It always runs and always enforces full-document mode. The user does not see it in the UI — it has no chip, no toggle. It is transparent infrastructure.
+This filter represents the opinion that full-document context is the better default. It always runs and always enforces full-document mode. The user does not see it in the UI - it has no chip, no toggle. It is transparent infrastructure.
 
 When this filter alone is active, every request with attached files receives the complete document content. The built-in RAG pipeline never runs because the files reference is always cleared before the handler sees it.
 
@@ -143,7 +143,7 @@ Every time the inlet runs:
    Pop `files` from both `body["metadata"]` and `body`. This causes `chat_completion_files_handler()` at line 1779 of `middleware.py` to see no files and skip the entire retrieval + reranking step. Uses `.pop(key, None)` so the operation is safe even if a key is absent.
 
 3. **Inject full content (if not already present).**
-   Check `chat.meta["full_files_injected"]`. If a record exists **and** the injection marker `[injection:<id>]` is actually present in the system messages, the content was injected on a previous turn — skip injection. If either the record is absent or the marker is missing from messages (e.g. dropped by context compaction), retrieve the full content of each referenced file from the `file` table (via `open_webui.models.files.Files`, field `data.content`) and prepend a system message to `body["messages"]`.
+   Check `chat.meta["full_files_injected"]`. If a record exists **and** the injection marker `[injection:<id>]` is actually present in the system messages, the content was injected on a previous turn - skip injection. If either the record is absent or the marker is missing from messages (e.g. dropped by context compaction), retrieve the full content of each referenced file from the `file` table (via `open_webui.models.files.Files`, field `data.content`) and prepend a system message to `body["messages"]`.
 
    The dual check (record + message marker) ensures that if context compaction drops the injected block, the content is **re-injected** on the next turn even though the `chat.meta` record survives.
 
@@ -152,7 +152,7 @@ Every time the inlet runs:
 
 ### 3.3 File reference persistence
 
-`chat.meta["rag_mode_files"]` is stored in the `meta` JSON column on the `Chat` table (`models/chats.py` — `Column(JSON, server_default='{}')`). It survives server restarts.
+`chat.meta["rag_mode_files"]` is stored in the `meta` JSON column on the `Chat` table (`models/chats.py` - `Column(JSON, server_default='{}')`). It survives server restarts.
 
 Filter A writes to it whenever files are present in the body. Filter B reads from it when the user enables RAG mode. No other component writes to or reads from this key.
 
@@ -170,7 +170,7 @@ Full content of the first file...
 Full content of the second file...
 ```
 
-- `[injection:<uuid>]` is the presence check — Filter A scans system messages for this
+- `[injection:<uuid>]` is the presence check - Filter A scans system messages for this
   exact string (paired with the `chat.meta` record).
 - Filter B reads the injection record from `chat.meta["full_files_injected"]` and scans
   messages for `[injection:<id>]` to locate and remove the entire block.
@@ -182,7 +182,7 @@ Knowledge Bases are not affected by this filter. When the model has native funct
 
 ---
 
-## 4. Filter B: `rag_enable` — Restore RAG on Demand
+## 4. Filter B: `rag_enable` - Restore RAG on Demand
 
 **File:** `filters/rag_mode_selector/rag_enable.py`
 
@@ -190,7 +190,7 @@ Knowledge Bases are not affected by this filter. When the model has native funct
 
 ### 4.1 Design rationale
 
-This filter is the user-facing part of the system. When the user wants standard RAG behaviour (semantic retrieval + reranking), they toggle this filter on. When they want the full-document default, they toggle it off. The chip provides a single on/off affordance — no valves, no modals needed.
+This filter is the user-facing part of the system. When the user wants standard RAG behaviour (semantic retrieval + reranking), they toggle this filter on. When they want the full-document default, they toggle it off. The chip provides a single on/off affordance - no valves, no modals needed.
 
 Because Filter B runs **after** Filter A (thanks to `priority = 1`), it receives `body` in whatever state Filter A left it. It can therefore reverse Filter A's decisions without either filter needing to know about the other.
 
@@ -205,7 +205,7 @@ When **ON** (chip enabled, RAG mode active):
    Delete `body["metadata"]["rag_mode"]` (via `.pop("rag_mode", None)`). The Pipe only removes semantic KB tools when this key has the value `"full_files"`. Removing the key signals "RAG mode" to the Pipe.
 
 3. **Remove the full content block.**
-   Read `chat.meta["full_files_injected"]` to obtain the injection ID, then scan `body["messages"]` for the system message containing `[injection:<id>]` and remove it. There is no reason for the LLM to see the full content block when RAG chunks are being injected by the built-in pipeline — it would only waste context tokens and potentially confuse the model.
+   Read `chat.meta["full_files_injected"]` to obtain the injection ID, then scan `body["messages"]` for the system message containing `[injection:<id>]` and remove it. There is no reason for the LLM to see the full content block when RAG chunks are being injected by the built-in pipeline - it would only waste context tokens and potentially confuse the model.
 
 When **OFF** (chip disabled, full_files mode active):
 
@@ -217,13 +217,13 @@ When **OFF** (chip disabled, full_files mode active):
 
 ### 5.1 Sequential execution via priority
 
-Open WebUI processes filters in order of their `Valves.priority` value (`filter.py` — `get_sorted_filter_ids`). The same `form_data` dict is passed sequentially through each filter's `inlet`. Filter B always receives whatever `body` Filter A produced.
+Open WebUI processes filters in order of their `Valves.priority` value (`filter.py` - `get_sorted_filter_ids`). The same `form_data` dict is passed sequentially through each filter's `inlet`. Filter B always receives whatever `body` Filter A produced.
 
 This means the filters do not need to communicate directly. Filter A always sets up `full_files` mode. Filter B, when active, undoes what it needs to and lets the RAG pipeline take over.
 
 ### 5.2 Example traces
 
-**Trace 1 — User uploads a file, keeps Filter B OFF (full_files)**
+**Trace 1 - User uploads a file, keeps Filter B OFF (full_files)**
 
 ```
 Turn 1
@@ -243,7 +243,7 @@ FILTER A (prio=0):
   6. body["metadata"]["rag_mode"] ← "full_files"
 
 FILTER B (prio=1, OFF):
-  passthrough — does nothing
+  passthrough - does nothing
 
 chat_completion_files_handler:
   body["metadata"]["files"] is [] → skipped
@@ -254,7 +254,7 @@ Pipe agent_loop_guard:
 ```
 
 ```
-Turn 2 — same state, user asks a follow-up
+Turn 2 - same state, user asks a follow-up
 
 BEFORE FILTERS:
   body["metadata"]["files"] = []   (frontend does not re-send file refs)
@@ -271,7 +271,7 @@ FILTER A (prio=0):
   4. body["metadata"]["rag_mode"] ← "full_files"
 
 FILTER B (prio=1, OFF):
-  passthrough — does nothing
+  passthrough - does nothing
 
 chat_completion_files_handler:
   body["metadata"]["files"] is [] → skipped
@@ -281,10 +281,10 @@ Pipe agent_loop_guard:
   Proxies to gateway
 ```
 
-**Trace 2 — User activates Filter B (wants RAG)**
+**Trace 2 - User activates Filter B (wants RAG)**
 
 ```
-Turn 3 — Filter B is now ON
+Turn 3 - Filter B is now ON
 
 BEFORE FILTERS:
   body["metadata"]["files"] = []   (still empty from frontend)
@@ -312,15 +312,15 @@ Pipe agent_loop_guard:
   Proxies to gateway
 ```
 
-**Trace 3 — User switches back to full_files (Filter B OFF again)**
+**Trace 3 - User switches back to full_files (Filter B OFF again)**
 
 ```
-Turn 4 — Filter B is OFF
+Turn 4 - Filter B is OFF
 
 BEFORE FILTERS:
   body["metadata"]["files"] = []
   body["messages"] = [system: <source>chunk1</source>, user: "...", ...]
-  (No injection block — Filter B removed it on turn 3)
+  (No injection block - Filter B removed it on turn 3)
 
 FILTER A (prio=0):
   1. No files in body → no new persistence
@@ -330,7 +330,7 @@ FILTER A (prio=0):
   4. body["metadata"]["rag_mode"] ← "full_files"
 
 FILTER B (prio=1, OFF):
-  passthrough — does nothing
+  passthrough - does nothing
 
 chat_completion_files_handler:
   body["metadata"]["files"] is [] → skipped
@@ -351,7 +351,7 @@ Pipe agent_loop_guard:
 The `agent_loop_guard` Pipe (`pipes/agent_loop_guard/agent_loop_guard.py`) is an existing, production-ready manifold that:
 
 - Discovers models from a configured gateway via `pipes()`
-- Proxies all chat completion requests — streaming and non-streaming — with full auth and custom header support
+- Proxies all chat completion requests - streaming and non-streaming - with full auth and custom header support
 - Detects and prevents infinite tool-calling loops (escalation: warning → final warning → soft-block)
 - Enforces a configurable tool-call budget per turn (runaway protection)
 - Filters tools through an admin-configurable blocklist (`TOOL_BLOCKLIST`)
@@ -365,7 +365,7 @@ When `body["metadata"]["rag_mode"] == "full_files"`, the Pipe removes the semant
 
 ### 6.3 Tools affected
 
-Only two tools — the ones that perform semantic queries — are removed. All non-semantic KB browsing tools remain available.
+Only two tools - the ones that perform semantic queries - are removed. All non-semantic KB browsing tools remain available.
 
 | Tool | In `full_files` mode | In `rag` mode |
 |---|---|---|
@@ -387,7 +387,7 @@ This classification is verified against the tool docstrings in `builtin.py`:
 
 ### 6.4 Integration point
 
-The check runs **after** the existing loop-detection, runaway, and blocklist logic, but **before** the request is forwarded to the gateway. In-place slice assignment (`tools[:] = […]`) is used — the same pattern already proven by the blocklist and loop logic — so the change survives the middleware's shallow copy.
+The check runs **after** the existing loop-detection, runaway, and blocklist logic, but **before** the request is forwarded to the gateway. In-place slice assignment (`tools[:] = […]`) is used - the same pattern already proven by the blocklist and loop logic - so the change survives the middleware's shallow copy.
 
 No new valves. The Pipe's `Valves`, `UserValves`, and `pipes()` method remain untouched.
 
@@ -419,16 +419,16 @@ All points have been verified against the Open WebUI source code (`main` branch)
 
 | Aspect | Status | Evidence |
 |---|---|---|
-| Inlet runs before `chat_completion_files_handler` | ✅ | `middleware.py` — `process_chat_payload()`: inlet filters at ~line 2430, files handler at ~line 2785 |
-| Clearing `body["metadata"]["files"]` suppresses RAG | ✅ | `middleware.py` line 1779: `if files := body.get('metadata', {}).get('files', None)` — if None or empty, skipped |
-| Filter priority controls execution order | ✅ | `filter.py` — `get_sorted_filter_ids` sorts by `Valves.priority`; `process_filter_functions` iterates sequentially |
-| Full file content accessible in-process | ✅ | `models/files.py` — `File` table stores extracted text under `data.content` |
-| `chat.meta` is persistent JSON | ✅ | `models/chats.py` — `Chat.meta` is `Column(JSON, server_default='{}')` |
-| `chat_id` available in inlet | ✅ | `filter.py` — `extra_params` includes `__metadata__` and `__chat_id__` |
+| Inlet runs before `chat_completion_files_handler` | ✅ | `middleware.py` - `process_chat_payload()`: inlet filters at ~line 2430, files handler at ~line 2785 |
+| Clearing `body["metadata"]["files"]` suppresses RAG | ✅ | `middleware.py` line 1779: `if files := body.get('metadata', {}).get('files', None)` - if None or empty, skipped |
+| Filter priority controls execution order | ✅ | `filter.py` - `get_sorted_filter_ids` sorts by `Valves.priority`; `process_filter_functions` iterates sequentially |
+| Full file content accessible in-process | ✅ | `models/files.py` - `File` table stores extracted text under `data.content` |
+| `chat.meta` is persistent JSON | ✅ | `models/chats.py` - `Chat.meta` is `Column(JSON, server_default='{}')` |
+| `chat_id` available in inlet | ✅ | `filter.py` - `extra_params` includes `__metadata__` and `__chat_id__` |
 | Pipe receives and can modify `body` after tool resolution | ✅ | Pipes receive the full `body` dict, including `tools[]` and `metadata` |
-| `file_handler` is static (module-level) | ✅ | `filter.py` line 71 — read from module, not per-request. Would prevent mode switching. |
+| `file_handler` is static (module-level) | ✅ | `filter.py` line 71 - read from module, not per-request. Would prevent mode switching. |
 | Execution order is fundamental architecture | ✅ | Filters exist to modify body before handlers consume it |
-| Tool classification (semantic vs non-semantic) | ✅ | `builtin.py` — docstrings confirmed for each tool |
+| Tool classification (semantic vs non-semantic) | ✅ | `builtin.py` - docstrings confirmed for each tool |
 
 ### 8.2 Known trade-off: clearing `files[]` vs `file_handler`
 
@@ -438,19 +438,19 @@ The official Open WebUI Filter Function documentation notes:
 
 This design intentionally uses the "naive" approach. Reasons:
 
-1. **`file_handler` is all-or-nothing.** A filter with `file_handler = True` always skips the built-in RAG. It cannot be toggled per request. To support dynamic switching between `rag` and `full_files`, we would need to reimplement the entire RAG pipeline within the filter — impractical and fragile.
+1. **`file_handler` is all-or-nothing.** A filter with `file_handler = True` always skips the built-in RAG. It cannot be toggled per request. To support dynamic switching between `rag` and `full_files`, we would need to reimplement the entire RAG pipeline within the filter - impractical and fragile.
 
 2. **The two-filter architecture sidesteps the three-state problem.** With `file_handler`, a single filter would need to handle: (a) filter disabled → built-in RAG, (b) filter enabled + RAG mode → built-in RAG with tools, (c) filter enabled + full_files mode → custom injection without tools. Three states, two outcomes sharing one outcome's pipeline, and no way to express it with a static module flag.
 
 3. **The two-filter approach maps cleanly onto the available primitives.** Filter A (always-on, no toggle) takes the `full_files` path. Filter B (toggleable) reverses it when enabled. Each filter does one thing. `priority` enforces order. No module flags, no state machines.
 
-4. **The failure mode is non-catastrophic.** If a future Open WebUI version adds new file-plumbing keys, the LLM would receive both RAG chunks (from the new key's handler) and the full content block (from Filter A) — duplicated context, not a crash. The fix is a filter update.
+4. **The failure mode is non-catastrophic.** If a future Open WebUI version adds new file-plumbing keys, the LLM would receive both RAG chunks (from the new key's handler) and the full content block (from Filter A) - duplicated context, not a crash. The fix is a filter update.
 
 ---
 
 ## 9. Installation and configuration
 
-### 9.1 Install Filter A — `rag_default_off`
+### 9.1 Install Filter A - `rag_default_off`
 
 1. **Admin Panel → Functions → Create Function**
 2. Type: **Filter**
@@ -459,7 +459,7 @@ This design intentionally uses the "naive" approach. Reasons:
 5. Set `priority = 0` in `Valves`
 6. **Model Settings → Filters**: assign this filter to the model that users will use
 
-### 9.2 Install Filter B — `rag_enable`
+### 9.2 Install Filter B - `rag_enable`
 
 1. **Admin Panel → Functions → Create Function**
 2. Type: **Filter**
@@ -493,11 +493,11 @@ This design intentionally uses the "naive" approach. Reasons:
 
 Open WebUI's `compact_messages_for_request` runs **before** filter inlets in `process_chat_payload` (compaction at ~line 2370, filters at ~line 2430). If compaction drops the injected content block, Filter A's `chat.meta["full_files_injected"]` record survives but the `[injection:<id>]` marker is gone from messages. On the next turn, Filter A detects the mismatch (record exists, marker absent) and **re-injects** the content with a new injection id.
 
-The persisted references in `chat.meta["rag_mode_files"]` are unaffected by compaction. Switching to RAG mode from any turn still works — Filter B restores the references and the built-in pipeline takes over.
+The persisted references in `chat.meta["rag_mode_files"]` are unaffected by compaction. Switching to RAG mode from any turn still works - Filter B restores the references and the built-in pipeline takes over.
 
 ### 10.3 No files attached
 
-If no files are attached and `chat.meta["rag_mode_files"]` is empty, Filter A has no content to inject and effectively becomes a no-op. Filter B toggling has no visible effect — both modes produce the same outcome.
+If no files are attached and `chat.meta["rag_mode_files"]` is empty, Filter A has no content to inject and effectively becomes a no-op. Filter B toggling has no visible effect - both modes produce the same outcome.
 
 ### 10.4 KB access in `full_files` mode
 
@@ -505,7 +505,7 @@ Non-semantic KB tools (`view_knowledge_file`, `grep_knowledge_files`, `search_kn
 
 ### 10.5 File upload mid-conversation
 
-If the user uploads a new file while `full_files` mode is active, Filter A detects it in `body["metadata"]["files"]`, persists the reference to `chat.meta["rag_mode_files"]`, and injects its content on the next turn. The previous injected content block is left unchanged — the new content is appended.
+If the user uploads a new file while `full_files` mode is active, Filter A detects it in `body["metadata"]["files"]`, persists the reference to `chat.meta["rag_mode_files"]`, and injects its content on the next turn. The previous injected content block is left unchanged - the new content is appended.
 
 ---
 
@@ -516,14 +516,14 @@ If the user uploads a new file while `full_files` mode is active, Filter A detec
 | Default mode | `full_files` (full document context) |
 | How to get RAG mode | Enable a toggleable filter (`rag_enable`) |
 | Two filters vs one | Two: each does one thing, coordinated by `priority` |
-| Filter A — `rag_default_off` | Always-on, invisible, prio=0, enforces full_files |
-| Filter B — `rag_enable` | Toggleable, visible chip, prio=1, restores RAG when ON |
+| Filter A - `rag_default_off` | Always-on, invisible, prio=0, enforces full_files |
+| Filter B - `rag_enable` | Toggleable, visible chip, prio=1, restores RAG when ON |
 | Mode switching | User toggles Filter B on/off |
 | File reference persistence | `chat.meta["rag_mode_files"]` |
 | Injection markers | `[injection:<uuid>]` embedded in content; record in `chat.meta["full_files_injected"]` |
-| Re-injection after content loss | Yes — dual check (record + message marker) triggers re-injection |
+| Re-injection after content loss | Yes - dual check (record + message marker) triggers re-injection |
 | RAG suppression mechanism | Pop `files` from `body["metadata"]` and `body` |
-| `file_handler` module attribute | Rejected — static, inhibits mode switching |
+| `file_handler` module attribute | Rejected - static, inhibits mode switching |
 | Semantic KB tools in `full_files` | Removed by Pipe |
 | Non-semantic KB tools in `full_files` | Left available |
 | Filter↔Filter coordination | Sequential via `priority` (0 then 1) |

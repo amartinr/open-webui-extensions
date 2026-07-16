@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helpers — module-level, outside the Filter class
+# Helpers - module-level, outside the Filter class
 # ---------------------------------------------------------------------------
 
 
@@ -178,7 +178,7 @@ async def _resolve_and_inject(
         try:
             file_model = await Files.get_file_by_id(file_id)
             if file_model is None:
-                log.warning("rag_default_off: file not found in DB — %s", file_id)
+                log.warning("rag_default_off: file not found in DB - %s", file_id)
                 continue
             raw = (file_model.data or {}).get("content", "")
             if raw:
@@ -236,7 +236,7 @@ class Filter:
 
     def __init__(self):
         self.valves = self.Valves()
-        # No self.toggle — always active, no UI chip
+        # No self.toggle - always active, no UI chip
 
     async def inlet(
         self,
@@ -245,7 +245,7 @@ class Filter:
         __user__: dict | None = None,
         __event_emitter__: Callable | None = None,
     ) -> dict:
-        log.info("rag_default_off: inlet — chat_id=%s", __chat_id__)
+        log.info("rag_default_off: inlet - chat_id=%s", __chat_id__)
 
         # ---- 0. Guard: ensure metadata is a writable dict ------------------
         metadata = body.get("metadata")
@@ -264,7 +264,7 @@ class Filter:
 
         if new_refs:
             log.info(
-                "rag_default_off: fresh files from body — %d file(s)",
+                "rag_default_off: fresh files from body - %d file(s)",
                 len(new_refs),
             )
         else:
@@ -296,7 +296,7 @@ class Filter:
 
             if existing_record and marker_still_present:
                 log.info(
-                    "rag_default_off: already injected (id=%s) — skip",
+                    "rag_default_off: already injected (id=%s) - skip",
                     existing_record["id"],
                 )
                 if __event_emitter__:
@@ -312,7 +312,7 @@ class Filter:
                 if existing_record and not marker_still_present:
                     log.info(
                         "rag_default_off: record exists but block missing "
-                        "(compaction?) — re-injecting"
+                        "(compaction?) - re-injecting"
                     )
                 messages, record = await _resolve_and_inject(
                     messages, inject_refs
@@ -320,7 +320,7 @@ class Filter:
                 body["messages"] = messages
                 await _persist_injection_record(__chat_id__, record)
                 log.info(
-                    "rag_default_off: injected full content — id=%s, %d file(s)",
+                    "rag_default_off: injected full content - id=%s, %d file(s)",
                     record["id"],
                     len(inject_refs),
                 )
@@ -330,13 +330,13 @@ class Filter:
                         "status",
                         {
                             "description": (
-                                f"Full files mode — {len(inject_refs)} file(s)"
+                                f"Full files mode - {len(inject_refs)} file(s)"
                             ),
                             "done": True,
                         },
                     )
         else:
-            log.info("rag_default_off: no files — no-op")
+            log.info("rag_default_off: no files - no-op")
 
         # ---- 4. Set flag for downstream consumers ------------------------
         metadata["rag_mode"] = "full_files"

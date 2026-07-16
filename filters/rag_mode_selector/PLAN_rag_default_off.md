@@ -1,4 +1,4 @@
-# Implementation Plan — Filter A: `rag_default_off`
+# Implementation Plan - Filter A: `rag_default_off`
 
 **File:** `filters/rag_mode_selector/rag_default_off.py`
 
@@ -24,7 +24,7 @@ rag_default_off.py
 │   │   └── priority: int = 0
 │   ├── def __init__(self)
 │   │   ├── self.valves = self.Valves()
-│   │   └── (no self.toggle — always active, no UI surface)
+│   │   └── (no self.toggle - always active, no UI surface)
 │   └── async def inlet(self, body, __chat_id__, __user__, __event_emitter__) -> dict
 └── Module-level helper functions (outside the class)
     ├── _normalize_refs(files) -> list[dict]
@@ -60,7 +60,7 @@ async def inlet(
 
 ---
 
-## 3. Inlet Flow — Step by Step
+## 3. Inlet Flow - Step by Step
 
 ```
 inlet(body)
@@ -194,7 +194,7 @@ Each injection creates a record stored in `chat.meta["full_files_injected"]`:
 
 On every turn, Filter A:
 
-1. Reads `chat.meta["full_files_injected"]` — if absent, no injection has happened yet.
+1. Reads `chat.meta["full_files_injected"]` - if absent, no injection has happened yet.
 2. If the record exists, scans messages for `[injection:<record.id>]` via `_find_injection_marker()`.
    - **Marker found** → content still in context → skip injection.
    - **Marker absent** → content was dropped (compaction, manual message edit) → re-inject with a new id.
@@ -239,7 +239,7 @@ async def _resolve_and_inject(
         try:
             file_model = await Files.get_file_by_id(file_id)
             if file_model is None:
-                log.warning("rag_default_off: file not found in DB — %s", file_id)
+                log.warning("rag_default_off: file not found in DB - %s", file_id)
                 continue
             raw = (file_model.data or {}).get("content", "")
             if raw:
@@ -317,7 +317,7 @@ if skip_files:
         del form_data['files']
 ```
 
-This cleanup happens **after** every filter's inlet has run, so Filter B could not restore files — the cleanup is outside Filter B's control. By using `.pop()` inside the inlet, Filter B can later restore files because it runs second (priority 1) and can undo Filter A's changes before the files_handler runs.
+This cleanup happens **after** every filter's inlet has run, so Filter B could not restore files - the cleanup is outside Filter B's control. By using `.pop()` inside the inlet, Filter B can later restore files because it runs second (priority 1) and can undo Filter A's changes before the files_handler runs.
 
 ---
 
@@ -350,7 +350,7 @@ class Filter:
 
     def __init__(self):
         self.valves = self.Valves()
-        # No self.toggle — always active, invisible to users
+        # No self.toggle - always active, invisible to users
 
     async def inlet(
         self,
