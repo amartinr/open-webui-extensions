@@ -38,7 +38,7 @@ MSG_TOOL_RUNAWAY = (
 
 MSG_NOTIFY_LOOP = "\U0001f527 {tool} budget exhausted after too many identical calls."
 MSG_NOTIFY_RUNAWAY = "\U0001f527 Tool call budget exhausted ({total}/{max_calls})."
-MSG_COUNTER = "\U0001f527 Remaining: {remaining}/{max_calls}"
+MSG_COUNTER = "\U0001f527 Remaining tool calls: {remaining}/{max_calls}"
 
 
 def _build_guard_message(status: str, tool: str | None, total: int, max_calls: int) -> str:
@@ -287,12 +287,12 @@ class Pipe:
             if consecutive >= 2:
                 bad_tool = last_call["name"]
 
-        # Loop detection: consecutive > max_consecutive
-        if max_consecutive > 0 and consecutive > max_consecutive and bad_tool:
+        # Loop detection: consecutive >= max_consecutive
+        if max_consecutive > 0 and consecutive >= max_consecutive and bad_tool:
             return True, bad_tool, "loop", total, max_calls
 
-        # Runaway: total > max_calls (only if no loop)
-        if max_calls > 0 and total > max_calls:
+        # Runaway: total >= max_calls (only if no loop)
+        if max_calls > 0 and total >= max_calls:
             return True, None, "runaway", total, max_calls
 
         return False, None, "", total, max_calls
