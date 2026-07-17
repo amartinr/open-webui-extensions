@@ -17,58 +17,24 @@ import re
 log = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------
-# Guard message helpers
-# --------------------------------------------------------------------------
+GUARD_MARKER = "[Guard Budget Exhausted]"
 
 
-def _build_guard_message(state: dict) -> str:
-    """Build a human-readable guard status message.
-
-    Args:
-        state: dict with keys:
-            - status: str ('ok'|'warning'|'final_warning'|'blocked_tool'|'runaway')
-            - tool: str | None
-            - consecutive: int
-            - total: int
-            - max_calls: int
-            - remaining_calls: int
-
-    Returns:
-        A single, self-contained message string.
-    """
-    remaining = state.get("remaining_calls", 0)
-    max_calls = state.get("max_calls", 0)
-    tool = state.get("tool")
-    consecutive = state.get("consecutive", 0)
-    total = state.get("total", 0)
-    status = state.get("status", "ok")
-
-    if status == "ok":
-        return f"{remaining}/{max_calls} tool calls remaining."
-    elif status == "warning":
+def _build_guard_message(status: str, tool: str | None, total: int, max_calls: int) -> str:
+    """Build the text that replaces the tool result when budget is exhausted."""
+    if status == "loop":
         return (
-            f"{tool} called {consecutive}x with the same arguments. "
-            f"{remaining}/{max_calls} tool calls remaining. "
-            f"Change your approach or summarise."
-        )
-    elif status == "final_warning":
-        return (
-            f"{tool} called {consecutive}x with the same arguments. "
-            f"{remaining}/{max_calls} tool calls remaining. "
-            f"This is your final warning. Stop repeating and summarise."
-        )
-    elif status == "blocked_tool":
-        return (
-            f"TOOL REMOVED: {tool} blocked after {consecutive} identical calls. "
-            f"{remaining}/{max_calls} tool calls remaining. "
-            f"Other tools are still available or you may summarise now."
+            f"{GUARD_MARKER}\n"
+            f"The tool {tool} has been called too many times with the same arguments "
+            f"({total} calls this turn).\n"
+            f"Other tools are still available. Summarise what you have."
         )
     elif status == "runaway":
         return (
-            f"TOOL LIMIT REACHED: {total}/{max_calls}. "
-            f"Tools used in this turn have been removed. "
-            f"Other tools are still available or you may summarise now."
+            f"{GUARD_MARKER}\n"
+            f"Maximum tool calls reached ({total}/{max_calls}). "
+            f"No further tool calls are possible this turn.\n"
+            f"Summarise the information you have collected so far."
         )
     return ""
 
@@ -96,13 +62,12 @@ class Pipe:
         )
         MAX_TOOL_CALLS_PER_TURN: int = Field(
             default=15,
-            description="Max tool calls in a turn before tools are removed (soft-block). Set to 0 to disable.",
+            description="Max tool calls in a turn before the guard fires. Set to 0 to disable.",
         )
-        MAX_CONSECUTIVE_BEFORE_BLOCK: int = Field(
+        MAX_CONSECUTIVE_TOOL_CALLS: int = Field(
             default=4,
             ge=3,
-            description="Consecutive identical tool calls before soft-block (min 3). "
-            "Warnings are spaced automatically: WARNING at 50%, FINAL WARNING at 75%.",
+            description="Max consecutive identical tool calls before budget is exhausted (min 3).",
         )
         TOOL_BLOCKLIST: str = Field(
             default="",
@@ -112,15 +77,14 @@ class Pipe:
 
         @model_validator(mode="after")
         def _check_runaway_gt_loop(self):
-            """Ensure MAX_TOOL_CALLS_PER_TURN > MAX_CONSECUTIVE_BEFORE_BLOCK
-            when both are enabled, so runaway doesn't fire before loop detection."""
+            """Ensure MAX_TOOL_CALLS_PER_TURN > MAX_CONSECUTIVE_TOOL_CALLS
+            when both are enabled."""
             runaway = self.MAX_TOOL_CALLS_PER_TURN
-            loop = self.MAX_CONSECUTIVE_BEFORE_BLOCK
+            loop = self.MAX_CONSECUTIVE_TOOL_CALLS
             if runaway > 0 and loop >= runaway:
                 raise ValueError(
                     f"MAX_TOOL_CALLS_PER_TURN ({runaway}) must be greater than "
-                    f"MAX_CONSECUTIVE_BEFORE_BLOCK ({loop}), otherwise runaway "
-                    f"triggers before loop detection."
+                    f"MAX_CONSECUTIVE_TOOL_CALLS ({loop})."
                 )
             return self
 
@@ -128,17 +92,17 @@ class Pipe:
         MAX_TOOL_CALLS_PER_TURN: int = Field(
             default=0,
             ge=0,
-            description="Max tool calls in a turn before tools are removed (soft-block). 0 = use admin default.",
+            description="Max tool calls in a turn. 0 = use admin default.",
         )
-        MAX_CONSECUTIVE_BEFORE_BLOCK: int = Field(
+        MAX_CONSECUTIVE_TOOL_CALLS: int = Field(
             default=0,
             ge=0,
-            description="Consecutive identical tool calls before soft-block (min 3). 0 = use admin default.",
+            description="Max consecutive identical tool calls. 0 = use admin default.",
         )
 
     def __init__(self):
         self.valves = self.Valves()
-        self._admin_valves = self.Valves()  # snapshot of admin defaults for user-valve resolution
+        self._admin_valves = self.Valves()
         self._models_cache: list[dict] = []
 
     # ------------------------------------------------------------------
@@ -146,7 +110,6 @@ class Pipe:
     # ------------------------------------------------------------------
 
     async def pipes(self) -> list[dict]:
-        """Query gateway for available models. Cache on success, fallback on failure."""
         if not self.valves.GATEWAY_BASE_URL:
             return [{"id": "config", "name": "⚠️ Configure gateway URL"}]
 
@@ -165,7 +128,7 @@ class Pipe:
             ]
 
         self._models_cache = [
-            {"id": m["id"], "name": f"🛡️ {m.get('name', m['id'])}"}
+            {"id": m["id"], "name": f"🔧 {m.get('name', m['id'])}"}
             for m in data.get("data", [])
         ]
         log.info("Model discovery: %d models cached", len(self._models_cache))
@@ -180,24 +143,12 @@ class Pipe:
         user: Optional[dict] = None,
         metadata: Optional[dict] = None,
     ) -> dict:
-        """Build the headers dict for gateway requests.
-
-        Resolves template variables in header values:
-          {{USER_NAME}}, {{USER_ID}}, {{USER_EMAIL}}, {{USER_ROLE}},
-          {{CHAT_ID}}, {{MESSAGE_ID}}.
-        """
         headers = {}
         if self.valves.GATEWAY_AUTH_VALUE:
             headers[self.valves.GATEWAY_AUTH_HEADER] = self.valves.GATEWAY_AUTH_VALUE
-            log.debug(
-                "Auth header: %s = <redacted %d chars>",
-                self.valves.GATEWAY_AUTH_HEADER,
-                len(self.valves.GATEWAY_AUTH_VALUE),
-            )
         else:
-            log.warning("GATEWAY_AUTH_VALUE is empty — gateway requests will have no auth header.")
+            log.warning("GATEWAY_AUTH_VALUE is empty.")
 
-        # Parse custom headers from JSON valve and resolve template vars
         if self.valves.GATEWAY_CUSTOM_HEADERS:
             try:
                 raw_headers = json.loads(self.valves.GATEWAY_CUSTOM_HEADERS)
@@ -220,14 +171,10 @@ class Pipe:
                             val = val.replace(token, resolved)
                         headers[k] = val
                 else:
-                    log.warning("GATEWAY_CUSTOM_HEADERS is not a JSON object — ignoring")
+                    log.warning("GATEWAY_CUSTOM_HEADERS is not a JSON object")
             except json.JSONDecodeError as e:
                 log.warning("GATEWAY_CUSTOM_HEADERS is not valid JSON: %s", e)
 
-        log.debug(
-            "Gateway headers: %s",
-            {k: ("<redacted>" if k == self.valves.GATEWAY_AUTH_HEADER else v) for k, v in headers.items()},
-        )
         return headers
 
     # ------------------------------------------------------------------
@@ -236,107 +183,114 @@ class Pipe:
 
     @staticmethod
     def _parse_tool_list(raw: str) -> set[str]:
-        """Parse a string that may be comma-separated and/or newline-separated
-        into a set of non-empty, stripped tool names.
-
-        Accepts any combination:
-          "search_web, calculator"
-          "search_web\ncalculator"
-          "search_web, calculator\ndelete_file"
-        """
         if not raw or not raw.strip():
             return set()
         return {t.strip() for t in re.split(r"[,\n\r]+", raw) if t.strip()}
 
     def _apply_tool_blocklist(self, body: dict) -> None:
-        """Remove tools from body['tools'] whose names appear in TOOL_BLOCKLIST.
-
-        Mutates body['tools'] in-place.
-        - Returns immediately if TOOL_BLOCKLIST is empty.
-        - If tool_choice targets a blocked tool, it is reset so the LLM can choose freely.
-        """
         raw = getattr(self.valves, "TOOL_BLOCKLIST", "")
         if not raw or not raw.strip():
             return
-
         tools = body.get("tools", [])
         if not tools:
             return
-
         blocked = self._parse_tool_list(raw)
         actual_names = {t.get("function", {}).get("name") for t in tools if t.get("function", {})}
-
         unknown = blocked - actual_names
         if unknown:
-            log.warning(
-                "TOOL_BLOCKLIST contains names not found among available tools: %s",
-                sorted(unknown),
-            )
-
-        body["tools"][:] = [
-            t for t in tools
-            if t.get("function", {}).get("name") not in blocked
-        ]
-
-        # If tool_choice targets a blocked tool, reset it so the LLM can choose freely.
+            log.warning("TOOL_BLOCKLIST contains unknown names: %s", sorted(unknown))
+        body["tools"][:] = [t for t in tools if t.get("function", {}).get("name") not in blocked]
         tool_choice = body.get("tool_choice")
         if isinstance(tool_choice, str) and tool_choice in blocked:
             body.pop("tool_choice", None)
-            log.info("tool_choice '%s' targets a blocked tool — reset", tool_choice)
 
     # ------------------------------------------------------------------
     # Valve resolution
     # ------------------------------------------------------------------
 
     def _resolve_limit(self, user_val: int, admin_val: int) -> int:
-        """Resolve an effective limit: user override wins if non-zero, else admin default."""
         return user_val if user_val > 0 else admin_val
 
     # ------------------------------------------------------------------
     # Tool-call analysis
     # ------------------------------------------------------------------
 
-    def _extract_tool_calls_in_turn(self, messages: list[dict]) -> list[dict]:
-        """Scan backwards from the end until the last user message.
-        Collect every assistant tool_call in the current turn."""
+    def _analyse(self, body: dict) -> tuple[bool, str | None, str, int, int]:
+        """Analyse tool calls and decide if the guard should fire.
+
+        Returns (should_block, tool_to_blame, block_kind, total, max_calls).
+
+        block_kind is 'loop' or 'runaway'.  When should_block is False
+        the other return values are meaningless.
+        """
+        messages = body.get("messages", [])
+        max_calls = self._resolve_limit(
+            self.valves.MAX_TOOL_CALLS_PER_TURN,
+            self._admin_valves.MAX_TOOL_CALLS_PER_TURN,
+        )
+        max_consecutive = self._resolve_limit(
+            self.valves.MAX_CONSECUTIVE_TOOL_CALLS,
+            self._admin_valves.MAX_CONSECUTIVE_TOOL_CALLS,
+        )
+
+        # Extract real tool calls (skip those whose result was replaced by the guard)
         history: list[dict] = []
-        for i in range(len(messages) - 1, -1, -1):
-            msg = messages[i]
+
+        # First pass: identify guard-replaced results
+        guarded_ids: set[str] = set()
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                break
+            if msg.get("role") == "tool":
+                content = msg.get("content", "")
+                if isinstance(content, str) and GUARD_MARKER in content:
+                    guarded_ids.add(msg.get("tool_call_id", ""))
+
+        # Second pass: collect real calls, skipping guarded ones
+        for msg in reversed(messages):
             if msg.get("role") == "user":
                 break
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
+                    if tc.get("id", "") in guarded_ids:
+                        continue
                     try:
                         args = json.loads(tc["function"]["arguments"])
                     except (json.JSONDecodeError, KeyError):
                         args = {}
                     history.append({"name": tc["function"]["name"], "args": args})
         history.reverse()
-        return history
 
-    def _count_consecutive_duplicates(self, history: list[dict]) -> tuple[int, str | None, dict | None]:
-        """Count consecutive identical tool calls from the end of history.
+        total = len(history)
 
-        Returns (count, name, args) of the repeated tool.
-        count=1 means the last call is unique (no consecutive duplicate).
-        """
-        if not history:
-            return 0, None, None
-        last = history[-1]
-        count = 0
-        for tc in reversed(history):
-            if tc["name"] == last["name"] and tc["args"] == last["args"]:
-                count += 1
-            else:
-                break
-        return count, last["name"], last["args"]
+        # Count consecutive identical calls
+        consecutive = 0
+        bad_tool = None
+        if history:
+            last_call = history[-1]
+            for tc in reversed(history):
+                if tc["name"] == last_call["name"] and tc["args"] == last_call["args"]:
+                    consecutive += 1
+                else:
+                    break
+            if consecutive >= 2:
+                bad_tool = last_call["name"]
+
+        # Loop detection: consecutive > max_consecutive
+        if max_consecutive > 0 and consecutive > max_consecutive and bad_tool:
+            return True, bad_tool, "loop", total, max_calls
+
+        # Runaway: total > max_calls (only if no loop)
+        if max_calls > 0 and total > max_calls:
+            return True, None, "runaway", total, max_calls
+
+        return False, None, "", total, max_calls
 
     # ------------------------------------------------------------------
     # Gateway proxy
     # ------------------------------------------------------------------
 
     async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
-        """Stream SSE lines from the gateway back to Open WebUI."""
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
@@ -345,7 +299,6 @@ class Pipe:
                         yield line
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
-        """Non-streaming call to the gateway."""
         async with httpx.AsyncClient(timeout=300) as client:
             r = await client.post(url, json=payload, headers=headers)
             r.raise_for_status()
@@ -370,220 +323,68 @@ class Pipe:
         headers = {"Content-Type": "application/json", **self._build_gateway_headers(user=__user__, metadata=__metadata__)}
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 
+        # --- Analyse tool calls ---------------------------------------------
+        should_block, bad_tool, kind, total, max_calls = self._analyse(body)
+
         log.info(
-            "Agent Loop Guard → %s (model=%s, auth_header=%s, has_auth=%s, custom_headers=%s)",
-            url, real_model, self.valves.GATEWAY_AUTH_HEADER,
-            bool(self.valves.GATEWAY_AUTH_VALUE), bool(self.valves.GATEWAY_CUSTOM_HEADERS),
+            "Agent Loop Guard → %s (block=%s, kind=%s, tool=%s, total=%s, max=%s)",
+            url, should_block, kind, bad_tool, total, max_calls,
         )
 
-        # --- Analyse tool calls ------------------------------------------
-        history = self._extract_tool_calls_in_turn(messages)
-        total = len(history)
+        # --- Block: replace last tool result --------------------------------
+        if should_block:
+            guard_msg = _build_guard_message(kind, bad_tool, total, max_calls)
+            if guard_msg:
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "tool":
+                        messages[i]["content"] = guard_msg
+                        log.info(
+                            "Tool result replaced with guard (kind=%s, tool=%s)",
+                            kind, bad_tool,
+                        )
+                        break
 
-        log.debug(
-            "pipe() called | model=%s | stream=%s | tools=%s | tool_choice=%s | messages=%d",
-            real_model, body.get("stream", False),
-            [t.get("function", {}).get("name") for t in body.get("tools", [])],
-            body.get("tool_choice", "auto"), len(messages),
-        )
-
-        log.debug("Tool calls in turn: %d | history: %s", total, json.dumps(history, indent=2))
-
-        # --- Resolve effective limits (user valve overrides admin if non-zero) -
-        max_calls = self._resolve_limit(
-            self.valves.MAX_TOOL_CALLS_PER_TURN,
-            self._admin_valves.MAX_TOOL_CALLS_PER_TURN,
-        )
-        block_threshold = self._resolve_limit(
-            self.valves.MAX_CONSECUTIVE_BEFORE_BLOCK,
-            self._admin_valves.MAX_CONSECUTIVE_BEFORE_BLOCK,
-        )
-
-        # Runtime validation: warn if effective limits would cause runaway to
-        # fire before loop detection (this can happen when user valves override
-        # admin defaults in a way that the admin config-time check cannot catch).
-        if max_calls > 0 and block_threshold >= max_calls:
-            log.warning(
-                "Effective MAX_TOOL_CALLS_PER_TURN (%d) must be greater than "
-                "MAX_CONSECUTIVE_BEFORE_BLOCK (%d). Runaway will fire before "
-                "loop detection — consider increasing MAX_TOOL_CALLS_PER_TURN "
-                "or decreasing MAX_CONSECUTIVE_BEFORE_BLOCK.",
-                max_calls, block_threshold,
-            )
-
-        # --- Loop detection -----------------------------------------------
-        consecutive, bad_tool, _ = self._count_consecutive_duplicates(history)
-        remaining_calls = max(0, max_calls - total)
-
-        if total > 0:
-            final_pos = 2 + (block_threshold - 2) * 3 // 5 if block_threshold >= 2 else None
-            log.debug(
-                "Loop analysis | consecutive=%s | bad_tool=%s | block_threshold=%s | final_pos=%s | total=%s",
-                consecutive, bad_tool, block_threshold, final_pos, total,
-            )
-
-        # --- Build guard state dict ---------------------------------------
-        state = {
-            "status": "ok",
-            "tool": None,
-            "consecutive": consecutive,
-            "total": total,
-            "max_calls": max_calls,
-            "remaining_calls": remaining_calls,
-        }
-
-        # --- Escalation ladder --------------------------------------------
-        # Loop detection takes precedence over runaway.  If the agent has
-        # exceeded the consecutive threshold, it's in a loop — report that
-        # even if it also hit the total-turn limit.  This way the agent
-        # keeps other tools available and can still be productive.
-        # Runaway only fires when consecutive is below the loop threshold.
-        runaway = max_calls > 0 and total >= max_calls and consecutive < block_threshold
-
-        if consecutive >= 2:
-            final_pos = 2 + (block_threshold - 2) * 3 // 5
-
-            if consecutive >= block_threshold:
-                state["status"] = "blocked_tool"
-                state["tool"] = bad_tool
-                log.warning("Soft-block (loop): %s blocked after %d calls", bad_tool, total)
-                tools_list = body.get("tools", [])
-                tools_list[:] = [
-                    t for t in tools_list
-                    if t.get("function", {}).get("name") != bad_tool
-                ]
-                # Also remove from metadata so the middleware can't execute it
-                meta_tools = __metadata__.get("tools", {}) if __metadata__ else {}
-                meta_tools.pop(bad_tool, None)
-                if isinstance(body.get("tool_choice"), str) and bad_tool in body["tool_choice"]:
-                    body.pop("tool_choice", None)
-
-            elif block_threshold > 3 and consecutive == final_pos:
-                state["status"] = "final_warning"
-                state["tool"] = bad_tool
-                log.debug("Final warning: %s consecutive=%d", bad_tool, consecutive)
-
-            elif consecutive == 2:
-                state["status"] = "warning"
-                state["tool"] = bad_tool
-                log.debug("Warning: %s consecutive=%d", bad_tool, consecutive)
-
-        if state["status"] == "ok" and runaway:
-            state["status"] = "runaway"
-            log.warning("Soft-block (runaway): %d tool calls in turn", total)
-            # Remove only the tools that were used in this turn,
-            # same pattern as loop block (blocked_tool removes just the offender).
-            # Unused tools stay available so the agent can still be productive.
-            used_tools = {tc["name"] for tc in history}
-            tools_list = body.get("tools", [])
-            tools_list[:] = [
-                t for t in tools_list
-                if t.get("function", {}).get("name") not in used_tools
-            ]
-            if __metadata__:
-                meta_tools = __metadata__.get("tools", {})
-                if meta_tools:
-                    for name in used_tools:
-                        meta_tools.pop(name, None)
-            body.pop("tool_choice", None)
-
-        # --- Soft-block: early return (same pattern as master) -------------
-        if state["status"] in ("runaway", "blocked_tool"):
             if __event_emitter__:
                 try:
-                    if state["status"] == "runaway":
+                    if kind == "loop":
                         await __event_emitter__({
                             "type": "notification",
-                            "data": {"type": "error", "content": f"🛡️ Agent Loop Guard: Tool call limit reached ({total}/{max_calls})."},
+                            "data": {"type": "error", "content": f"🔧 {bad_tool} budget exhausted after too many identical calls."},
                         })
-                        await __event_emitter__({
-                            "type": "status",
-                            "data": {"description": f"🛡️ Tool call limit reached: {total}/{max_calls}", "done": True, "hidden": False},
-                        })
-                    elif state["status"] == "blocked_tool":
+                    elif kind == "runaway":
                         await __event_emitter__({
                             "type": "notification",
-                            "data": {"type": "error", "content": f"🛡️ Agent Loop Guard: {bad_tool} blocked after {consecutive} identical calls."},
-                        })
-                        await __event_emitter__({
-                            "type": "status",
-                            "data": {"description": f"🛡️ {bad_tool} blocked", "done": True, "hidden": False},
+                            "data": {"type": "error", "content": f"🔧 Tool call budget exhausted ({total}/{max_calls})."},
                         })
                 except Exception:
                     log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
-            # Inject system message instructing the agent to stop
-            messages.append({"role": "system", "content": _build_guard_message(state)})
-
-            # Fall through to the normal forward path.  Tools were already
-            # cleared in-place above (tools[:] = ...) so no further action
-            # is needed here.
-
-        # --- Non-soft-block: event emission --------------------------------
-        if __event_emitter__:
+        # --- Always show counter pill if there are tool calls ---------------
+        if __event_emitter__ and max_calls > 0 and total > 0:
+            remaining = max(0, max_calls - total)
             try:
-                if state["status"] == "final_warning":
-                    await __event_emitter__({
-                        "type": "notification",
-                        "data": {"type": "warning", "content": f"🛡️ Agent Loop Guard: {bad_tool} called {consecutive}x. Final warning."},
-                    })
-                elif state["status"] == "warning":
-                    await __event_emitter__({
-                        "type": "notification",
-                        "data": {"type": "info", "content": f"🛡️ Agent Loop Guard: {bad_tool} called {consecutive}x with same args."},
-                    })
-
-                if max_calls > 0 and total > 0:
-                    await __event_emitter__({
-                        "type": "status",
-                        "data": {"description": f"🛡️ Remaining tool calls: {remaining_calls}/{max_calls}", "done": True, "hidden": False},
-                    })
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {"description": f"🔧 Remaining: {remaining}/{max_calls}", "done": True, "hidden": False},
+                })
             except Exception:
-                log.warning("Failed to emit event (non-fatal)", exc_info=True)
+                pass
 
-        # --- Inject system message for warning/final_warning -----------------
-        # System messages give the agent real feedback so it can correct
-        # itself before the soft-block.
-        if state["status"] in ("warning", "final_warning"):
-            messages.append({"role": "system", "content": _build_guard_message(state)})
-
-        # --- Apply tool blocklist --------------------------------------------
+        # --- Apply blocklist and forward ------------------------------------
         self._apply_tool_blocklist(body)
-
-        # --- Debug: final payload before forwarding --------------------------
-        payload_preview = {
-            "model": real_model,
-            "stream": body.get("stream", False),
-            "tools": [t.get("function", {}).get("name") for t in body.get("tools", [])],
-            "tool_choice": body.get("tool_choice", "auto"),
-            "messages": [
-                {
-                    "role": m.get("role"),
-                    "content": (m.get("content", "")[:200] + "...") if len(m.get("content", "")) > 200 else m.get("content", ""),
-                    "tool_calls": bool(m.get("tool_calls")),
-                }
-                for m in messages
-            ],
-        }
-        log.debug("Forwarding to gateway | payload summary: %s", json.dumps(payload_preview, indent=2))
-
-        # --- Forward to gateway ---------------------------------------------
         payload = {**body, "model": real_model, "messages": messages}
 
         try:
             if body.get("stream", False):
-                log.debug("Streaming request started")
                 return self._stream(payload, headers, url)
             else:
-                response = await self._call(payload, headers, url)
-                log.debug("Non-streaming response (truncated): %s", json.dumps(response, indent=2)[:500])
-                return response
+                return await self._call(payload, headers, url)
         except httpx.HTTPStatusError as e:
             log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
-            return f"Gateway error: HTTP {e.response.status_code}. Please check the gateway configuration."
+            return f"Gateway error: HTTP {e.response.status_code}."
         except httpx.RequestError as e:
             log.error("Gateway unreachable: %s", e)
-            return "Gateway unreachable. Please check that the gateway is running and GATEWAY_BASE_URL is correct."
+            return "Gateway unreachable."
         except Exception as e:
-            log.error("Unexpected error calling gateway: %s", e)
-            return f"Error calling gateway: {e}"
+            log.error("Unexpected error: %s", e)
+            return f"Error: {e}"
