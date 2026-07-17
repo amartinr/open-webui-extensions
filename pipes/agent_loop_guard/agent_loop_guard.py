@@ -17,25 +17,36 @@ import re
 log = logging.getLogger(__name__)
 
 
-GUARD_MARKER = "[Guard Budget Exhausted]"
+GUARD_MARKER = "[Tool call budget exhausted]"
+
+
+# --------------------------------------------------------------------------
+# Message templates (single source of truth)
+# --------------------------------------------------------------------------
+
+MSG_TOOL_LOOP = (
+    "{marker} - loop detected\n"
+    "{tool}: {total} identical calls exceed the limit.\n"
+    "Stop repeating. Try a different tool or summarise what you have."
+)
+
+MSG_TOOL_RUNAWAY = (
+    "{marker} - turn limit reached\n"
+    "You've used all {max_calls} allowed calls this turn (attempted {total}).\n"
+    "No more tools available. Summarise what you have."
+)
+
+MSG_NOTIFY_LOOP = "\U0001f527 {tool} budget exhausted after too many identical calls."
+MSG_NOTIFY_RUNAWAY = "\U0001f527 Tool call budget exhausted ({total}/{max_calls})."
+MSG_COUNTER = "\U0001f527 Remaining: {remaining}/{max_calls}"
 
 
 def _build_guard_message(status: str, tool: str | None, total: int, max_calls: int) -> str:
     """Build the text that replaces the tool result when budget is exhausted."""
     if status == "loop":
-        return (
-            f"{GUARD_MARKER}\n"
-            f"The tool {tool} has been called too many times with the same arguments "
-            f"({total} calls this turn).\n"
-            f"Other tools are still available. Summarise what you have."
-        )
+        return MSG_TOOL_LOOP.format(marker=GUARD_MARKER, tool=tool, total=total)
     elif status == "runaway":
-        return (
-            f"{GUARD_MARKER}\n"
-            f"Maximum tool calls reached ({total}/{max_calls}). "
-            f"No further tool calls are possible this turn.\n"
-            f"Summarise the information you have collected so far."
-        )
+        return MSG_TOOL_RUNAWAY.format(marker=GUARD_MARKER, total=total, max_calls=max_calls)
     return ""
 
 
@@ -349,12 +360,12 @@ class Pipe:
                     if kind == "loop":
                         await __event_emitter__({
                             "type": "notification",
-                            "data": {"type": "error", "content": f"🔧 {bad_tool} budget exhausted after too many identical calls."},
+                            "data": {"type": "error", "content": MSG_NOTIFY_LOOP.format(tool=bad_tool)},
                         })
                     elif kind == "runaway":
                         await __event_emitter__({
                             "type": "notification",
-                            "data": {"type": "error", "content": f"🔧 Tool call budget exhausted ({total}/{max_calls})."},
+                            "data": {"type": "error", "content": MSG_NOTIFY_RUNAWAY.format(total=total, max_calls=max_calls)},
                         })
                 except Exception:
                     log.warning("Failed to emit event (non-fatal)", exc_info=True)
@@ -365,7 +376,7 @@ class Pipe:
             try:
                 await __event_emitter__({
                     "type": "status",
-                    "data": {"description": f"🔧 Remaining: {remaining}/{max_calls}", "done": True, "hidden": False},
+                    "data": {"description": MSG_COUNTER.format(remaining=remaining, max_calls=max_calls), "done": True, "hidden": False},
                 })
             except Exception:
                 pass
