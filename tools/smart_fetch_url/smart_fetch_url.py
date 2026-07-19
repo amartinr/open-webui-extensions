@@ -328,7 +328,7 @@ class Tools:
                 return self._format_output(
                     url=urls[0], final_url=urls[0], title="", author="",
                     site="", language="", published="", content="",
-                    format=format, word_count=0, browser=browser, status_code=0,
+                    format=format, browser=browser, status_code=0,
                     error={"error_type": "forbidden", "message": f"Domain blocked by policy: {hostname}"},
                 )
 
@@ -350,7 +350,7 @@ class Tools:
                         err_result = self._format_output(
                             url=single_url, final_url=single_url, title="", author="",
                             site="", language="", published="", content="",
-                            format=format, word_count=0, browser=browser, status_code=0,
+                            format=format, browser=browser, status_code=0,
                             error={"error_type": "forbidden", "message": f"Domain blocked by policy: {hostname}"},
                         )
                         return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
@@ -382,7 +382,7 @@ class Tools:
                         err_result = self._format_output(
                             url=single_url, final_url=single_url, title="", author="",
                             site="", language="", published="", content="",
-                            format=format, word_count=0, browser=browser, status_code=0,
+                            format=format, browser=browser, status_code=0,
                             error={"error_type": "timeout", "message": "The operation timed out"},
                         )
                         return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
@@ -392,7 +392,7 @@ class Tools:
                         err_result = self._format_output(
                             url=single_url, final_url=single_url, title="", author="",
                             site="", language="", published="", content="",
-                            format=format, word_count=0, browser=browser, status_code=0,
+                            format=format, browser=browser, status_code=0,
                             error=error_data,
                         )
                         return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
@@ -468,7 +468,7 @@ class Tools:
             return self._format_output(
                 url=url, final_url=url, title="", author="", site="",
                 language="", published="", content="", format=format,
-                word_count=0, browser=browser, status_code=0,
+browser=browser, status_code=0,
                 error={"error_type": "timeout", "message": "The operation timed out"},
             )
 
@@ -483,7 +483,7 @@ class Tools:
             return self._format_output(
                 url=url, final_url=url, title="", author="", site="",
                 language="", published="", content="", format=format,
-                word_count=0, browser=browser, status_code=0,
+browser=browser, status_code=0,
                 error=error_data,
             )
 
@@ -561,13 +561,12 @@ class Tools:
                 published=extracted.get("published", ""),
                 content=content,
                 format=format,
-                word_count=word_count,
                 browser=browser,
                 status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
-            _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
+            _desc = f"✅ {url}" if not verbose else f"✅ {url} ({_elapsed:.1f}s)"
             await self._emit_sources(__event_emitter__, [final_url])
             await self._emit_status(__event_emitter__, _desc, done=True)
             return result
@@ -583,7 +582,6 @@ class Tools:
                 published="",
                 content=f"[Non-text content ({content_type}). Content not displayed to avoid context pollution.]",
                 format=format,
-                word_count=0,
                 browser=browser,
                 status_code=status_code,
                 note=fallback_note,
@@ -637,13 +635,12 @@ class Tools:
                 ),
                 content=content,
                 format=format,
-                word_count=word_count,
                 browser=browser,
                 status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
-            _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
+            _desc = f"✅ {url}" if not verbose else f"✅ {url} ({_elapsed:.1f}s)"
             await self._emit_sources(__event_emitter__, [final_url])
             await self._emit_status(__event_emitter__, _desc, done=True)
             return result
@@ -689,7 +686,6 @@ class Tools:
             published=extracted.get("published", ""),
             content=content,
             format=format,
-            word_count=extracted.get("word_count", 0),
             browser=browser,
             status_code=status_code,
             note=fallback_note,
@@ -697,9 +693,8 @@ class Tools:
 
         # Step 8: Emit source events for Open WebUI's Citations component (bottom of message)
         visited_urls = self._collect_visited_urls(url, final_url, alternate_urls)
-        word_count = extracted.get("word_count", 0)
         _elapsed = time.monotonic() - _start_time
-        _desc = f"✅ {url}" if not verbose else f"✅ {url} ({word_count}w, {_elapsed:.1f}s)"
+        _desc = f"✅ {url}" if not verbose else f"✅ {url} ({_elapsed:.1f}s)"
         await self._emit_sources(__event_emitter__, visited_urls)
         await self._emit_status(__event_emitter__, _desc, done=True)
 
@@ -1579,7 +1574,6 @@ class Tools:
         published: str,
         content: str,
         format: str,
-        word_count: int,
         browser: str,
         status_code: int,
         note: Optional[str] = None,
@@ -1589,8 +1583,7 @@ class Tools:
 
         All text-based formats share the same dict→lines loop.
         On error, ``error`` is a dict with ``"error_type"`` and ``"message"``
-        keys (as returned by :meth:`_format_error`); ``content`` and
-        ``word_count`` are ignored.
+        keys (as returned by :meth:`_format_error`); ``content`` is ignored.
         """
         # ── Build metadata dict (ordered, for consistent text output) ──
         fields: dict[str, str] = {}
@@ -1613,7 +1606,8 @@ class Tools:
             fields["Language"] = language
         if published:
             fields["Published"] = published
-        fields["Words"] = str(word_count)
+        if content and not error:
+            fields["Size"] = str(len(content))
         fields["Browser"] = browser
         if note:
             fields["Note"] = note
@@ -1661,7 +1655,7 @@ class Tools:
             f"> HTTP Status: {status_code}",
             f"> Content-Type: {content_type}",
             f"> Browser: {browser}",
-            f"> Size: {len(raw_html)} bytes",
+            f"> Size: {len(raw_html)}",
             "",
             raw_html,
         ]
