@@ -15,6 +15,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from smart_fetch_url import Tools
@@ -29,8 +31,8 @@ REDLIB_URL = "http://redlib.private/r/LocalLLaMa/"
 
 # Article URLs to try (first one that responds 200 wins)
 ARTICLE_URLS = [
-    "https://tonsky.me/blog/thermocline/",
-    "https://www.marco.org/2025/01/08/a-decade-later",
+    "https://martinfowler.com/bliki/Serverless.html",
+    "https://www.joelonsoftware.com/2000/08/09/the-joel-test-12-steps-to-better-code/",
 ]
 
 # Documentation URLs
@@ -46,25 +48,18 @@ COMMENT_URLS = [
 ]
 
 TIMEOUT_MS = 15_000
-BROWSER = "chrome_145"
+BROWSER = "chrome"
 
 
 # ═══════════════════════════════════════════════
 #  Test helpers
 # ═══════════════════════════════════════════════
 
-def check(name: str, result: bool) -> bool:
-    status = "✅" if result else "❌"
-    print(f"  {status} {name}")
-    return result
-
-
 async def fetch_and_extract(url: str, tools: Tools) -> dict:
     """Fetch a URL and return _extract_content result with metadata."""
     result = await tools._fetch_with_fingerprint(
         url=url,
         browser=BROWSER,
-        os="windows",
         timeout_ms=TIMEOUT_MS,
     )
     raw_html = result.raw_html
@@ -72,7 +67,7 @@ async def fetch_and_extract(url: str, tools: Tools) -> dict:
     status_code = result.status_code
     content_type = result.content_type
 
-    category = await tools._detect_content_type(raw_html)
+    category_name, _ = await tools._detect_content_type(raw_html)
 
     extracted = await tools._extract_content(
         raw_html=raw_html,
@@ -85,7 +80,7 @@ async def fetch_and_extract(url: str, tools: Tools) -> dict:
         "final_url": final_url,
         "status_code": status_code,
         "content_type": content_type,
-        "category": category,
+        "category": category_name,
         "title": extracted.get("title", ""),
         "word_count": extracted.get("word_count", 0),
         "content": extracted.get("content", ""),
@@ -96,33 +91,20 @@ async def fetch_and_extract(url: str, tools: Tools) -> dict:
 #  Test cases
 # ═══════════════════════════════════════════════
 
+@pytest.mark.skipif(not REDLIB_URL, reason="REDLIB_URL not configured")
 async def test_t1_feed_listing():
     """
     T1: Feed listing page (Redlib/Reddit frontend).
     Expected category: "feed".
     Success: word_count >= 1000 (all visible posts), .post elements detected.
     """
-    print(f"\n▶ T1: Feed listing ({REDLIB_URL})")
     tools = Tools()
+    result = await fetch_and_extract(REDLIB_URL, tools)
 
-    try:
-        result = await fetch_and_extract(REDLIB_URL, tools)
-    except Exception as e:
-        print(f"  ❌ Fetch failed: {e}")
-        return False
-
-    print(f"    Status: {result['status_code']}")
-    print(f"    Category: {result['category']}")
-    print(f"    Word count: {result['word_count']}")
-    print(f"    Title: {result['title'][:60]}")
-
-    ok = True
-    ok &= check(f"status 200 ({result['status_code']})", result['status_code'] == 200)
-    ok &= check(f"category is 'feed' ({result['category']})", result['category'] == "feed")
-    ok &= check(f"word_count ({result['word_count']}) >= 1000", result['word_count'] >= 1000)
-    ok &= check("title not empty", len(result['title']) > 0)
-
-    return ok
+    assert result["status_code"] == 200, f"Expected 200, got {result['status_code']}"
+    assert result["category"] == "feed", f"Expected 'feed', got '{result['category']}'"
+    assert result["word_count"] >= 1000, f"Expected >= 1000 words, got {result['word_count']}"
+    assert result["title"], "Title should not be empty"
 
 
 async def test_t2_blog_article():
@@ -131,30 +113,22 @@ async def test_t2_blog_article():
     Expected category: "article".
     Success: word_count >= 200, article metadata present.
     """
-    print(f"\n▶ T2: Blog article with og:type")
     tools = Tools()
+    last_error = None
 
     for url in ARTICLE_URLS:
         try:
             result = await fetch_and_extract(url, tools)
         except Exception as e:
-            print(f"  ⚠️  {url}: fetch failed ({e}), trying next...")
+            last_error = e
             continue
 
-        print(f"    URL: {url}")
-        print(f"    Status: {result['status_code']}")
-        print(f"    Category: {result['category']}")
-        print(f"    Word count: {result['word_count']}")
-        print(f"    Title: {result['title'][:60]}")
+        assert result["status_code"] == 200, f"Expected 200, got {result['status_code']}"
+        assert result["word_count"] >= 200, f"Expected >= 200 words, got {result['word_count']}"
+        assert result["title"], "Title should not be empty"
+        return
 
-        ok = True
-        ok &= check(f"status 200 ({result['status_code']})", result['status_code'] == 200)
-        ok &= check(f"word_count ({result['word_count']}) >= 200", result['word_count'] >= 200)
-        ok &= check("title not empty", len(result['title']) > 0)
-        return ok
-
-    print("  ❌ All article URLs failed")
-    return False
+    pytest.fail(f"All article URLs failed. Last error: {last_error}")
 
 
 async def test_t3_documentation():
@@ -163,34 +137,22 @@ async def test_t3_documentation():
     Expected category: "unknown" (no feed/article signals).
     Success: trafilatura extracts meaningful content (no regression).
     """
-    print("\n▶ T3: Documentation page")
     tools = Tools()
+    last_error = None
 
     for url in DOCS_URLS:
         try:
             result = await fetch_and_extract(url, tools)
         except Exception as e:
-            print(f"  ⚠️  {url}: fetch failed ({e}), trying next...")
+            last_error = e
             continue
 
-        print(f"    URL: {url}")
-        print(f"    Status: {result['status_code']}")
-        print(f"    Category: {result['category']}")
-        print(f"    Word count: {result['word_count']}")
-        print(f"    Title: {result['title'][:60]}")
+        assert result["status_code"] == 200, f"Expected 200, got {result['status_code']}"
+        assert result["word_count"] >= 100, f"Expected >= 100 words, got {result['word_count']}"
+        assert result["title"], "Title should not be empty"
+        return
 
-        ok = True
-        ok &= check(f"status 200 ({result['status_code']})", result['status_code'] == 200)
-        ok &= check(f"word_count ({result['word_count']}) >= 100", result['word_count'] >= 100)
-        ok &= check("title not empty", len(result['title']) > 0)
-
-        if result['category'] != "article":
-            print(f"    ℹ️  Category is '{result['category']}' (expected 'unknown')")
-
-        return ok
-
-    print("  ❌ All documentation URLs failed")
-    return False
+    pytest.fail(f"All documentation URLs failed. Last error: {last_error}")
 
 
 async def test_t4_article_with_comments():
@@ -199,73 +161,19 @@ async def test_t4_article_with_comments():
     Expected category: "unknown" (HN uses table layout).
     Success: content present, word_count > 0.
     """
-    print("\n▶ T4: HN comment thread (resilience)")
     tools = Tools()
+    last_error = None
 
     for url in COMMENT_URLS:
         try:
             result = await fetch_and_extract(url, tools)
         except Exception as e:
-            print(f"  ⚠️  {url}: fetch failed ({e}), trying next...")
+            last_error = e
             continue
 
-        print(f"    URL: {url}")
-        print(f"    Status: {result['status_code']}")
-        print(f"    Category: {result['category']}")
-        print(f"    Word count: {result['word_count']}")
-        print(f"    Title: {result['title'][:60]}")
+        assert result["status_code"] == 200, f"Expected 200, got {result['status_code']}"
+        assert result["word_count"] > 0, f"Expected > 0 words, got {result['word_count']}"
+        assert result["title"], "Title should not be empty"
+        return
 
-        ok = True
-        ok &= check(f"status 200 ({result['status_code']})", result['status_code'] == 200)
-        ok &= check(f"word_count ({result['word_count']}) > 0", result['word_count'] > 0)
-        ok &= check("title not empty", len(result['title']) > 0)
-
-        return ok
-
-    print("  ❌ All comment URLs failed")
-    return False
-
-
-# ═══════════════════════════════════════════════
-#  Main
-# ═══════════════════════════════════════════════
-
-async def main():
-    print("=" * 60)
-    print("Phase 3 — Real-URL validation tests")
-    print("⚠️  Requires network access")
-    print("=" * 60)
-    print(f"\nConfiguration:")
-    print(f"  REDLIB_URL = {REDLIB_URL}")
-
-    tests = [
-        ("T1: Feed listing", test_t1_feed_listing()),
-        ("T2: Blog article", test_t2_blog_article()),
-        ("T3: Documentation page", test_t3_documentation()),
-        ("T4: Article with comments", test_t4_article_with_comments()),
-    ]
-
-    passed = 0
-    failed = 0
-    skipped = 0
-
-    for name, coro in tests:
-        try:
-            if await coro:
-                passed += 1
-            else:
-                failed += 1
-        except Exception as e:
-            print(f"\n▶ {name}")
-            print(f"  ❌ Exception: {e}")
-            failed += 1
-
-    total = passed + failed + skipped
-    print(f"\n{'=' * 60}")
-    print(f"Results: {passed}/{total} passed, {failed} failed, {skipped} skipped")
-    print(f"{'=' * 60}")
-    return 0 if failed == 0 else 1
-
-
-if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    pytest.fail(f"All comment URLs failed. Last error: {last_error}")
