@@ -328,7 +328,7 @@ class Tools:
                 return self._format_output(
                     url=urls[0], final_url=urls[0], title="", author="",
                     site="", language="", published="", content="",
-                    format=format, browser=browser, status_code=0,
+                    format=format, status_code=0,
                     error={"error_type": "forbidden", "message": f"Domain blocked by policy: {hostname}"},
                 )
 
@@ -350,7 +350,7 @@ class Tools:
                         err_result = self._format_output(
                             url=single_url, final_url=single_url, title="", author="",
                             site="", language="", published="", content="",
-                            format=format, browser=browser, status_code=0,
+                            format=format, status_code=0,
                             error={"error_type": "forbidden", "message": f"Domain blocked by policy: {hostname}"},
                         )
                         return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
@@ -362,8 +362,7 @@ class Tools:
                         result = await asyncio.wait_for(
                             self._execute_fetch(
                                 url=single_url,
-                                browser=browser,
-                                timeout_ms=timeout_ms,
+                                                                timeout_ms=timeout_ms,
                                 format=format,
                                 max_chars=max_chars,
                                 include_replies=include_replies,
@@ -382,7 +381,7 @@ class Tools:
                         err_result = self._format_output(
                             url=single_url, final_url=single_url, title="", author="",
                             site="", language="", published="", content="",
-                            format=format, browser=browser, status_code=0,
+                            format=format, status_code=0,
                             error={"error_type": "timeout", "message": "The operation timed out"},
                         )
                         return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
@@ -392,7 +391,7 @@ class Tools:
                         err_result = self._format_output(
                             url=single_url, final_url=single_url, title="", author="",
                             site="", language="", published="", content="",
-                            format=format, browser=browser, status_code=0,
+                            format=format, status_code=0,
                             error=error_data,
                         )
                         return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
@@ -450,8 +449,7 @@ class Tools:
             result = await asyncio.wait_for(
                 self._execute_fetch(
                     url=url,
-                    browser=browser,
-                    timeout_ms=timeout_ms,
+                                        timeout_ms=timeout_ms,
                     format=format,
                     max_chars=max_chars,
                     include_replies=include_replies,
@@ -468,7 +466,7 @@ class Tools:
             return self._format_output(
                 url=url, final_url=url, title="", author="", site="",
                 language="", published="", content="", format=format,
-browser=browser, status_code=0,
+                status_code=0,
                 error={"error_type": "timeout", "message": "The operation timed out"},
             )
 
@@ -483,7 +481,7 @@ browser=browser, status_code=0,
             return self._format_output(
                 url=url, final_url=url, title="", author="", site="",
                 language="", published="", content="", format=format,
-browser=browser, status_code=0,
+                status_code=0,
                 error=error_data,
             )
 
@@ -561,8 +559,7 @@ browser=browser, status_code=0,
                 published=extracted.get("published", ""),
                 content=content,
                 format=format,
-                browser=browser,
-                status_code=status_code,
+                                status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
@@ -582,8 +579,7 @@ browser=browser, status_code=0,
                 published="",
                 content=f"[Non-text content ({content_type}). Content not displayed to avoid context pollution.]",
                 format=format,
-                browser=browser,
-                status_code=status_code,
+                                status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
@@ -603,7 +599,6 @@ browser=browser, status_code=0,
                 raw_html=raw_html,
                 status_code=status_code,
                 content_type=content_type,
-                browser=browser,
             )
             _elapsed = time.monotonic() - _start_time
             await self._emit_sources(__event_emitter__, [final_url])
@@ -635,8 +630,7 @@ browser=browser, status_code=0,
                 ),
                 content=content,
                 format=format,
-                browser=browser,
-                status_code=status_code,
+                                status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
@@ -663,8 +657,7 @@ browser=browser, status_code=0,
             extracted, alternates_used = await self._try_alternate_fallback(
                 raw_html=raw_html,
                 url=final_url,
-                browser=browser,
-                timeout_ms=timeout_ms,
+                                timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
                 format=format,
             )
@@ -686,8 +679,7 @@ browser=browser, status_code=0,
             published=extracted.get("published", ""),
             content=content,
             format=format,
-            browser=browser,
-            status_code=status_code,
+                        status_code=status_code,
             note=fallback_note,
         )
 
@@ -1574,7 +1566,6 @@ browser=browser, status_code=0,
         published: str,
         content: str,
         format: str,
-        browser: str,
         status_code: int,
         note: Optional[str] = None,
         error: Optional[dict[str, str]] = None,
@@ -1608,7 +1599,6 @@ browser=browser, status_code=0,
             fields["Published"] = published
         if content and not error:
             fields["Size"] = str(len(content))
-        fields["Browser"] = browser
         if note:
             fields["Note"] = note
 
@@ -1644,7 +1634,6 @@ browser=browser, status_code=0,
         raw_html: str,
         status_code: int,
         content_type: str,
-        browser: str,
     ) -> str:
         """Build raw format response with metadata prefix."""
         raw_html = _strip_base64_raw(raw_html)
@@ -1654,7 +1643,6 @@ browser=browser, status_code=0,
             f"> URL: {final_url}",
             f"> HTTP Status: {status_code}",
             f"> Content-Type: {content_type}",
-            f"> Browser: {browser}",
             f"> Size: {len(raw_html)}",
             "",
             raw_html,
