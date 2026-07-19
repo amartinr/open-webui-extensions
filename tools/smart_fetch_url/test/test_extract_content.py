@@ -40,7 +40,7 @@ async def extract(
         raw_html=html,
         url=url,
         format=fmt,
-        remove_images=False,
+
     )
 
 
