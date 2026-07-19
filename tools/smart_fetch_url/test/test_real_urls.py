@@ -61,14 +61,16 @@ def check(name: str, result: bool) -> bool:
 
 async def fetch_and_extract(url: str, tools: Tools) -> dict:
     """Fetch a URL and return _extract_content result with metadata."""
-    raw_html, final_url, status_code, content_type, _, _ = (
-        await tools._fetch_with_fingerprint(
-            url=url,
-            browser=BROWSER,
-            os="windows",
-            timeout_ms=TIMEOUT_MS,
-        )
+    result = await tools._fetch_with_fingerprint(
+        url=url,
+        browser=BROWSER,
+        os="windows",
+        timeout_ms=TIMEOUT_MS,
     )
+    raw_html = result.raw_html
+    final_url = result.final_url
+    status_code = result.status_code
+    content_type = result.content_type
 
     category = await tools._detect_content_type(raw_html)
 

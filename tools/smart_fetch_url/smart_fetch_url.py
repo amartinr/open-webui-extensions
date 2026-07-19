@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
+from typing import NamedTuple
+
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,21 @@ DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.
 DEFAULT_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 DEFAULT_RAW_ACCEPT = "text/html,application/xhtml+xml,application/json,application/xml;q=0.9,text/markdown;q=0.8,text/plain;q=0.8,*/*;q=0.7"
 DEFAULT_JSON_ACCEPT = "application/json,text/json,application/ld+json;q=0.9,text/plain;q=0.8,*/*;q=0.7"
+
+
+class FetchResult(NamedTuple):
+    """Structured result from a fetch operation.
+
+    Fields can be accessed by name (``result.raw_html``) or unpacked
+    positionally (``raw_html, final_url, … = result``) since NamedTuple
+    inherits from ``tuple``.
+    """
+    raw_html: str
+    final_url: str
+    status_code: int
+    content_type: str
+    resp_headers: dict
+    raw_bytes: Optional[bytes]
 
 
 class _RateLimiter:
@@ -492,18 +509,22 @@ class Tools:
         ``asyncio.wait_for(timeout=GLOBAL_OPERATION_TIMEOUT_SEC)``.
         """
         _defense_timeout = timeout_ms / 1000
-        (raw_html, final_url, status_code, content_type, resp_headers, raw_bytes) = (
-            await asyncio.wait_for(
-                self._fetch_with_fingerprint(
+        result = await asyncio.wait_for(
+            self._fetch_with_fingerprint(
                 url=url,
                 browser=browser,
                 timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
                 format=format,
             ),
-                timeout=_defense_timeout,
-            )
+            timeout=_defense_timeout,
         )
+        raw_html = result.raw_html
+        final_url = result.final_url
+        status_code = result.status_code
+        content_type = result.content_type
+        resp_headers = result.resp_headers
+        raw_bytes = result.raw_bytes
         fallback_note = self._fallback_note
         self._fallback_note = None
 
@@ -695,14 +716,15 @@ class Tools:
         timeout_ms: int,
         proxy: Optional[str] = None,
         format: str = "markdown",
-    ) -> tuple[str, str, int, str, dict, Optional[bytes]]:
+    ) -> FetchResult:
         """
         Perform the actual HTTP request with TLS fingerprinting.
 
-        Returns: (raw_html, final_url, status_code, content_type,
-                  response_headers, raw_bytes)
+        Returns a :class:`FetchResult` with ``raw_html``, ``final_url``,
+        ``status_code``, ``content_type``, ``resp_headers`` and
+        ``raw_bytes`` fields.
 
-        raw_bytes is the undecoded response body — needed for binary
+        ``raw_bytes`` is the undecoded response body — needed for binary
         document extraction (PDF, DOCX, etc.).
         """
         resolved_browser = browser
@@ -754,7 +776,7 @@ class Tools:
         headers: dict,
         timeout_ms: int,
         proxy: Optional[str] = None,
-    ) -> tuple[str, str, int, str, dict]:
+    ) -> FetchResult:
         """Fetch using curl_cffi's async API with TLS fingerprinting."""
         from curl_cffi.requests import AsyncSession
 
@@ -795,7 +817,14 @@ class Tools:
             else:
                 raw_html = ""  # true binary (image, video, …)
 
-            return raw_html, final_url, status_code, content_type, resp_headers, raw_bytes
+            return FetchResult(
+                raw_html=raw_html,
+                final_url=final_url,
+                status_code=status_code,
+                content_type=content_type,
+                resp_headers=resp_headers,
+                raw_bytes=raw_bytes,
+            )
 
     async def _fetch_with_httpx(
         self,
@@ -803,7 +832,7 @@ class Tools:
         headers: dict,
         timeout_ms: int,
         proxy: Optional[str] = None,
-    ) -> tuple[str, str, int, str, dict]:
+    ) -> FetchResult:
         """Fallback fetch using httpx (no TLS fingerprinting)."""
 
         import httpx
@@ -839,7 +868,14 @@ class Tools:
             else:
                 raw_html = ""  # true binary (image, video, …)
 
-            return raw_html, final_url, status_code, content_type, resp_headers, raw_bytes
+            return FetchResult(
+                raw_html=raw_html,
+                final_url=final_url,
+                status_code=status_code,
+                content_type=content_type,
+                resp_headers=resp_headers,
+                raw_bytes=raw_bytes,
+            )
 
     # ──────────────────────────────────────────────
     #  Internal: Content extraction
@@ -1256,7 +1292,7 @@ class Tools:
             for alt_url in candidates[:1]:
                 resolved = urljoin(url, alt_url)
                 try:
-                    alt_raw, alt_final, _, _, _, _ = await self._fetch_with_fingerprint(
+                    alt_result = await self._fetch_with_fingerprint(
                         url=resolved,
                         browser=browser,
                         timeout_ms=timeout_ms,
@@ -1264,8 +1300,8 @@ class Tools:
                         format=format,
                     )
                     alt_extracted = await self._extract_content(
-                        raw_html=alt_raw,
-                        url=alt_final,
+                        raw_html=alt_result.raw_html,
+                        url=alt_result.final_url,
                         format=format,
                     )
                     if alt_extracted.get("word_count", 0) > MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK:
