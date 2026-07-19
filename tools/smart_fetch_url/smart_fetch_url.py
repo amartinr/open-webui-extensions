@@ -1801,14 +1801,94 @@ class Tools:
     def _format_error(self, error: Exception, _url: str = "") -> dict[str, str]:
         """Classify an exception into a structured error dict.
 
+        Uses a hybrid approach:
+        1. Classify by exception type first (curl_cffi, httpx, stdlib).
+        2. Fall back to string matching for anything that slips through.
+
         Returns ``{"error_type": "...", "message": "..."}`` so callers
         can use it for both JSON output and text-based metadata without
         duplicating logic.
         """
+        # ── stdlib / asyncio errors (no imports needed) ───────────────
+        import asyncio
+
+        if isinstance(error, asyncio.TimeoutError):
+            return {"error_type": "timeout", "message": "Connection timed out"}
+
+        try:
+            if isinstance(error, ConnectionRefusedError):
+                return {"error_type": "connection_refused", "message": "Connection refused"}
+        except NameError:
+            pass
+
+        try:
+            import socket
+            if isinstance(error, socket.gaierror):
+                return {"error_type": "dns", "message": "DNS resolution failed"}
+        except (ImportError, NameError):
+            pass
+
+        try:
+            import ssl
+            if isinstance(error, ssl.SSLError):
+                return {"error_type": "tls", "message": "SSL connection error"}
+        except (ImportError, NameError):
+            pass
+
+        # ── curl_cffi errors ──────────────────────────────────────────
+        try:
+            import curl_cffi.requests.exceptions as curl_exc
+            # Order matters: check most specific subclasses *before*
+            # more general ones (ConnectTimeout → ConnectionError,
+            # CertificateVerifyError → SSLError → ConnectionError).
+            if isinstance(error, curl_exc.DNSError):
+                return {"error_type": "dns", "message": "DNS resolution failed"}
+            if isinstance(error, curl_exc.CertificateVerifyError):
+                return {"error_type": "tls", "message": "SSL certificate verification failed"}
+            if isinstance(error, curl_exc.ConnectTimeout):
+                return {"error_type": "timeout", "message": "Connection timed out"}
+            if isinstance(error, curl_exc.ReadTimeout):
+                return {"error_type": "timeout", "message": "Connection timed out"}
+            if isinstance(error, curl_exc.ProxyError):
+                return {"error_type": "proxy", "message": "Proxy connection failed"}
+            if isinstance(error, curl_exc.ConnectionError):
+                return {"error_type": "connection_refused", "message": "Connection refused"}
+            if isinstance(error, curl_exc.HTTPError):
+                # Try to extract status code from the error
+                msg = str(error)
+                for code in ("403", "404", "429", "500", "502", "503"):
+                    if code in msg:
+                        return {"error_type": f"http_{code}", "message": f"HTTP {code}"}
+                return {"error_type": "http_error", "message": msg or "HTTP error"}
+        except (ImportError, NameError):
+            pass
+
+        # ── httpx errors ──────────────────────────────────────────────
+        try:
+            import httpx
+            if isinstance(error, httpx.ConnectError):
+                return {"error_type": "connection_refused", "message": "Connection refused"}
+            if isinstance(error, httpx.TimeoutException):
+                return {"error_type": "timeout", "message": "Connection timed out"}
+            if isinstance(error, httpx.RemoteProtocolError):
+                return {"error_type": "tls", "message": "SSL connection error"}
+            if isinstance(error, httpx.ProxyError):
+                return {"error_type": "proxy", "message": "Proxy connection failed"}
+            if isinstance(error, httpx.HTTPStatusError):
+                code = error.response.status_code
+                return {"error_type": f"http_{code}", "message": f"HTTP {code}"}
+            if isinstance(error, httpx.LocalProtocolError):
+                return {"error_type": "protocol", "message": "Local protocol error"}
+            if isinstance(error, httpx.NetworkError):
+                return {"error_type": "network", "message": "Network error"}
+        except (ImportError, NameError):
+            pass
+
+        # ── Fallback: string matching for anything not caught above ───
         msg = str(error)
         if "Name or service not known" in msg or "nodename nor servname" in msg:
             return {"error_type": "dns", "message": "DNS resolution failed"}
-        if "Connection refused" in msg or "connect" in msg.lower():
+        if "Connection refused" in msg:
             return {"error_type": "connection_refused", "message": "Connection refused"}
         if "timeout" in msg.lower() or "timed out" in msg.lower():
             return {"error_type": "timeout", "message": "Connection timed out"}
@@ -1816,9 +1896,12 @@ class Tools:
             return {"error_type": "http_403", "message": "403 Forbidden"}
         if "404" in msg:
             return {"error_type": "http_404", "message": "404 Not Found"}
-        if "SSL" in msg or "certificate" in msg.lower():
+        # Avoid false positives from short patterns — require SSL in context
+        if re.search(r"SSL certificate|SSL connect|certificate verify failed", msg, re.IGNORECASE):
             return {"error_type": "tls", "message": "SSL connection error"}
-        return {"error_type": "internal", "message": "Internal error"}
+        if "proxy" in msg.lower():
+            return {"error_type": "proxy", "message": "Proxy connection failed"}
+        return {"error_type": "internal", "message": msg or "Internal error"}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
