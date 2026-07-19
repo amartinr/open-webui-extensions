@@ -362,7 +362,8 @@ class Tools:
                         result = await asyncio.wait_for(
                             self._execute_fetch(
                                 url=single_url,
-                                                                timeout_ms=timeout_ms,
+                                browser=browser,
+                                timeout_ms=timeout_ms,
                                 format=format,
                                 max_chars=max_chars,
                                 include_replies=include_replies,
@@ -449,7 +450,8 @@ class Tools:
             result = await asyncio.wait_for(
                 self._execute_fetch(
                     url=url,
-                                        timeout_ms=timeout_ms,
+                    browser=browser,
+                    timeout_ms=timeout_ms,
                     format=format,
                     max_chars=max_chars,
                     include_replies=include_replies,
@@ -1555,6 +1557,27 @@ class Tools:
     #  Internal: Format helpers
     # ──────────────────────────────────────────────
 
+    def _status_line(
+        self,
+        error: Optional[dict[str, str]],
+        status_code: int,
+    ) -> str:
+        """Build a single Status line describing the fetch outcome.
+
+        - If there was an operational error (DNS, timeout, block): returns
+          the error message directly, e.g. ``"DNS resolution failed"``.
+        - If a response was received: returns ``"HTTP {code} {reason}"``,
+          e.g. ``"HTTP 200 OK"`` or ``"HTTP 404 Not Found"``.
+        """
+        if error:
+            return error["message"]
+        import http
+        try:
+            reason = http.HTTPStatus(status_code).phrase
+            return f"HTTP {status_code} {reason}"
+        except ValueError:
+            return f"HTTP {status_code}"
+
     def _format_output(
         self,
         url: str,
@@ -1570,20 +1593,15 @@ class Tools:
         note: Optional[str] = None,
         error: Optional[dict[str, str]] = None,
     ) -> str:
-        """Build the final output string from a single metadata dict.
+        """Build the final output string.
 
-        All text-based formats share the same dict→lines loop.
-        On error, ``error`` is a dict with ``"error_type"`` and ``"message"``
-        keys (as returned by :meth:`_format_error`); ``content`` is ignored.
+        ``Status`` is a single line summarising the outcome:
+        ``"HTTP 200 OK"`` on success, or the error message on failure.
         """
-        # ── Build metadata dict (ordered, for consistent text output) ──
-        fields: dict[str, str] = {}
+        status = self._status_line(error, status_code)
 
-        if error:
-            fields["Status"] = "error"
-            fields["Error"] = error["message"]
-        else:
-            fields["Status"] = "ok"
+        # ── Build metadata dict (ordered, for consistent text output) ──
+        fields: dict[str, str] = {"Status": status}
 
         resolved_url = final_url or url
         fields["URL"] = resolved_url
@@ -1611,13 +1629,7 @@ class Tools:
         # ── JSON ───────────────────────────────────────────────────────
         if format == "json":
             result = dict(fields)
-            result["statusCode"] = status_code
-            if error:
-                result["errorType"] = error.get("error_type", "")
-            else:
-                result["content"] = content
-            result["url"] = url
-            result["finalUrl"] = resolved_url
+            result["content"] = content if content and not error else ""
             return json.dumps(result, indent=2, ensure_ascii=False)
 
         # ── Text-based formats ─────────────────────────────────────────
@@ -1637,11 +1649,11 @@ class Tools:
     ) -> str:
         """Build raw format response with metadata prefix."""
         raw_html = _strip_base64_raw(raw_html)
+        status = self._status_line(None, status_code)
 
         lines = [
-            f"> Status: ok",
+            f"> Status: {status}",
             f"> URL: {final_url}",
-            f"> HTTP Status: {status_code}",
             f"> Content-Type: {content_type}",
             f"> Size: {len(raw_html)}",
             "",
