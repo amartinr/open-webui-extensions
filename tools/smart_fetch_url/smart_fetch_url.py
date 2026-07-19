@@ -1664,9 +1664,10 @@ class Tools:
         }
         return self._build_metadata_block(fields, raw_html)
 
-
-
     # ──────────────────────────────────────────────
+    #  Internal: HTML metadata helpers
+    # ──────────────────────────────────────────────
+
     def _extract_title(self, html: str) -> str:
         match = re.search(
             r"<title[^>]*>(.*?)</title>", html, re.DOTALL | re.IGNORECASE
