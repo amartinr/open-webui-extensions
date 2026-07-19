@@ -1633,9 +1633,14 @@ class Tools:
             return json.dumps(result, indent=2, ensure_ascii=False)
 
         # ── Text-based formats ─────────────────────────────────────────
+        return self._build_metadata_block(fields, content if content and not error else "")
+
+    @staticmethod
+    def _build_metadata_block(fields: dict[str, str], content: str = "") -> str:
+        """Render a metadata dict + optional content as ``> key: value`` text."""
         parts: list[str] = [f"> {k}: {v}" for k, v in fields.items()]
         parts.append("")
-        if content and not error:
+        if content:
             parts.append(content)
         return "\n".join(parts)
 
@@ -1651,20 +1656,17 @@ class Tools:
         raw_html = _strip_base64_raw(raw_html)
         status = self._status_line(None, status_code)
 
-        lines = [
-            f"> Status: {status}",
-            f"> URL: {final_url}",
-            f"> Content-Type: {content_type}",
-            f"> Size: {len(raw_html)}",
-            "",
-            raw_html,
-        ]
-        return "\n".join(lines)
+        fields = {
+            "Status": status,
+            "URL": final_url,
+            "Content-Type": content_type,
+            "Size": str(len(raw_html)),
+        }
+        return self._build_metadata_block(fields, raw_html)
+
+
 
     # ──────────────────────────────────────────────
-    #  Internal: HTML metadata helpers
-    # ──────────────────────────────────────────────
-
     def _extract_title(self, html: str) -> str:
         match = re.search(
             r"<title[^>]*>(.*?)</title>", html, re.DOTALL | re.IGNORECASE
