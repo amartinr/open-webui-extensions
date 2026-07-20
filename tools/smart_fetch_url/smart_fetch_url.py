@@ -55,7 +55,7 @@ MAX_BATCH_CHARS = 65_535
 _DESC_BATCH_CHARS = f"Maximum total characters for the entire batch output (default: {MAX_BATCH_CHARS})"
 MAX_BATCH_LENGTH = 10
 
-THREAD_POOL_WORKERS = 8
+THREAD_POOL_WORKERS = 16
 THREAD_TIMEOUT_SEC = 5
 MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK = 30
 GLOBAL_OPERATION_TIMEOUT_SEC = 30
@@ -228,10 +228,13 @@ class Tools:
             fut.cancel()
             raise
         except asyncio.TimeoutError:
+            pool = self._get_thread_pool()
             logger.warning(
-                "Threaded operation timed out after %.1fs — thread continues in pool "
-                "until current work completes",
+                "Threaded operation timed out after %.1fs (pool: %d/%d workers busy) — "
+                "thread continues in pool until current work completes",
                 timeout,
+                len(pool._threads) - pool._idle_semaphore._value if hasattr(pool, '_idle_semaphore') else -1,
+                pool._max_workers,
             )
             fut.cancel()
             raise
@@ -750,9 +753,9 @@ class Tools:
                 proxy=proxy,
             )
         except ImportError:
-            msg = "curl_cffi not installed — falling back to httpx (no TLS fingerprinting)"
-            logger.warning(msg)
-            print(msg, file=__import__("sys").stderr)
+            logger.warning(
+                "curl_cffi not installed — falling back to httpx (no TLS fingerprinting)"
+            )
             self._fallback_note = "⚠️ Fetched via httpx fallback (curl_cffi not installed, no TLS fingerprinting)"
             return await self._fetch_with_httpx(
                 url=url,
