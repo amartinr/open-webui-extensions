@@ -222,7 +222,7 @@ class Tools:
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.CancelledError:
-            logger.warning(
+            logger.info(
                 "Threaded operation cancelled — thread continues in pool until "
                 "current work completes (fut.cancel() cannot kill running threads)"
             )
@@ -409,7 +409,7 @@ class Tools:
             try:
                 results = await asyncio.gather(*tasks)
             except asyncio.CancelledError:
-                logger.warning("Batch fetch cancelled by user (Stop button)")
+                logger.info("Batch fetch cancelled by user (Stop button)")
                 for t in tasks:
                     if not t.done():
                         t.cancel()
@@ -791,7 +791,7 @@ class Tools:
                     allow_redirects=True,
                 )
             except asyncio.CancelledError:
-                logger.warning("Request cancelled: %s", url)
+                logger.info("Request cancelled: %s", url)
                 raise
 
             content_type = resp.headers.get("content-type", "") or ""
@@ -843,7 +843,7 @@ class Tools:
             try:
                 resp = await client.get(url, **request_kwargs)
             except asyncio.CancelledError:
-                logger.warning("Request cancelled: %s", url)
+                logger.info("Request cancelled: %s", url)
                 raise
             resp.raise_for_status()
 
@@ -1443,7 +1443,7 @@ class Tools:
             return empty
 
         except Exception as e:
-            logger.warning(f"Document extraction failed for {url} ({content_type}): {e}")
+            logger.error(f"Document extraction failed for {url} ({content_type}): {e}")
             empty["content"] = (
                 f"[Document ({content_type}) text extraction failed: {e}]"
             )
