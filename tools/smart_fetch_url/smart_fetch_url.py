@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.9.8
+version: 0.9.9
 licence: MIT
 """
 
@@ -659,7 +659,8 @@ class Tools:
             extracted, alternates_used = await self._try_alternate_fallback(
                 raw_html=raw_html,
                 url=final_url,
-                                timeout_ms=timeout_ms,
+                browser=browser,
+                timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
                 format=format,
             )
@@ -1294,7 +1295,7 @@ class Tools:
                         format=format,
                     )
                     if alt_extracted.get("word_count", 0) > MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK:
-                        alternates_used.append(alt_final)
+                        alternates_used.append(alt_result.final_url)
                         return alt_extracted, alternates_used
                 except asyncio.CancelledError:
                     raise
