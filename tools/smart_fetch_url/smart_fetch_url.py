@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import time
+import atexit
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
@@ -193,6 +194,7 @@ class Tools:
         self._cffi_available = None  # lazy check
         self._thread_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._fallback_note: Optional[str] = None
+        atexit.register(self._close)
 
     def _close(self):
         """Shut down the thread pool explicitly.
