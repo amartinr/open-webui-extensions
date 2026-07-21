@@ -195,6 +195,7 @@ class Tools:
         self._cffi_available = None  # lazy check
         self._thread_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._fallback_note: Optional[str] = None
+        self._pool_pending_ops = 0
         atexit.register(self._close)
 
     def _close(self):
@@ -215,30 +216,64 @@ class Tools:
             )
         return self._thread_pool
 
+    def _pool_stats(self) -> str:
+        """Return a human-readable summary of the thread pool state."""
+        pool = self._thread_pool
+        if pool is None:
+            return "pool not yet created"
+        try:
+            # Best-effort introspection — ThreadPoolExecutor internals vary
+            # across Python versions.
+            busy = 0
+            maxw = pool._max_workers
+            if hasattr(pool, '_threads'):
+                threads = len(pool._threads)
+                # _idle_semaphore doesn't expose its value directly on all
+                # Python versions, so we approximate.
+                idle = 0
+                if hasattr(pool, '_idle_semaphore'):
+                    # semaphore value = available permits = idle workers
+                    idle = pool._idle_semaphore._value
+                busy = threads - idle
+            elif hasattr(pool, '_work_queue'):
+                qsize = pool._work_queue.qsize()
+                return f"workers={maxw}, queued={qsize}, pending_ops={self._pool_pending_ops}"
+            return f"workers={maxw}, busy={max(0, busy)}, pending_ops={self._pool_pending_ops}"
+        except Exception:
+            return f"pending_ops={self._pool_pending_ops}"
+
     async def _run_in_thread(self, func, timeout: float = THREAD_TIMEOUT_SEC):
         loop = asyncio.get_running_loop()
         pool = self._get_thread_pool()
+        self._pool_pending_ops += 1
         fut = loop.run_in_executor(pool, func)
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.CancelledError:
+            # NOTE: fut.cancel() is a no-op once the thread is running —
+            # concurrent.futures cannot kill threads mid-execution.
+            # The thread continues in the pool until it completes,
+            # then the worker slot is freed naturally.
             logger.info(
                 "Threaded operation cancelled — thread continues in pool until "
-                "current work completes (fut.cancel() cannot kill running threads)"
+                "current work completes (concurrent.futures cannot kill running threads; "
+                "pool: %s)",
+                self._pool_stats(),
             )
-            fut.cancel()
             raise
         except asyncio.TimeoutError:
-            pool = self._get_thread_pool()
+            # NOTE: same limitation as CancelledError — the thread keeps
+            # running to completion, tying up the worker slot until it
+            # finishes. Pool is bounded so this is a fixed overhead.
             logger.warning(
-                "Threaded operation timed out after %.1fs (pool: %d/%d workers busy) — "
-                "thread continues in pool until current work completes",
+                "Threaded operation timed out after %.1fs — thread continues "
+                "in pool until current work completes (pool: %s)",
                 timeout,
-                len(pool._threads) - pool._idle_semaphore._value if hasattr(pool, '_idle_semaphore') else -1,
-                pool._max_workers,
+                self._pool_stats(),
             )
-            fut.cancel()
             raise
+        finally:
+            self._pool_pending_ops -= 1
 
     def __del__(self):
         # Best-effort cleanup — ``_close()`` is the reliable path.
@@ -409,10 +444,17 @@ class Tools:
             try:
                 results = await asyncio.gather(*tasks)
             except asyncio.CancelledError:
-                logger.info("Batch fetch cancelled by user (Stop button)")
-                for t in tasks:
-                    if not t.done():
-                        t.cancel()
+                logger.info(
+                    "Batch fetch cancelled by user (Stop button) — %d task(s) cancelled. "
+                    "Any threads already executing in the pool continue to completion "
+                    "(pool: %s)",
+                    len(tasks),
+                    self._pool_stats(),
+                )
+                # asyncio.gather already cancels all pending (non-running) tasks
+                # when CancelledError is raised. Threads that were already
+                # executing inside _run_in_thread continue in the pool — this
+                # is an unavoidable limitation of concurrent.futures.
                 await self._emit_status(__event_emitter__, f"❌ Batch cancelled", done=True)
                 raise
 
