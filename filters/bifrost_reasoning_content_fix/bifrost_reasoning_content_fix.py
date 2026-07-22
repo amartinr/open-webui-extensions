@@ -9,7 +9,7 @@ description: >
   Also cleans up historical messages on the way IN to prevent
   stale non-standard fields from being re-sent.
 required_open_webui_version: 0.9.0
-version: 2.0.0
+version: 2.1.0
 """
 
 import json

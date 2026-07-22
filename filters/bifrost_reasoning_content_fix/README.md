@@ -34,6 +34,7 @@ break clients that expect the standard `reasoning_content` field.
 
 - `reasoning` and `reasoning_details` are **not part of the OpenAI spec**.
 - `reasoning_content` (the standard field) is absent.
+- `usage.reasoning_tokens` is also non-standard and stripped.
 
 ## What the filter produces (standard OpenAI)
 
@@ -47,13 +48,35 @@ break clients that expect the standard `reasoning_content` field.
 }
 ```
 
-- `reasoning` → `reasoning_content` (OpenAI-compatible).
-- `reasoning_details` removed.
-- `usage.reasoning_tokens` stripped (not part of the standard schema).
-
 ## How it works
 
-- **inlet**: scrubs historical `reasoning` / `reasoning_details` from
-  previous assistant messages before they are re-sent to the upstream API.
-- **outlet**: converts `reasoning` → `reasoning_content` on the fly
-  for both streaming and non-streaming responses.
+### outlet (provider → Open WebUI)
+
+Applied to every response — both streaming and non-streaming:
+
+1. **`reasoning`** → `reasoning_content` (rename to standard field).
+2. **`reasoning_details`** → its text blocks are concatenated into
+   `reasoning_content` (richer than the flat `reasoning` field).
+3. **`reasoning_tokens`** in `usage.*_details` stripped (non-standard).
+4. **Exception safety**: stream errors are logged and the raw chunk
+   is passed through to avoid crashing the whole response.
+
+### inlet (Open WebUI → provider)
+
+Cleans historical assistant messages **only** if they still carry
+non-standard Bifrost fields (`reasoning` or `reasoning_details`).
+Messages that were already normalized by the outlet in a previous
+turn are left untouched.
+
+## Important caveats
+
+- **Bifrost #974** (streaming `delta.reasoning` silently dropped for
+  Gemini): this is a Bifrost-side bug; the filter cannot recover
+  reasoning that never arrives. Pin a known-good Bifrost version or
+  report upstream.
+- **Bifrost #5169** (Chat→Responses stream converter emits reasoning
+  deltas without an opening event, crashing Anthropic SDK clients):
+  also a Bifrost-side bug affecting Anthropic-compat streaming.
+- The filter **does not** inspect `content` for embedded XML
+  reasoning tags — that is Open WebUI's own responsibility via its
+  `reasoning_tags` configuration.
