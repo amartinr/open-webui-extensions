@@ -52,7 +52,7 @@ break clients that expect the standard `reasoning_content` field.
 
 ### outlet (provider → Open WebUI)
 
-Applied to every response — both streaming and non-streaming:
+Applied to every response - both streaming and non-streaming:
 
 1. **`reasoning`** → `reasoning_content` (rename to standard field).
 2. **`reasoning_details`** → its text blocks are concatenated into
@@ -78,5 +78,5 @@ turn are left untouched.
   deltas without an opening event, crashing Anthropic SDK clients):
   also a Bifrost-side bug affecting Anthropic-compat streaming.
 - The filter **does not** inspect `content` for embedded XML
-  reasoning tags — that is Open WebUI's own responsibility via its
+  reasoning tags - that is Open WebUI's own responsibility via its
   `reasoning_tags` configuration.

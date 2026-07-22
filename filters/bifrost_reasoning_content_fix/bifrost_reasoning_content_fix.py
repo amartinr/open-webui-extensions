@@ -87,7 +87,7 @@ def _fix_sse_line(payload: str) -> str:
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse SSE payload: %s — %s", exc, payload[:200])
+        logger.warning("Failed to parse SSE payload: %s - %s", exc, payload[:200])
         return payload
     data = _fix_chunk(data)
     return json.dumps(data, ensure_ascii=False)
@@ -200,7 +200,7 @@ class Filter:
 
                     yield "".join(out_lines).encode("utf-8")
             except Exception:
-                logger.exception("Unhandled error in Bifrost reasoning filter stream — passing through original chunk"
+                logger.exception("Unhandled error in Bifrost reasoning filter stream - passing through original chunk"
                 if raw_chunk:
                     yield raw_chunk if isinstance(raw_chunk, bytes) else str(raw_chunk).encode("utf-8")
 
