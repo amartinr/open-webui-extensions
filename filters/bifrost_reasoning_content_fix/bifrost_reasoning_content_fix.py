@@ -13,26 +13,88 @@ version: 2.0.0
 """
 
 import json
+import logging
 from typing import Optional, Union
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
 #  HELPERS (apply to both inlet and outlet)
 # ──────────────────────────────────────────────
 
+import re
+
+_REASONING_TAG_RE = re.compile(
+    r"<reasoning\b[^>]*>(.*?)</reasoning\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _get_content_text(content) -> str:
+    """Extract plain text from content regardless of type.
+
+    OpenAI content can be a plain string, a list of multimodal parts,
+    or (in some providers) a dict.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return str(content.get("text", content.get("content", "")))
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text", item.get("content", ""))))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return ""
+
+
+def _has_bifrost_residue(msg: dict) -> bool:
+    """Check if a message still carries non-standard Bifrost fields."""
+    return bool(msg.get("reasoning") or msg.get("reasoning_details"))
+
+
+def _extract_reasoning_from_content(content: str) -> tuple[str, str]:
+    """Extract <reasoning>...</reasoning> XML tags from content text.
+
+    Workaround for Bifrost #974 where reasoning deltas are merged into
+    delta.content as XML tags instead of being placed in a dedicated field.
+
+    Returns (cleaned_content, reasoning_text).
+    """
+    if not content:
+        return content, ""
+
+    reasoning_parts = []
+
+    def _capture(m: re.Match) -> str:
+        reasoning_parts.append(m.group(1))
+        return ""
+
+    cleaned = _REASONING_TAG_RE.sub(_capture, content)
+    return cleaned, "".join(reasoning_parts)
+
 
 def _normalize_assistant_message(msg: dict) -> dict:
     """
     Normalize an assistant message to remove any Bifrost residue:
-      - reasoning_details → removed
+      - reasoning_details → reconstruct reasoning_content from its text blocks
       - reasoning          → reasoning_content
-      - If content is empty but reasoning_content has text,
-        move it to content.
     """
     msg = dict(msg)  # shallow copy to avoid mutating the original
 
-    # 1. Remove reasoning_details regardless of origin
-    msg.pop("reasoning_details", None)
+    # 1. Reconstruct reasoning_content from reasoning_details if present
+    reasoning_details = msg.pop("reasoning_details", None)
+    if reasoning_details and isinstance(reasoning_details, list):
+        texts = []
+        for item in reasoning_details:
+            if isinstance(item, dict) and item.get("type") == "reasoning.text":
+                texts.append(item.get("text", ""))
+        if texts and not msg.get("reasoning_content"):
+            msg["reasoning_content"] = "".join(texts)
 
     # 2. If Bifrost put the field 'reasoning' instead of 'reasoning_content'
     if "reasoning" in msg and "reasoning_content" not in msg:
@@ -40,20 +102,6 @@ def _normalize_assistant_message(msg: dict) -> dict:
     elif "reasoning" in msg:
         # Both coexist → keep reasoning_content and remove reasoning
         msg.pop("reasoning")
-
-    # 3. Critical case: content is empty but reasoning_content has text
-    #    → Bifrost is putting the visible response in reasoning
-    #      and leaving content empty. We fix it.
-    content = msg.get("content", "") or ""
-    reasoning = msg.get("reasoning_content", "") or ""
-
-    if not content and reasoning:
-        # We don't know if reasoning is CoT or the visible response.
-        # Since content is empty, assume it is the response
-        # and move it to content.
-        msg["content"] = reasoning
-        # The original reasoning is lost (Bifrost doesn't separate it properly)
-        msg["reasoning_content"] = ""
 
     return msg
 
@@ -72,9 +120,15 @@ def _fix_chunk(data: dict) -> dict:
                 delta["reasoning_content"] = delta.pop("reasoning")
             delta.pop("reasoning_details", None)
 
-            # If content is empty and reasoning_content has text,
-            # streaming sends it gradually → the frontend knows how
-            # to render it. Leave as-is.
+            # Workaround for Bifrost #974: reasoning merged into
+            # delta.content wrapped in <reasoning> tags.
+            d_content = delta.get("content", "")
+            if isinstance(d_content, str) and "<reasoning" in d_content.lower():
+                cleaned, extracted = _extract_reasoning_from_content(d_content)
+                if extracted:
+                    delta["content"] = cleaned
+                    if not delta.get("reasoning_content"):
+                        delta["reasoning_content"] = extracted
 
         # --- Non-streaming: message ---
         msg = choice.get("message")
@@ -90,7 +144,8 @@ def _fix_sse_line(payload: str) -> str:
         return payload
     try:
         data = json.loads(payload)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning("Failed to parse SSE payload: %s — %s", exc, payload[:200])
         return payload
     data = _fix_chunk(data)
     return json.dumps(data, ensure_ascii=False)
@@ -109,7 +164,8 @@ def _clean_messages(body: dict) -> dict:
     cleaned = []
     for msg in messages:
         if isinstance(msg, dict) and msg.get("role") == "assistant":
-            msg = _normalize_assistant_message(msg)
+            if _has_bifrost_residue(msg):
+                msg = _normalize_assistant_message(msg)
         cleaned.append(msg)
 
     body["messages"] = cleaned
@@ -181,24 +237,28 @@ class Filter:
         from starlette.responses import StreamingResponse
 
         async def patched_generator():
-            async for raw_chunk in response.body_iterator:
-                chunk = (
-                    raw_chunk.decode("utf-8", errors="replace")
-                    if isinstance(raw_chunk, bytes)
-                    else raw_chunk
-                )
+            try:
+                async for raw_chunk in response.body_iterator:
+                    chunk = (
+                        raw_chunk.decode("utf-8", errors="replace")
+                        if isinstance(raw_chunk, bytes)
+                        else raw_chunk
+                    )
 
-                lines = chunk.split("\n")
-                out_lines = []
-                for line in lines:
-                    if line.startswith("data: "):
-                        payload = line[6:]
-                        fixed = _fix_sse_line(payload)
-                        out_lines.append(f"data: {fixed}")
-                    else:
-                        out_lines.append(line)
+                    lines = chunk.split("\n")
+                    out_lines = []
+                    for line in lines:
+                        if line.startswith("data: "):
+                            payload = line[6:]
+                            fixed = _fix_sse_line(payload)
+                            out_lines.append(f"data: {fixed}")
+                        else:
+                            out_lines.append(line)
 
-                yield "".join(out_lines).encode("utf-8")
+                    yield "".join(out_lines).encode("utf-8")
+            except Exception:
+                logger.exception("Unhandled error in Bifrost reasoning filter stream — pasando chunk original")
+                yield raw_chunk if isinstance(raw_chunk, bytes) else str(raw_chunk).encode("utf-8")
 
         return StreamingResponse(
             patched_generator(),
@@ -208,6 +268,28 @@ class Filter:
         )
 
 
+def _strip_reasoning_tokens(usage: dict) -> dict:
+    """Remove Bifrost-injected reasoning_tokens from usage statistics.
+
+    These are not part of the standard OpenAI Chat Completion schema.
+    """
+    if not isinstance(usage, dict):
+        return usage
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict):
+        details.pop("reasoning_tokens", None)
+        if not details:
+            usage.pop("completion_tokens_details", None)
+    audio_details = usage.get("audio_tokens_details")
+    if isinstance(audio_details, dict):
+        audio_details.pop("reasoning_tokens", None)
+    return usage
+
+
 def _fix_non_streaming(body: dict) -> dict:
     """Fix a complete non-streaming response."""
-    return _fix_chunk(body)
+    body = _fix_chunk(body)
+    usage = body.get("usage")
+    if usage is not None:
+        body["usage"] = _strip_reasoning_tokens(usage)
+    return body
