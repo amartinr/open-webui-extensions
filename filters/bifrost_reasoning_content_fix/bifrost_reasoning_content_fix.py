@@ -200,7 +200,7 @@ class Filter:
 
                     yield "".join(out_lines).encode("utf-8")
             except Exception:
-                logger.exception("Unhandled error in Bifrost reasoning filter stream - passing through original chunk"
+                logger.exception("Unhandled error in Bifrost reasoning filter stream - passing through original chunk")
                 if raw_chunk:
                     yield raw_chunk if isinstance(raw_chunk, bytes) else str(raw_chunk).encode("utf-8")
 
