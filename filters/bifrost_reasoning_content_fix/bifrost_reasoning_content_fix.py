@@ -23,59 +23,10 @@ logger = logging.getLogger(__name__)
 #  HELPERS (apply to both inlet and outlet)
 # ──────────────────────────────────────────────
 
-import re
-
-_REASONING_TAG_RE = re.compile(
-    r"<reasoning\b[^>]*>(.*?)</reasoning\s*>",
-    re.DOTALL | re.IGNORECASE,
-)
-
-
-def _get_content_text(content) -> str:
-    """Extract plain text from content regardless of type.
-
-    OpenAI content can be a plain string, a list of multimodal parts,
-    or (in some providers) a dict.
-    """
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        return str(content.get("text", content.get("content", "")))
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                parts.append(str(item.get("text", item.get("content", ""))))
-            elif isinstance(item, str):
-                parts.append(item)
-        return "".join(parts)
-    return ""
-
 
 def _has_bifrost_residue(msg: dict) -> bool:
     """Check if a message still carries non-standard Bifrost fields."""
     return bool(msg.get("reasoning") or msg.get("reasoning_details"))
-
-
-def _extract_reasoning_from_content(content: str) -> tuple[str, str]:
-    """Extract <reasoning>...</reasoning> XML tags from content text.
-
-    Workaround for Bifrost #974 where reasoning deltas are merged into
-    delta.content as XML tags instead of being placed in a dedicated field.
-
-    Returns (cleaned_content, reasoning_text).
-    """
-    if not content:
-        return content, ""
-
-    reasoning_parts = []
-
-    def _capture(m: re.Match) -> str:
-        reasoning_parts.append(m.group(1))
-        return ""
-
-    cleaned = _REASONING_TAG_RE.sub(_capture, content)
-    return cleaned, "".join(reasoning_parts)
 
 
 def _normalize_assistant_message(msg: dict) -> dict:
@@ -120,15 +71,6 @@ def _fix_chunk(data: dict) -> dict:
                 delta["reasoning_content"] = delta.pop("reasoning")
             delta.pop("reasoning_details", None)
 
-            # Workaround for Bifrost #974: reasoning merged into
-            # delta.content wrapped in <reasoning> tags.
-            d_content = delta.get("content", "")
-            if isinstance(d_content, str) and "<reasoning" in d_content.lower():
-                cleaned, extracted = _extract_reasoning_from_content(d_content)
-                if extracted:
-                    delta["content"] = cleaned
-                    if not delta.get("reasoning_content"):
-                        delta["reasoning_content"] = extracted
 
         # --- Non-streaming: message ---
         msg = choice.get("message")
@@ -237,6 +179,7 @@ class Filter:
         from starlette.responses import StreamingResponse
 
         async def patched_generator():
+            raw_chunk = b""
             try:
                 async for raw_chunk in response.body_iterator:
                     chunk = (
@@ -258,7 +201,8 @@ class Filter:
                     yield "".join(out_lines).encode("utf-8")
             except Exception:
                 logger.exception("Unhandled error in Bifrost reasoning filter stream — pasando chunk original")
-                yield raw_chunk if isinstance(raw_chunk, bytes) else str(raw_chunk).encode("utf-8")
+                if raw_chunk:
+                    yield raw_chunk if isinstance(raw_chunk, bytes) else str(raw_chunk).encode("utf-8")
 
         return StreamingResponse(
             patched_generator(),
