@@ -417,7 +417,14 @@ class Tools:
                         await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ✅ {single_url}", done=False)
                         return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{result}\n\n---\n"
                     except asyncio.CancelledError:
-                        raise
+                        await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=True)
+                        err_result = self._format_output(
+                            url=single_url, final_url=single_url, title="", author="",
+                            site="", language="", published="", content="",
+                            format=format, status_code=0,
+                            error={"error_type": "cancelled", "message": "Operation cancelled by user"},
+                        )
+                        return f"## [{index + 1}/{len(urls)}] {single_url}\n\n{err_result}\n\n---\n"
                     except asyncio.TimeoutError:
                         await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] ❌ {single_url}", done=False)
                         err_result = self._format_output(
@@ -456,7 +463,7 @@ class Tools:
                 # executing inside _run_in_thread continue in the pool — this
                 # is an unavoidable limitation of concurrent.futures.
                 await self._emit_status(__event_emitter__, f"❌ Batch cancelled", done=True)
-                raise
+                return _truncation_note + "> Batch cancelled by user.\n"
 
             await self._emit_sources(__event_emitter__, urls)
             await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
@@ -522,7 +529,12 @@ class Tools:
 
         except asyncio.CancelledError:
             await self._emit_status(__event_emitter__, f"❌ {url}", done=True)
-            raise
+            return self._format_output(
+                url=url, final_url=url, title="", author="", site="",
+                language="", published="", content="", format=format,
+                status_code=0,
+                error={"error_type": "cancelled", "message": "Operation cancelled by user"},
+            )
 
         except Exception as e:
             error_data = self._format_error(e, url)
@@ -1851,6 +1863,7 @@ class Tools:
                     "data": {
                         "description": description,
                         "done": done,
+                        "hidden": False,
                     },
                 }
             )
