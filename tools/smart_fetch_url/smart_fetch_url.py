@@ -196,10 +196,12 @@ class Tools:
         self._thread_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
         self._fallback_note: Optional[str] = None
         self._pool_pending_ops = 0
+        self._thread_semaphore: Optional[asyncio.Semaphore] = None  # B: lazy-init in _run_in_thread
+        self._curl_sessions: dict[str, Any] = {}  # C: shared AsyncSession pool keyed by browser
         atexit.register(self._close)
 
     def _close(self):
-        """Shut down the thread pool explicitly.
+        """Shut down the thread pool and shared connection pools explicitly.
 
         Call this when the Tools instance is no longer needed
         (e.g. from the harness lifecycle hooks) to ensure no
@@ -208,6 +210,8 @@ class Tools:
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
             self._thread_pool = None
+        # C: curl_cffi sessions are GC'd with the Tools instance;
+        # httpx client is closed asynchronously in _fetch_with_httpx.
 
     def _get_thread_pool(self) -> concurrent.futures.ThreadPoolExecutor:
         if self._thread_pool is None:
@@ -243,37 +247,41 @@ class Tools:
             return f"pending_ops={self._pool_pending_ops}"
 
     async def _run_in_thread(self, func, timeout: float = THREAD_TIMEOUT_SEC):
-        loop = asyncio.get_running_loop()
-        pool = self._get_thread_pool()
-        self._pool_pending_ops += 1
-        fut = loop.run_in_executor(pool, func)
-        try:
-            return await asyncio.wait_for(fut, timeout=timeout)
-        except asyncio.CancelledError:
-            # NOTE: fut.cancel() is a no-op once the thread is running —
-            # concurrent.futures cannot kill threads mid-execution.
-            # The thread continues in the pool until it completes,
-            # then the worker slot is freed naturally.
-            logger.info(
-                "Threaded operation cancelled — thread continues in pool until "
-                "current work completes (concurrent.futures cannot kill running threads; "
-                "pool: %s)",
-                self._pool_stats(),
-            )
-            raise
-        except asyncio.TimeoutError:
-            # NOTE: same limitation as CancelledError — the thread keeps
-            # running to completion, tying up the worker slot until it
-            # finishes. Pool is bounded so this is a fixed overhead.
-            logger.warning(
-                "Threaded operation timed out after %.1fs — thread continues "
-                "in pool until current work completes (pool: %s)",
-                timeout,
-                self._pool_stats(),
-            )
-            raise
-        finally:
-            self._pool_pending_ops -= 1
+        # B: limit concurrent thread-pool tasks across all coroutines
+        if self._thread_semaphore is None:
+            self._thread_semaphore = asyncio.Semaphore(4)
+        async with self._thread_semaphore:
+            loop = asyncio.get_running_loop()
+            pool = self._get_thread_pool()
+            self._pool_pending_ops += 1
+            fut = loop.run_in_executor(pool, func)
+            try:
+                return await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.CancelledError:
+                # NOTE: fut.cancel() is a no-op once the thread is running —
+                # concurrent.futures cannot kill threads mid-execution.
+                # The thread continues in the pool until it completes,
+                # then the worker slot is freed naturally.
+                logger.info(
+                    "Threaded operation cancelled — thread continues in pool until "
+                    "current work completes (concurrent.futures cannot kill running threads; "
+                    "pool: %s)",
+                    self._pool_stats(),
+                )
+                raise
+            except asyncio.TimeoutError:
+                # NOTE: same limitation as CancelledError — the thread keeps
+                # running to completion, tying up the worker slot until it
+                # finishes. Pool is bounded so this is a fixed overhead.
+                logger.warning(
+                    "Threaded operation timed out after %.1fs — thread continues "
+                    "in pool until current work completes (pool: %s)",
+                    timeout,
+                    self._pool_stats(),
+                )
+                raise
+            finally:
+                self._pool_pending_ops -= 1
 
     def __del__(self):
         # Best-effort cleanup — ``_close()`` is the reliable path.
@@ -585,6 +593,8 @@ class Tools:
         content_type = result.content_type
         resp_headers = result.resp_headers
         raw_bytes = result.raw_bytes
+        del result  # E: free the FetchResult tuple after unpacking
+        del resp_headers  # E: not used further; free dict
         fallback_note = self._fallback_note
         self._fallback_note = None
 
@@ -662,6 +672,7 @@ class Tools:
                 status_code=status_code,
                 content_type=content_type,
             )
+            del raw_html  # E: free raw HTML after building response
             _elapsed = time.monotonic() - _start_time
             await self._emit_sources(__event_emitter__, [final_url])
             await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
@@ -695,6 +706,7 @@ class Tools:
                                 status_code=status_code,
                 note=fallback_note,
             )
+            del raw_html  # E: free raw HTML after skimmd parse + metadata extraction
             _elapsed = time.monotonic() - _start_time
             _desc = f"✅ {url}" if not verbose else f"✅ {url} ({_elapsed:.1f}s)"
             await self._emit_sources(__event_emitter__, [final_url])
@@ -725,6 +737,9 @@ class Tools:
                 format=format,
             )
             alternate_urls = alternates_used or []
+
+        # E: raw_html no longer needed after extraction + fallback
+        del raw_html
 
         # Step 6: Truncate
         content = extracted.get("content", "")
@@ -827,54 +842,65 @@ class Tools:
         timeout_ms: int,
         proxy: Optional[str] = None,
     ) -> FetchResult:
-        """Fetch using curl_cffi's async API with TLS fingerprinting."""
+        """Fetch using curl_cffi's async API with TLS fingerprinting.
+
+        C: Reuses shared AsyncSession per browser profile for connection
+        pooling (keep-alive, cookie reuse).  Sessions are cached in
+        ``self._curl_sessions`` keyed by browser impersonate string.
+        """
         from curl_cffi.requests import AsyncSession
 
         timeout_sec = timeout_ms / 1000
 
         proxies_dict = {"http": proxy, "https": proxy} if proxy else None
-        async with AsyncSession(
-            impersonate=browser,
-            proxies=proxies_dict,
-        ) as session:
-            try:
-                resp = await session.get(
-                    url,
-                    headers=headers,
-                    timeout=timeout_sec,
-                    allow_redirects=True,
-                )
-            except asyncio.CancelledError:
-                logger.info("Request cancelled: %s", url)
-                raise
 
-            content_type = resp.headers.get("content-type", "") or ""
-            resp_headers = dict(resp.headers)
-            final_url = str(resp.url)
-            status_code = resp.status_code
-
-            # Always grab raw bytes (needed for document extraction).
-            raw_bytes: Optional[bytes] = resp.content
-
-            # Only decode to text when the Content-Type warrants it.
-            # For PDFs / images / other binary, ``resp.text`` produces
-            # garbage that doubles memory for zero value.
-            ct_mime = content_type.split(";", 1)[0].strip().lower()
-            if ct_mime.startswith("text/") or ct_mime in Tools._TEXT_LIKE_APPLICATION_TYPES:
-                raw_html = resp.text
-            elif ct_mime in Tools._EXTRACTABLE_DOCUMENT_TYPES:
-                raw_html = ""
-            else:
-                raw_html = ""  # true binary (image, video, …)
-
-            return FetchResult(
-                raw_html=raw_html,
-                final_url=final_url,
-                status_code=status_code,
-                content_type=content_type,
-                resp_headers=resp_headers,
-                raw_bytes=raw_bytes,
+        # C: get or create a reusable session for this browser profile
+        session = self._curl_sessions.get(browser)
+        if session is None:
+            session = AsyncSession(
+                impersonate=browser,
+                proxies=proxies_dict,
             )
+            self._curl_sessions[browser] = session
+
+        try:
+            resp = await session.get(
+                url,
+                headers=headers,
+                timeout=timeout_sec,
+                allow_redirects=True,
+            )
+        except asyncio.CancelledError:
+            logger.info("Request cancelled: %s", url)
+            raise
+
+        content_type = resp.headers.get("content-type", "") or ""
+        resp_headers = dict(resp.headers)
+        final_url = str(resp.url)
+        status_code = resp.status_code
+
+        # Always grab raw bytes (needed for document extraction).
+        raw_bytes: Optional[bytes] = resp.content
+
+        # Only decode to text when the Content-Type warrants it.
+        # For PDFs / images / other binary, ``resp.text`` produces
+        # garbage that doubles memory for zero value.
+        ct_mime = content_type.split(";", 1)[0].strip().lower()
+        if ct_mime.startswith("text/") or ct_mime in Tools._TEXT_LIKE_APPLICATION_TYPES:
+            raw_html = resp.text
+        elif ct_mime in Tools._EXTRACTABLE_DOCUMENT_TYPES:
+            raw_html = ""
+        else:
+            raw_html = ""  # true binary (image, video, …)
+
+        return FetchResult(
+            raw_html=raw_html,
+            final_url=final_url,
+            status_code=status_code,
+            content_type=content_type,
+            resp_headers=resp_headers,
+            raw_bytes=raw_bytes,
+        )
 
     async def _fetch_with_httpx(
         self,
@@ -1354,6 +1380,9 @@ class Tools:
                         url=alt_result.final_url,
                         format=format,
                     )
+                    # E: free alt_fetch resources immediately
+                    if hasattr(alt_result, 'raw_bytes') and alt_result.raw_bytes is not None:
+                        del alt_result.raw_bytes
                     if alt_extracted.get("word_count", 0) > MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK:
                         alternates_used.append(alt_result.final_url)
                         return alt_extracted, alternates_used
