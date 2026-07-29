@@ -869,6 +869,7 @@ class Tools:
                 headers=headers,
                 timeout=timeout_sec,
                 allow_redirects=True,
+                http_version="v1",
             )
         except asyncio.CancelledError:
             logger.info("Request cancelled: %s", url)
