@@ -72,16 +72,24 @@ prefix-based context caching.
 
 ### Base64 persistence fallback
 
-When the user pastes an image (Ctrl+V) or when the upload API fails,
-the image arrives as a `data:image/...;base64,...` URI in the message
-content rather than as a file reference in `body["files"]`. In this
-case the filter calls Open WebUI's `get_image_url_from_base64()` to
-persist the image as a permanent file and obtain a real file URL for
-the `<file>` tag.
+Images arrive in two shapes depending on how the user attached them:
 
-Since filter inlets receive `__user__` as a plain dict, the filter
-converts it to a `UserModel` instance before passing it to the
-internal upload API, which expects attribute access (`user.email`).
+| Source | `body["files"]` | Message content |
+|--------|:---:|:---:|
+| Button +  | File ref with ID | `image_url` with base64 (added by `convert_url_images_to_base64`) |
+| Pasted (Ctrl+V) | `None` | `image_url` with base64 (client-side `data:` URI) |
+
+Since the filter runs *after* `convert_url_images_to_base64`, both cases look
+the same at the content level. The filter checks `body["files"]` first: if
+the image was uploaded and already has a file ID, it uses that ID directly
+for the `<file>` tag and skips the base64 persistence.
+
+When `body["files"]` is empty (pasted image), the filter calls Open WebUI's
+`get_image_url_from_base64()` to persist the image and obtain a file URL.
+
+Since filter inlets receive `__user__` as a plain dict, the filter converts
+it to a `UserModel` instance before passing it to the internal upload API,
+which expects attribute access (`user.email`).
 
 ## Execution Order
 

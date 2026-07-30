@@ -3,7 +3,7 @@ title: Image to File Storage
 author: pi-agent
 description: Strips images from the LLM payload to prevent RAG on pixel data and base64 bloat. Injects <attached_files> with <file> tags so the model can reference images by ID/URL.
 required_open_webui_version: 0.5.0
-version: 2.3.0
+version: 2.4.0
 """
 
 import logging
@@ -83,12 +83,6 @@ def _prepend_to_user_message(messages: list[dict], text: str) -> None:
 
 
 def _ensure_user_model(user: Any) -> Any:
-    """Convert a user dict to a UserModel if needed.
-
-    Open WebUI passes ``__user__`` as a plain dict to filter inlets, but
-    ``get_image_url_from_base64`` → ``upload_file_handler`` expects a
-    ``UserModel`` instance with attribute access (``user.email``).
-    """
     if isinstance(user, dict):
         try:
             from open_webui.models.users import UserModel
@@ -122,16 +116,20 @@ class Filter:
         **kwargs,
     ) -> dict:
         messages: list[dict] = body.get("messages", [])
-        total_images = 0
         file_tags: list[str] = []
 
         # ── Step 1: handle body["files"] (uploaded via "+" button) ──────────
+        # These images are already persisted by the upload API.  The base64
+        # blocks in the message content (added by convert_url_images_to_base64)
+        # are just reconstructions of these same files — do NOT persist them
+        # again.  We track this via has_uploaded_images.
+        has_uploaded_images = False
         files: Optional[list] = body.get("files")
         if isinstance(files, list):
             non_images = []
             for f in files:
                 if _is_image_file(f):
-                    total_images += 1
+                    has_uploaded_images = True
                     file_tags.append(_format_file_tag(f))
                 else:
                     non_images.append(f)
@@ -140,7 +138,12 @@ class Filter:
             else:
                 body["files"] = None
 
-        # ── Step 2: handle base64 images (pasted or upload-less) ────────────
+        # ── Step 2: handle base64 images in message content ─────────────────
+        # convert_url_images_to_base64() runs before this filter and turns any
+        # file URL into a data: URI inside image_url blocks.  If the image was
+        # already handled via body["files"], just strip the block without
+        # persisting.  Otherwise the user pasted an image (Ctrl+V) and we must
+        # persist it to get a real file URL.
         if messages:
             for message in messages:
                 if message.get("role") != "user":
@@ -157,49 +160,50 @@ class Filter:
                         continue
 
                     url = item.get("image_url", {}).get("url", "")
-                    if _is_base64_uri(url):
-                        # Persist the base64 image as a permanent file
+
+                    if has_uploaded_images:
+                        # Already handled via body["files"] — just strip.
+                        # The <file> tag from step 1 already has the real URL.
+                        pass
+                    elif _is_base64_uri(url):
+                        # Truly pasted image (no body["files"] entry).
+                        # Persist it to get a real file URL.
                         persisted = await self._persist_base64_image(
                             __request__, url, __metadata__, __user__
                         )
-                        total_images += 1
                         if persisted:
                             file_tags.append(
                                 _format_file_tag({"url": persisted, "type": "image"})
                             )
+                            log.info("Persisted pasted image to %s", persisted)
                         else:
-                            # Fallback: tag with the original base64 URL so the
-                            # model at least knows an image was attached, but
-                            # stripped to keep context size under control.
-                            file_tags.append(
-                                _format_file_tag({"url": "(base64 stripped)", "type": "image"})
-                            )
+                            # Strip anyway — can't let base64 reach the LLM.
+                            file_tags.append(_format_file_tag({"url": "(base64 stripped)", "type": "image"}))
                     else:
-                        # Already a file URL
-                        total_images += 1
+                        # Already a file URL — keep the reference.
                         file_tags.append(_format_file_tag({"url": url, "type": "image"}))
 
                 message["content"] = new_content if new_content else [
                     {"type": "text", "text": ""}
                 ]
 
-        # ── Step 3: inject <attached_files> ─────────────────────────────────
-        if total_images > 0 and file_tags and messages:
+        # ── Step 3: inject <attached_files> into last user message ──────────
+        if file_tags and messages:
             ref_block = _build_attached_files(file_tags)
             if ref_block:
                 _prepend_to_user_message(messages, ref_block)
-                log.info("Injected <attached_files> into user message (%d image(s))", total_images)
+                log.info("Injected <attached_files> into user message (%d image(s))", len(file_tags))
 
-        # ── Step 4: notify ──────────────────────────────────────────────────
-        if total_images > 0 and __event_emitter__:
+        # ── Step 4: notify user ─────────────────────────────────────────────
+        if file_tags and __event_emitter__:
             try:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
                             "description": (
-                                f"Stored {total_images} image(s) as files. "
-                                f"Removed from LLM context."
+                                f"Removed {len(file_tags)} image(s) from LLM context. "
+                                f"Files stored — accessible via file URL."
                             ),
                             "done": True,
                         },
