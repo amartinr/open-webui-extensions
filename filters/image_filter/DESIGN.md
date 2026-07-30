@@ -52,6 +52,24 @@ This filter removes those blocks, preventing:
 Since the images are already stored as permanent files, no additional
 storage is needed.
 
+### 3. Inject `<attached_files>` block
+
+After stripping images, the filter injects an `<attached_files>` block
+into the last user message using the **exact same format** as Open
+WebUI's own `add_file_context()`. This gives the model a deterministic,
+stable reference to the attached images:
+
+```xml
+<attached_files>
+<file type="image" id="abc123" url="abc123" content_type="image/png" name="photo.png"/>
+</attached_files>
+
+[original user text...]
+```
+
+This is deterministic (same input → same output) and does not break
+prefix-based context caching.
+
 ## Execution Order
 
 ```
@@ -82,7 +100,17 @@ User message (with image uploaded via "+")
 
 ## Key Design Decisions
 
-### 1. Two independent valves
+### 1. Three actions, two valves
+
+| Action | Valve | Default |
+|--------|-------|---------|
+| Strip images from `body["files"]` | `strip_files_metadata` | `True` |
+| Strip `image_url` from message content | `strip_image_url_context` | `True` |
+| Inject `<attached_files>` block | Always active when any image is stripped | — |
+
+The `<attached_files>` injection happens automatically whenever images
+are removed, because without it the model would have no way to know
+that images were attached.
 
 Each action can be toggled independently via Valves:
 
@@ -91,14 +119,26 @@ Each action can be toggled independently via Valves:
 | `strip_files_metadata` | `True` | Prevent RAG on images |
 | `strip_image_url_context` | `True` | Prevent base64 injection in context |
 
-### 2. No storage calls
+### 2. Matches add_file_context() format
+
+The injected `<file>` tags use the exact same format as Open WebUI's
+`add_file_context()` in `middleware.py`. This means:
+- The model sees the same XML structure regardless of whether tags come
+  from this filter or from the builtin RAG pipeline.
+- The block is deterministic: same files → same text → same cache key.
+  Prefix-based context caching is not invalidated between turns.
+- When native FC is enabled, `add_file_context()` also runs later and
+  injects tags for stored messages — the redundancy is harmless and
+  ensures coverage regardless of FC mode.
+
+### 3. No storage calls
 
 Unlike earlier versions, this filter never calls
 `get_image_url_from_base64()`. Images uploaded via the `+` button are
 **already stored** by the upload API. The filter just removes
 references from the LLM-bound payload.
 
-### 3. Filter runs at priority 0
+### 4. Filter runs at priority 0
 
 We set `priority = 0` so this filter executes before
 `chat_completion_files_handler`.  It also runs *after*
@@ -107,19 +147,19 @@ reconstructed messages is discarded by the filter — a small CPU cost
 (~15-20ms per 2MB image) that is far outweighed by the ~160k tokens
 saved in the LLM context.
 
-### 4. Non-image files pass through
+### 5. Non-image files pass through
 
 Only entries matching `image/` content_type or `"image"` type are
 removed. Documents, PDFs, spreadsheets, and other text-based files
 continue to be processed normally through the RAG pipeline.
 
-### 5. Graceful message content handling
+### 6. Graceful message content handling
 
 After stripping `image_url` blocks, if the content list becomes empty,
 an empty text block `{"type": "text", "text": ""}` is inserted to keep
 the message valid (prevents 400 errors from strict providers).
 
-### 6. Downstream integration
+### 7. Downstream integration
 
 Images remain accessible at their stored URL:
 ```

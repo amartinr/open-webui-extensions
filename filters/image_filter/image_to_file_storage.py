@@ -1,7 +1,7 @@
 """
 title: Image to File Storage
 author: pi-agent
-version: 2.0.0
+version: 2.1.0
 required_open_webui_version: 0.5.0
 description: >
     Prevents images uploaded via the "+" button from being injected into the
@@ -16,6 +16,10 @@ description: >
        chat_completion_files_handler skips them (no wasted RAG on images).
     2. Scans user message content for image_url blocks (reconstructed from
        DB history) and strips them to prevent base64 conversion.
+    3. Injects an <attached_files> block with <file> tags into the last user
+       message, mirroring the format used by Open WebUI's own
+       add_file_context(), so the model is aware of the attached images
+       and can reference them by ID/URL.
 
     Files are already persisted by the upload API — no additional storage
     call is needed.
@@ -41,12 +45,10 @@ def _is_image_file(file_ref: Any) -> bool:
     if not isinstance(file_ref, dict):
         return False
 
-    # Check by content_type
     ct = file_ref.get("content_type", "") or ""
     if ct.lower().startswith("image/"):
         return True
 
-    # Check by type field
     ft = file_ref.get("type", "") or ""
     if ft.lower() in ("image",):
         return True
@@ -57,6 +59,74 @@ def _is_image_file(file_ref: Any) -> bool:
 def _is_image_url_block(item: Any) -> bool:
     """Return True if *item* is an image_url content block."""
     return isinstance(item, dict) and item.get("type") == "image_url" and bool(item.get("image_url", {}).get("url"))
+
+
+def _format_file_tag(file: dict) -> str:
+    """Build a <file> tag matching Open WebUI's own add_file_context() format.
+
+    See open_webui/utils/middleware.py::add_file_context() — the same shape
+    ensures deterministic output regardless of which layer injects the tag.
+    """
+    file_id = file.get("id") or file.get("url", "")
+    attrs = f'type="{file.get("type", "file")}"'
+    if file_id:
+        attrs += f' id="{file_id}"'
+    url = file.get("url", "")
+    if url:
+        attrs += f' url="{url}"'
+    if file.get("content_type"):
+        attrs += f' content_type="{file["content_type"]}"'
+    if file.get("name"):
+        attrs += f' name="{file["name"]}"'
+    return f"<file {attrs}/>"
+
+
+def _build_attached_files(
+    body_files: list[dict],
+    image_urls: list[str],
+) -> str:
+    """Build an <attached_files> block from image file refs and image_urls.
+
+    *body_files* are the image entries removed from ``body["files"]``.
+    *image_urls* are URL strings extracted from ``image_url`` content blocks.
+    """
+    tags: list[str] = []
+    seen: set[str] = set()
+
+    for f in body_files:
+        key = f.get("url") or f.get("id") or ""
+        if key and key not in seen:
+            seen.add(key)
+            tags.append(_format_file_tag(f))
+
+    for url in image_urls:
+        if url not in seen:
+            seen.add(url)
+            tags.append(_format_file_tag({"url": url, "type": "image"}))
+
+    if not tags:
+        return ""
+    return "<attached_files>\n" + "\n".join(tags) + "\n</attached_files>\n\n"
+
+
+def _prepend_to_user_message(messages: list[dict], text: str) -> None:
+    """Prepend *text* to the last user message's content (text or list)."""
+    last_user = None
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            last_user = msg
+            break
+    if last_user is None:
+        return
+
+    content = last_user.get("content")
+    if isinstance(content, list):
+        if content and isinstance(content[0], dict) and content[0].get("type") == "text":
+            content[0]["text"] = text + content[0]["text"]
+        else:
+            content.insert(0, {"type": "text", "text": text})
+    elif isinstance(content, str):
+        last_user["content"] = text + content
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +154,7 @@ class Filter:
             description=(
                 "When True, removes image_url content blocks from user "
                 "messages to prevent convert_url_images_to_base64 from "
-                "injecting base64 into the LLM context. "
-                "The image URLs remain accessible from the stored message."
+                "injecting base64 into the LLM context."
             ),
         )
 
@@ -110,16 +179,13 @@ class Filter:
         (top-level key).  ``process_chat_payload`` pops them into ``metadata``
         *after* the filter pipeline completes.
         """
+        messages: list[dict] = body.get("messages", [])
         modified = False
         total_images = 0
+        stripped_files: list[dict] = []
+        stripped_urls: list[str] = []
 
         # ---- 1. Strip image file refs from body["files"] -------------------
-        # These files were uploaded via the "+" button and stored by the
-        # upload API.  At this point they live at body["files"] (top-level).
-        # `process_chat_payload` will pop them into `metadata["files"]` after
-        # the filter pipeline, and then chat_completion_files_handler will
-        # try to run RAG embedding on them.  Removing images here prevents
-        # wasteful RAG on pixel data.
         if self.valves.strip_files_metadata:
             files: Optional[list] = body.get("files")
             if isinstance(files, list) and any(_is_image_file(f) for f in files):
@@ -128,6 +194,7 @@ class Filter:
                     image_count = len(files) - len(non_image_files)
                     total_images += image_count
                     modified = True
+                    stripped_files = [f for f in files if _is_image_file(f)]
                     log.info(
                         "Removed %d image(s) from body.files (kept %d non-image file(s))",
                         image_count,
@@ -136,10 +203,6 @@ class Filter:
                     body["files"] = non_image_files if non_image_files else None
 
         # ---- 2. Strip image_url blocks from user message content ---------
-        # Messages reconstructed from DB have message['files'] converted to
-        # image_url blocks.  These get converted to base64 by
-        # convert_url_images_to_base64() later in the pipeline.
-        messages: list[dict] = body.get("messages", [])
         if self.valves.strip_image_url_context and messages:
             for message in messages:
                 if message.get("role") != "user":
@@ -149,20 +212,34 @@ class Filter:
                 if not isinstance(content, list):
                     continue
 
-                # Filter out any image_url blocks
-                new_content = [item for item in content if not _is_image_url_block(item)]
+                # Collect URLs before stripping
+                for item in content:
+                    if _is_image_url_block(item):
+                        url = item.get("image_url", {}).get("url", "")
+                        if url:
+                            stripped_urls.append(url)
 
+                new_content = [item for item in content if not _is_image_url_block(item)]
                 if len(new_content) != len(content):
                     removed = len(content) - len(new_content)
                     total_images += removed
                     modified = True
                     log.info("Stripped %d image_url block(s) from user message", removed)
 
-                # If after stripping there's no content at all, insert an
-                # empty text block to keep the message valid.
                 message["content"] = new_content if new_content else [{"type": "text", "text": ""}]
 
-        # ---- 3. Notify the user -----------------------------------------
+        # ---- 3. Inject <attached_files> block into last user message -------
+        # Mirrors Open WebUI's add_file_context() format so the model is aware
+        # of the attached images and can reference them by ID/URL.  The block
+        # is deterministic (same input → same output) so it does not break
+        # prefix-based context caching.
+        if modified and total_images > 0 and stripped_files + stripped_urls:
+            ref_block = _build_attached_files(stripped_files, stripped_urls)
+            if ref_block and messages:
+                _prepend_to_user_message(messages, ref_block)
+                log.info("Injected <attached_files> into user message (%d image(s))", total_images)
+
+        # ---- 4. Notify the user -----------------------------------------
         if modified and total_images > 0 and __event_emitter__:
             try:
                 await __event_emitter__(

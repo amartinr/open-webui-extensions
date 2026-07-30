@@ -23,11 +23,15 @@ When you upload an image via the `+` button, Open WebUI:
 4. **For saved chats**, reconstructs messages and converts stored image
    references to `image_url` blocks → then to base64 (bloated context)
 
-This filter intercepts at step 3 and 4:
+This filter intercepts at steps 3-4 and adds a deterministic
+`<attached_files>` block:
 
 - **Removes image entries** from `body["files"]` so RAG skips them
 - **Removes `image_url` blocks** from message content so they never
   become base64
+- **Injects `<attached_files>`** with `<file>` tags into the last user
+  message, matching Open WebUI's own `add_file_context()` format, so
+  the model is aware of the attached images
 
 Non-image files (PDFs, documents) pass through unchanged.
 
