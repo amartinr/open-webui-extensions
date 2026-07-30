@@ -3,7 +3,7 @@ title: Image to File Storage
 author: pi-agent
 description: Strips images from the LLM payload to prevent RAG on pixel data and base64 bloat. Injects <attached_files> with <file> tags so the model can reference images by ID/URL.
 required_open_webui_version: 0.5.0
-version: 2.2.0
+version: 2.3.0
 """
 
 import logging
@@ -19,7 +19,6 @@ log = logging.getLogger(__name__)
 
 
 def _is_image_file(file_ref: Any) -> bool:
-    """Return True if *file_ref* is an image file reference."""
     if not isinstance(file_ref, dict):
         return False
     ct = (file_ref.get("content_type") or "").lower()
@@ -32,7 +31,6 @@ def _is_image_file(file_ref: Any) -> bool:
 
 
 def _is_image_url_block(item: Any) -> bool:
-    """Return True if *item* is an image_url content block."""
     if not isinstance(item, dict):
         return False
     if item.get("type") != "image_url":
@@ -41,12 +39,10 @@ def _is_image_url_block(item: Any) -> bool:
 
 
 def _is_base64_uri(url: str) -> bool:
-    """Check if a URL is a base64 data URI."""
     return url.startswith("data:image/") and ";base64," in url
 
 
 def _format_file_tag(file: dict) -> str:
-    """Build a <file> tag matching Open WebUI's add_file_context() format."""
     file_id = file.get("id") or file.get("url", "")
     attrs = f'type="{file.get("type", "file")}"'
     if file_id:
@@ -62,14 +58,12 @@ def _format_file_tag(file: dict) -> str:
 
 
 def _build_attached_files(tags: list[str]) -> str:
-    """Wrap <file> tags in an <attached_files> block."""
     if not tags:
         return ""
     return "<attached_files>\n" + "\n".join(tags) + "\n</attached_files>\n\n"
 
 
 def _prepend_to_user_message(messages: list[dict], text: str) -> None:
-    """Prepend *text* to the last user message's content."""
     last_user = None
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -86,6 +80,23 @@ def _prepend_to_user_message(messages: list[dict], text: str) -> None:
             content.insert(0, {"type": "text", "text": text})
     elif isinstance(content, str):
         last_user["content"] = text + content
+
+
+def _ensure_user_model(user: Any) -> Any:
+    """Convert a user dict to a UserModel if needed.
+
+    Open WebUI passes ``__user__`` as a plain dict to filter inlets, but
+    ``get_image_url_from_base64`` → ``upload_file_handler`` expects a
+    ``UserModel`` instance with attribute access (``user.email``).
+    """
+    if isinstance(user, dict):
+        try:
+            from open_webui.models.users import UserModel
+            return UserModel(**user)
+        except Exception as exc:
+            log.warning("Failed to convert user dict to UserModel: %s", exc)
+            return None
+    return user
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +126,6 @@ class Filter:
         file_tags: list[str] = []
 
         # ── Step 1: handle body["files"] (uploaded via "+" button) ──────────
-        # These are already persisted by the upload API. Remove them from the
-        # metadata so RAG skips them, but keep the file IDs for reference.
         files: Optional[list] = body.get("files")
         if isinstance(files, list):
             non_images = []
@@ -131,10 +140,7 @@ class Filter:
             else:
                 body["files"] = None
 
-        # ── Step 2: handle base64 images in message content ─────────────────
-        # User pasted an image (Ctrl+V) — it's a data: URI in the content list.
-        # It was never uploaded, so persist it now via get_image_url_from_base64()
-        # to obtain a proper file URL.
+        # ── Step 2: handle base64 images (pasted or upload-less) ────────────
         if messages:
             for message in messages:
                 if message.get("role") != "user":
@@ -151,22 +157,25 @@ class Filter:
                         continue
 
                     url = item.get("image_url", {}).get("url", "")
-                    if _is_base64_uri(url) and __request__:
+                    if _is_base64_uri(url):
                         # Persist the base64 image as a permanent file
-                        persisted_url = await self._persist_base64_image(
+                        persisted = await self._persist_base64_image(
                             __request__, url, __metadata__, __user__
                         )
                         total_images += 1
-                        if persisted_url:
-                            # Use the file URL for the <file> tag
+                        if persisted:
                             file_tags.append(
-                                _format_file_tag({"url": persisted_url, "type": "image"})
+                                _format_file_tag({"url": persisted, "type": "image"})
                             )
-                            log.info("Persisted base64 image to %s", persisted_url)
                         else:
-                            log.warning("Failed to persist base64 image")
+                            # Fallback: tag with the original base64 URL so the
+                            # model at least knows an image was attached, but
+                            # stripped to keep context size under control.
+                            file_tags.append(
+                                _format_file_tag({"url": "(base64 stripped)", "type": "image"})
+                            )
                     else:
-                        # Already a file URL, just keep it as a reference
+                        # Already a file URL
                         total_images += 1
                         file_tags.append(_format_file_tag({"url": url, "type": "image"}))
 
@@ -174,14 +183,14 @@ class Filter:
                     {"type": "text", "text": ""}
                 ]
 
-        # ── Step 3: inject <attached_files> block into last user message ────
+        # ── Step 3: inject <attached_files> ─────────────────────────────────
         if total_images > 0 and file_tags and messages:
             ref_block = _build_attached_files(file_tags)
             if ref_block:
                 _prepend_to_user_message(messages, ref_block)
                 log.info("Injected <attached_files> into user message (%d image(s))", total_images)
 
-        # ── Step 4: notify the user ─────────────────────────────────────────
+        # ── Step 4: notify ──────────────────────────────────────────────────
         if total_images > 0 and __event_emitter__:
             try:
                 await __event_emitter__(
@@ -207,9 +216,14 @@ class Filter:
         request: Any,
         base64_url: str,
         metadata: dict | None,
-        user: dict | None,
+        user: Any,
     ) -> str | None:
         """Persist a base64 image and return its file URL."""
+        user_model = _ensure_user_model(user)
+        if user_model is None:
+            log.warning("Cannot persist base64 image: no valid user object")
+            return None
+
         try:
             from open_webui.utils.files import get_image_url_from_base64
 
@@ -218,7 +232,7 @@ class Filter:
                 "message_id": (metadata or {}).get("message_id"),
                 "session_id": (metadata or {}).get("session_id"),
             }
-            return await get_image_url_from_base64(request, base64_url, meta, user)
+            return await get_image_url_from_base64(request, base64_url, meta, user_model)
         except Exception as exc:
             log.warning("Failed to persist base64 image: %s", exc)
             return None

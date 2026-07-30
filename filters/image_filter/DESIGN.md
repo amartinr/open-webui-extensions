@@ -61,7 +61,7 @@ stable reference to the attached images:
 
 ```xml
 <attached_files>
-<file type="image" id="abc123" url="abc123" content_type="image/png" name="photo.png"/>
+<file type="image" id="abc123" url="/api/v1/files/abc123/content" content_type="image/png" name="photo.png"/>
 </attached_files>
 
 [original user text...]
@@ -69,6 +69,19 @@ stable reference to the attached images:
 
 This is deterministic (same input → same output) and does not break
 prefix-based context caching.
+
+### Base64 persistence fallback
+
+When the user pastes an image (Ctrl+V) or when the upload API fails,
+the image arrives as a `data:image/...;base64,...` URI in the message
+content rather than as a file reference in `body["files"]`. In this
+case the filter calls Open WebUI's `get_image_url_from_base64()` to
+persist the image as a permanent file and obtain a real file URL for
+the `<file>` tag.
+
+Since filter inlets receive `__user__` as a plain dict, the filter
+converts it to a `UserModel` instance before passing it to the
+internal upload API, which expects attribute access (`user.email`).
 
 ## Execution Order
 
