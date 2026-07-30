@@ -1,28 +1,9 @@
 """
 title: Image to File Storage
 author: pi-agent
-version: 2.1.0
+description: Strips images from the LLM payload to prevent RAG on pixel data and base64 bloat. Injects <attached_files> with <file> tags so the model can reference images by ID/URL.
 required_open_webui_version: 0.5.0
-description: >
-    Prevents images uploaded via the "+" button from being injected into the
-    LLM context. Images are already stored as permanent files by Open WebUI's
-    upload API; this filter removes them from the message payload so they
-    neither undergo RAG embedding (via chat_completion_files_handler) nor
-    get converted to base64 (via convert_url_images_to_base64). The stored
-    file references remain accessible via file URL for downstream tools.
-
-    What it does at the inlet:
-    1. Scans body["files"] (top-level) and removes image-type entries so
-       chat_completion_files_handler skips them (no wasted RAG on images).
-    2. Scans user message content for image_url blocks (reconstructed from
-       DB history) and strips them to prevent base64 conversion.
-    3. Injects an <attached_files> block with <file> tags into the last user
-       message, mirroring the format used by Open WebUI's own
-       add_file_context(), so the model is aware of the attached images
-       and can reference them by ID/URL.
-
-    Files are already persisted by the upload API — no additional storage
-    call is needed.
+version: 2.1.0
 """
 
 import logging
