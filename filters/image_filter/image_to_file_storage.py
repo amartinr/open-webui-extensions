@@ -1,11 +1,13 @@
 """
 title: Image to File Storage
 author: pi-agent
-description: Strips images from LLM context to prevent RAG and base64 bloat. Injects <attached_files> with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images.
+description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects <attached_files> with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images.
 required_open_webui_version: 0.5.0
-version: 2.9.0
+version: 2.10.0
 """
 
+import base64
+import hashlib
 import logging
 from typing import Any, Optional
 
@@ -40,6 +42,26 @@ def _is_image_url_block(item: Any) -> bool:
 
 def _is_base64_uri(url: str) -> bool:
     return url.startswith("data:image/") and ";base64," in url
+
+
+def _decode_base64_uri(url: str) -> Optional[tuple[bytes, str]]:
+    """Decode a `data:image/*;base64,...` URI into (raw bytes, content_type).
+
+    The hash that Open WebUI stores in `files.meta["file_hash"]` is computed
+    over the decoded bytes (what actually lands on disk), not over the base64
+    string — so dedup must decode first, exactly once.
+    """
+    if not (url.startswith("data:image/") and ";base64," in url):
+        return None
+    header, b64 = url.split(",", 1)
+    content_type = header.split(";", 1)[0].removeprefix("data:")
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    return raw, content_type
 
 
 def _format_file_tag(file: dict, base_url: str = "") -> str:
@@ -199,17 +221,85 @@ class Filter:
 
     # ------------------------------------------------------------------
     async def _persist_base64(self, url: str, request, metadata, user) -> str | None:
+        """Persist a pasted image, reusing an existing file when the same
+        content is already stored for this user.
+
+        The `data:` URI is decoded exactly once. The raw bytes are hashed
+        with sha256 — the same digest `upload_file_handler` stores in
+        `files.meta["file_hash"]` — so an existing file can be looked up
+        and reused instead of writing a new one. On a miss, the decoded
+        bytes go straight to `upload_image()` (no second decode). Returns
+        a relative `/api/v1/files/{id}/content` URL, or None on failure.
+        """
+        decoded = _decode_base64_uri(url)
+        if decoded is None:
+            return None
+        raw, content_type = decoded
+        file_hash = hashlib.sha256(raw).hexdigest()
+
         user_model = _ensure_user_model(user)
         if user_model is None:
             return None
+
         try:
-            from open_webui.utils.files import get_image_url_from_base64
+            existing = await self._find_file_by_hash(user_model.id, file_hash)
+            if existing and existing.get("id"):
+                await self._link_file_to_message(existing["id"], metadata, user_model)
+                return request.app.url_path_for("get_file_content_by_id", id=existing["id"])
+
+            from open_webui.routers.images import upload_image
+
             meta = {
                 "chat_id": (metadata or {}).get("chat_id"),
                 "message_id": (metadata or {}).get("message_id"),
                 "session_id": (metadata or {}).get("session_id"),
             }
-            return await get_image_url_from_base64(request, url, meta, user_model)
+            _, image_url = await upload_image(request, raw, content_type, meta, user_model)
+            return image_url
         except Exception as exc:
             log.warning("_persist_base64 failed: %s", exc)
             return None
+
+    async def _find_file_by_hash(self, user_id: str, file_hash: str) -> Optional[dict]:
+        """Return the first file owned by `user_id` whose
+        `meta["file_hash"]` matches the given digest.
+
+        Best-effort: on any error it returns None and the caller falls
+        back to persisting a new file. No index exists on
+        `meta["file_hash"]`, so concurrent requests can still double-
+        insert (TOCTOU) — worst case equals today's behavior (one extra
+        file row), it never reuses another user's file because the
+        lookup is scoped by `user_id`.
+        """
+        try:
+            from open_webui.models.files import Files
+
+            files = await Files.get_files_by_user_id(user_id)
+            for f in files:
+                if (f.meta or {}).get("file_hash") == file_hash:
+                    return {"id": f.id}
+        except Exception as exc:
+            log.warning("_find_file_by_hash failed: %s", exc)
+        return None
+
+    async def _link_file_to_message(self, file_id: str, metadata, user_model) -> None:
+        """Mirror `upload_image()`: link the (possibly reused) file to the
+        chat message so the association matches what a fresh persist
+        would have created. Best-effort — a linking failure must not
+        prevent the URL from being returned.
+        """
+        chat_id = (metadata or {}).get("chat_id")
+        message_id = (metadata or {}).get("message_id")
+        if not chat_id or not message_id:
+            return
+        try:
+            from open_webui.models.chats import Chats
+
+            await Chats.insert_chat_files(
+                chat_id=chat_id,
+                message_id=message_id,
+                file_ids=[file_id],
+                user_id=user_model.id,
+            )
+        except Exception as exc:
+            log.warning("_link_file_to_message failed: %s", exc)

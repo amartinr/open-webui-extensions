@@ -21,8 +21,11 @@ image files stored on disk by Open WebUI.
 1. Images uploaded via `+` (already persisted on disk by Open WebUI's
    upload API) are removed from the LLM payload without touching the file
 2. Pasted images (Ctrl+V, `data:` URIs) are persisted as permanent files
-   via `get_image_url_from_base64()` — the same mechanism Open WebUI uses
-   natively — then removed from the payload
+   with **content-hash dedup**: the URI is decoded once, `sha256` is
+   computed over the raw bytes (the same digest Open WebUI stores in
+   `files.meta["file_hash"]`), and an existing file owned by the user
+   with the same hash is reused instead of writing a new one — then
+   removed from the payload
 3. An `<attached_files>` block with `<file>` tags is injected so the
    model knows about the images
 4. Non-image files (PDFs, documents) pass through unchanged

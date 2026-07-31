@@ -84,10 +84,13 @@ For images uploaded via the `+` button, the filter detects the existing
 file ID in `body["files"]` and does not persist again — the file is
 already on disk.
 
-For pasted images (Ctrl+V), the filter calls Open WebUI's
-`get_image_url_from_base64()` to create a permanent file record, then
-references it by URL. This is the same mechanism Open WebUI itself uses
-for pasted images.
+For pasted images (Ctrl+V), the filter decodes the `data:` URI **once**,
+hashes the raw bytes, and looks up an existing file owned by the user
+with the same `meta["file_hash"]`. On a hit it reuses that URL instead
+of writing a new file; on a miss it hands the already-decoded bytes
+directly to `upload_image()` (the same endpoint Open WebUI's
+`get_image_url_from_base64()` delegates to, minus the second decode).
+See "Content-Hash Deduplication" below.
 
 The `__user__` dict passed to filter inlets is converted to a `UserModel`
 (`_ensure_user_model()`) because `upload_file_handler` expects attribute
@@ -109,13 +112,15 @@ is inserted to prevent 400 errors from strict providers.
   the `has_uploaded` branch (global flag) and is stripped without being
   persisted or referenced. Only pure paths (`+` only, or paste only) are
   handled correctly today.
-- **Re-persistence of pasted images across turns**: pasted images stay
-  in the stored chat message as `data:` URIs (they never go through the
-  upload API). The filter's Step 2 walks *all* user messages, so on
-  every subsequent turn `load_messages_from_db()` reloads that content
-  and `_persist_base64()` writes a brand-new file (new UUID, no hash
-  dedup). One paste can yield N copies on disk / N `files` rows after
-  N turns.
+- **Re-persistence of pasted images across turns (mostly fixed)**: pasted
+  images stay in the stored chat message as `data:` URIs, and the
+  filter's Step 2 walks *all* user messages, so every turn still hashes
+  the pasted content. Since v2.10.0 the content-hash dedup (below)
+  reuses the first persisted file, so one paste yields one file on disk
+  / one `files` row instead of N copies after N turns. Remaining caveat:
+  the check-then-insert has no unique index behind it (TOCTOU), so two
+  strictly concurrent requests could still write two files — worst case
+  equals the pre-dedup behavior, it never reuses another user's file.
 - **Growing duplicate references**: for `+` uploads, historical messages
   are re-hydrated with `image_url` blocks each turn, so the injected
   `<attached_files>` block re-tags past images and grows with the
@@ -128,30 +133,68 @@ is inserted to prevent 400 errors from strict providers.
   fetching the absolute URL need valid credentials; the filter itself
   does not issue tokens.
 
-## Open Options: File Deduplication
+## Content-Hash Deduplication (v2.10.0)
 
-Not yet implemented. Options for addressing the duplication issues
-above:
+Implemented: option 1 of the former "Open Options" list. Pasted images
+are deduplicated by content before persisting:
 
-1. **Hash-based dedup in `_persist_base64`**: before persisting a pasted
-   image, decode the `data:` URI, compute `sha256(bytes)`, and look up
-   an existing file owned by the user with that hash in
-   `files.meta["file_hash"]` (Open WebUI already stores it in
-   `upload_file_handler`). If found, reuse its URL instead of writing a
-   new file. Fixes physical file duplication across turns; idempotent,
-   safe, and survives restarts (no in-memory state).
+1. **Decode once** — `_decode_base64_uri()` turns the `data:` URI into
+   `(raw_bytes, content_type)`. The base64 string is transport only;
+   the stored hash is computed over the decoded bytes.
+2. **Hash the bytes** — `sha256(raw)` matches the digest
+   `upload_file_handler` already stores in `files.meta["file_hash"]`
+   (verified against `routers/files.py`, `routers/images.py` and
+   `models/files.py` on main). Both persist paths — web upload (`+`)
+   and pasted images — go through `upload_file_handler`, so the same
+   image pasted in two chats, or uploaded by `+` and later pasted,
+   yields the same hash and reuses one file.
+3. **Look up by owner + hash** — `Files.get_files_by_user_id(user.id)`
+   + a Python filter on `meta["file_hash"]`. Scoping by `user_id` keeps
+   the reuse correct (a file is never shared across users). Best-effort:
+   any lookup error degrades to persisting a new file.
+4. **Reuse or persist** — on a hit, the existing file's relative URL is
+   returned (and the file is linked to the chat message via
+   `Chats.insert_chat_files`, mirroring `upload_image()`); on a miss,
+   the already-decoded bytes go straight to `upload_image()`, avoiding
+   the second decode that `get_image_url_from_base64()` would do.
+
+Notes on the hash field:
+
+- The table has **two** hashes — `meta["file_hash"]` (sha256 of the raw
+  upload bytes, written by `upload_file_handler`) and the top-level
+  `hash` column (set later by `routers/retrieval.py` for vector-DB
+  sync). Dedup must read `meta["file_hash"]`, never `hash`.
+- `upload_file_handler` accepts a client-supplied `file_hash`
+  (`file_metadata.get('file_hash') or sha256(contents)`); the web
+  frontend does not send one, so for the two paths this filter touches
+  the stored value is always the server-computed `sha256(bytes)`.
+
+Known trade-offs:
+
+- **TOCTOU**: no unique index exists on `meta["file_hash"]`; two
+  concurrent requests can double-insert. Accepted as best-effort.
+- **Intra-user only**: the same content pasted by two different users
+  stays two files (correct ownership semantics).
+- **Per-user scan**: `get_files_by_user_id()` loads the user's file
+  list and filters in Python — fine for typical volumes, not a DB-level
+  hash lookup (the JSON-subscript query used by
+  `get_pending_files_for_knowledge()` would be the heavier alternative).
+
+## Remaining Options
+
 2. **Dedup `<file>` tags in the inlet**: keep a `seen` set keyed by
    file id/url so the same image referenced from historical + current
    messages is tagged only once. Stops the injected `<attached_files>`
    block from growing with duplicates. Note: the second block added by
    `add_file_context()` (which runs after filters, in Open WebUI
-   middleware) cannot be fixed from the filter.
+   middleware) cannot be fixed from the filter. (Not implemented.)
 3. **Rewrite the stored message after persisting (invasive)**: replace
    the `data:` URI in the saved user message with the new file reference
    and add the file to `message.files`, so later turns don't reload the
    base64 at all. Risk: mutating stored chat content; the image may stop
    rendering in the UI if the `files` entry is not added correctly.
-   Makes option 1 unnecessary but is riskier.
+   Would make the hash-dedup unnecessary but is riskier. (Not
+   implemented.)
 
 ## Valves
 
