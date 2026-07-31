@@ -51,7 +51,7 @@ This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iter
 
 **Definition of done:** the directory is self-contained and documented; no runtime code yet.
 
-## Iteration 1 — MVP: core engine + read-only methods (user role)
+## Iteration 1 — MVP: core engine + read-only methods (user role) ✅ DONE (commit `e8da0d1`)
 
 **Commit:** `feat(owui_meta): add read-only MVP tool with automatic token auth`
 
@@ -67,6 +67,13 @@ Implements the Phase 1 MVP from DESIGN §6.1 / §8.
 - **Tests** (`test/test_engine.py`, `test/test_user_methods.py`, `test/helpers.py`): mocked `httpx.MockTransport` — token forwarding, missing-token error, `Content-Type` validation (SPA HTML trap), error mapping (401/403/404/5xx), truncation, RequestError fallback retry, and route/slash correctness per method.
 
 **Definition of done:** the tool is installable and every listed method returns correct, truncated, token-authenticated data against the allowlist — proven by green tests with a mocked backend.
+
+**Verified:** 31 tests pass (`test_engine.py`, `test_user_methods.py`); `import owui_meta` works outside Open WebUI (`Config` stays `None`); Valves build; all 12 method signatures expose only allowlisted typed parameters.
+
+**Pending follow-ups (tracked, not blocking):**
+- `get_my_chats`/`search_chats`/`get_shared_chats`/`get_pinned_chats` responses are assumed to be a bare array (v0.10.2 curl evidence) — re-validate the exact shape when live-testing against the instance in Iteration 5, and adjust `_extract_items` if they return `{items, total}`.
+- `get_chat()` returns the full history and relies on `max_response_chars` truncation — revisit summarization (top messages + total) in Iteration 3.
+- Confirm `GET /api/v1/chats/search?text=` (verified as the parameter by 422; full response format pending confirmation).
 
 ## Iteration 2 — Admin-only methods with role gate
 
