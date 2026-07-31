@@ -127,10 +127,43 @@ is inserted to prevent 400 errors from strict providers.
   filters) still prepends its own `<attached_files>` block from the
   stored message `files`, so the last user message can carry two blocks
   — the core's duplicates cannot be fixed from the filter.
+
+  **Future option — clean up via the manifold pipe**: `add_file_context()`
+  runs *after* the filter inlets, but *before* the model provider is
+  called. A pipe (manifold model, e.g. `pipes/agent_loop_guard/`) is the
+  last code that sees the assembled payload, so it could collapse all
+  `<attached_files>` blocks into one and deduplicate `<file>` tags by
+  id, using the path of the URL (minus scheme/domain) as the canonical
+  key. Notes:
+
+  - This repo's `agent_loop_guard` pipe is a proxy already used for all
+    models (single user deployment), so it would cover every chat;
+    not part of this branch's scope — pipe code stays untouched here.
+  - Dedup key should be the URL **path** (`/api/v1/files/{id}/content`)
+    so relative (core) and absolute (filter) URLs of the same file
+    collapse together; the pipe could also normalize to absolute URLs
+    to keep downstream tools (ComfyUI) working.
+  - Best-effort / fail-open: a cleanup error must never break the
+    gateway forwarding.
 - **Authenticated downloads**: `/api/v1/files/{id}/content` requires
   authentication (JWT or API key) and ownership checks. External tools
   fetching the absolute URL need valid credentials; the filter itself
   does not issue tokens.
+- **Tool-result images are also stripped**: when a tool produces an
+  image, `chat_completion_tools_handler()` turns it into an `image_url`
+  block (persisting base64 or keeping the raw URL), which the filter
+  then converts to a `<file>` tag like any pasted image. This is
+  **intentional**: the deployment activates the vision capability on
+  models that don't really have it (otherwise Open WebUI refuses to
+  attach images to non-vision models), so no base64 must ever reach
+  those models — references only.
+
+  **Future option — `vision_capable_models` valve**: the filter could
+  read the model's `capabilities.vision` (via `__metadata__.model`) and
+  let `image_url` blocks pass through untouched for models that truly
+  support vision, while still stripping them for non-vision models.
+  Not implemented — would change the reference-only behaviour described
+  above, and is not needed for the current deployment.
 
 ## Content-Hash Deduplication (v2.10.0)
 
