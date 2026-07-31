@@ -74,6 +74,70 @@ galleries, or any page where trafilatura's article extraction is too aggressive.
 | `batch_concurrency` | `int` | Concurrency for batch fetches |
 | `verbose` | `bool` | Emit detailed status events |
 
+## Resource Lifecycle
+
+How this tool manages its long-lived resources, and what you can rely on
+when running it inside Open WebUI.
+
+### One instance per tool content version
+
+The Open WebUI harness caches one module instance per tool in
+`request.app.state.TOOLS` and **re-creates it whenever the tool content
+changes** (an admin edit). Each superseded instance is dropped from the
+cache; see below for how its resources are released.
+
+### Cleanup: `weakref.finalize`, not `atexit`
+
+`Tools()` registers a `weakref.finalize` that shuts down the thread pool
+as a last resort. It holds only a weakref to the instance, so instances
+are **collectable by GC** (unlike the previous `atexit.register` pinning,
+which kept every instantiated `Tools` alive for the process lifetime and
+defeated `__del__`). Idle thread-pool workers exit on their own once the
+instance is collected — they hold only a weakref to the executor.
+
+### curl sessions: keyed by `(browser, proxy)`, closed explicitly
+
+- `curl_cffi.AsyncSession` has **no destructor** — an open session keeps
+  its keep-alive connection pool, cookies and `curl_multi` handle alive
+  until `close()` is called explicitly.
+- Sessions are cached per `(browser, proxy)` pair
+  (`_curl_sessions[f"{browser}::{proxy or 'direct'}"]`), so changing the
+  `proxy` valve yields a fresh session with the correct proxy instead of
+  silently reusing a stale one.
+- The cache is bounded by `MAX_CACHED_SESSIONS = 8` (2 per browser x 4
+  browsers) with LRU eviction; evicted sessions are closed so their
+  connection pools do not linger.
+- `_aclose()` (async) closes every cached session and the thread pool;
+  it is idempotent and never raises. The Open WebUI harness has no async
+  tool-teardown hook, so call it from your own lifecycle code when you
+  manage the instance directly (tests, scripts, previews).
+
+### Zombie threads on timeout (known limitation)
+
+`concurrent.futures` cannot kill a running thread: when an extraction
+times out or is cancelled, the worker **continues to completion** and
+occupies a pool slot until it finishes. The pool is bounded
+(`max(4, CPU_COUNT * 2)` workers) and the per-instance semaphore caps
+concurrent extractions at 4, so this is a transient degradation, not a
+leak — but on a small server it can cause contention. See the tuning
+guidance below.
+
+### Tuning for small (2-vCPU) deployments
+
+At 2 vCPUs the pool has the minimum 4 workers and the GIL serializes
+CPU-bound extraction, so timeouts become more likely and abandoned tasks
+(zombie threads) pile up on the queue, each retaining its `raw_html`
+until it drains. Recommended valve settings:
+
+| Setting | Recommended | Why |
+|---|---|---|
+| `batch_concurrency` | 2-3 | fewer simultaneous fetches competing for the 4 workers |
+| `timeout_ms` | 25000-30000 | counter-intuitive: fewer timeouts => fewer zombies |
+| `requests_per_second` | 5 | smooths the input rate |
+
+Raising the internal `THREAD_TIMEOUT_SEC` (default 5) to 10-15 s has the
+same effect and is the single most effective knob on that hardware.
+
 ## License
 
 MIT - see [LICENSE](./LICENSE).
