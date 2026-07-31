@@ -73,6 +73,8 @@ Implements the Phase 1 MVP from DESIGN §6.1 / §8.
 
 **Post-iteration fix (2026-08-01, `fix(owui_meta): read token from HTTPAuthorizationCredentials`):** live testing against a real authenticated session showed all methods failing with “No authentication token available”. Root cause verified in the v0.10.2 source: `AuthTokenMiddleware` stores an `HTTPAuthorizationCredentials` **object** (`scheme`/`credentials`) in `request.state.token`, not a string. `_require_token` now reads `.credentials` (accepting a plain string for robustness), DESIGN §3.1 corrected, regression test added (`test_token_from_http_authorization_credentials_object`), module version → 0.1.1.
 
+**Second post-iteration fix (2026-08-01, `fix(owui_meta): await async Config.get`):** live test then failed with `AttributeError: 'coroutine' object has no attribute 'rstrip'` in `_resolve_base_url`. Root cause: `Config.get` is **async** in v0.10.2 (`async def get(key, default=None)` in `open_webui/models/config.py`) and was called without `await`. `_resolve_base_url` is now a coroutine that awaits it (handling non-string values and store failures by falling through to env var / valve), DESIGN §4.1 corrected, regression tests added (`test_base_url_from_admin_config*`), module version → 0.1.2.
+
 **Pending follow-ups (tracked, not blocking):**
 - `get_my_chats`/`search_chats`/`get_shared_chats`/`get_pinned_chats` responses are assumed to be a bare array (v0.10.2 curl evidence) — re-validate the exact shape when live-testing against the instance in Iteration 5, and adjust `_extract_items` if they return `{items, total}`.
 - `get_chat()` returns the full history and relies on `max_response_chars` truncation — revisit summarization (top messages + total) in Iteration 3.

@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.1.1
+version: 0.1.2
 licence: MIT
 """
 
@@ -118,18 +118,26 @@ class Tools:
     #  Base URL resolution (DESIGN §4.2)
     # ──────────────────────────────────────────────
 
-    def _resolve_base_url(self) -> str:
-        """Resolve the API base URL: webui.url → WEBUI_URL → valve."""
+    async def _resolve_base_url(self) -> str:
+        """Resolve the API base URL: webui.url → WEBUI_URL → valve.
+
+        ``Config.get`` is async in Open WebUI (``open_webui/models/config.py``
+        v0.10.2: ``async def get(key, default=None)``), so this coroutine
+        awaits it. Any failure of the admin config store falls through to the
+        env var and the valve.
+        """
         if self._base_url_override:
             return self._base_url_override.rstrip("/")
         configured = ""
         if Config is not None:
             try:
-                configured = Config.get("webui.url") or ""
+                value = await Config.get("webui.url")
+                if isinstance(value, str):
+                    configured = value.strip()
             except Exception:
                 configured = ""
         if not configured:
-            configured = os.getenv("WEBUI_URL", "")
+            configured = os.getenv("WEBUI_URL", "").strip()
         if not configured:
             configured = self.valves.fallback_base_url
         return configured.rstrip("/")
@@ -201,7 +209,7 @@ class Tools:
         Retry only on transport errors (DNS/connection/timeout — DESIGN §4.3).
         Never retries on API 4xx/5xx responses.
         """
-        base = self._resolve_base_url()
+        base = await self._resolve_base_url()
         primary_url = base + path
         try:
             resp = await self._fetch(primary_url, token, params, accept)

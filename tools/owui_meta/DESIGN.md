@@ -106,7 +106,7 @@ Calls the internal API → the server treats it as that user
 The tool **must not** hardcode the base URL in valves. It should read the **global admin UI configuration**:
 
 - **Internal key:** `webui.url`
-- **Source:** `Config.get('webui.url')` — model `open_webui.models.config.Config` (table `config`, persistent per-key storage)
+- **Source:** `Config.get('webui.url')` — model `open_webui.models.config.Config` (table `config`, persistent per-key storage). **Important: `Config.get` is `async` in v0.10.2** (`async def get(key: str, default: Any = None)`); the tool must `await` it (see §8.4).
 - **Fallback environment variable:** `WEBUI_URL` (the default used to seed the key)
 - **Admin UI:** *Admin Settings → General → "WebUI URL"* (field `adminConfig.WEBUI_URL` in `src/lib/components/admin/Settings/General.svelte`). Official description: *"Enter the public URL of your WebUI. This URL will be used to generate links in the notifications."*
 

@@ -125,6 +125,68 @@ async def test_base_url_from_env_var(monkeypatch):
     assert '"u1"' in out
 
 
+class FakeConfig:
+    """Stand-in for open_webui.models.config.Config with the v0.10.2 async API."""
+
+    value = "http://config.example"
+
+    @staticmethod
+    async def get(key, default=None):
+        return FakeConfig.value
+
+
+async def test_base_url_from_admin_config(monkeypatch):
+    # Regression: v0.10.2 Config.get is async and must be awaited; the admin
+    # config store (webui.url) is the canonical base URL source (§4.2).
+    def handler(request):
+        assert request.url.host == "config.example"
+        return json_response({"id": "u1"})
+
+    monkeypatch.delenv("WEBUI_URL", raising=False)
+    tools = make_tools(handler)  # make_tools resets owui_meta.Config to None
+    import owui_meta
+
+    owui_meta.Config = FakeConfig
+    out = await tools.get_my_profile(FakeRequest())
+    assert '"u1"' in out
+
+
+async def test_base_url_from_admin_config_ignores_non_string(monkeypatch):
+    def handler(request):
+        # Config.get returned a non-string (e.g. dict); the tool must not
+        # crash and must fall through to the valve.
+        assert request.url.host == "localhost"
+        return json_response({"id": "u1"})
+
+    monkeypatch.delenv("WEBUI_URL", raising=False)
+    tools = make_tools(handler, fallback_base_url="http://localhost:9000")
+    import owui_meta
+
+    owui_meta.Config = FakeConfig
+    FakeConfig.value = {"nested": True}
+    out = await tools.get_my_profile(FakeRequest())
+    assert '"u1"' in out
+
+
+async def test_base_url_from_admin_config_errors_fall_through(monkeypatch):
+    def handler(request):
+        assert request.url.host == "localhost"
+        return json_response({"id": "u1"})
+
+    class BrokenConfig:
+        @staticmethod
+        async def get(key, default=None):
+            raise RuntimeError("db down")
+
+    monkeypatch.delenv("WEBUI_URL", raising=False)
+    tools = make_tools(handler, fallback_base_url="http://localhost:9000")
+    import owui_meta
+
+    owui_meta.Config = BrokenConfig
+    out = await tools.get_my_profile(FakeRequest())
+    assert '"u1"' in out
+
+
 async def test_base_url_from_valve_when_env_unset(monkeypatch):
     def handler(request):
         assert request.url.host == "localhost"
