@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.9.9
+version: 0.10.0
 licence: MIT
 """
 
@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import time
-import atexit
+import weakref
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
@@ -58,6 +58,10 @@ MAX_BATCH_LENGTH = 10
 CPU_COUNT = os.cpu_count() or 2
 THREAD_POOL_WORKERS = max(4, CPU_COUNT * 2)
 THREAD_TIMEOUT_SEC = 5
+# Upper bound for the curl session cache. 2 sessions per browser x 4
+# browsers is the realistic max; the cap keeps the cache bounded even if
+# the admin rotates proxies at runtime.
+MAX_CACHED_SESSIONS = 8
 MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK = 30
 GLOBAL_OPERATION_TIMEOUT_SEC = 30
 DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -95,6 +99,21 @@ class _RateLimiter:
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last = time.monotonic()
+
+
+def _close_sync(wr):
+    """Shut down a Tools instance's lazily-created thread pool.
+
+    Registered with ``weakref.finalize`` so it runs when the instance is
+    collected (or at interpreter exit if it is still alive). It receives a
+    weakref to the instance -- never captures ``self`` or the pool, which
+    would keep them alive. The pool is created lazily on first use, so it is
+    resolved here (at fire time), not at registration time.
+    """
+    inst = wr()
+    if inst is not None and inst._thread_pool is not None:
+        inst._thread_pool.shutdown(wait=False, cancel_futures=True)
+        inst._thread_pool = None
 
 
 class Tools:
@@ -198,19 +217,27 @@ class Tools:
         self._pool_pending_ops = 0
         self._thread_semaphore: Optional[asyncio.Semaphore] = None  # B: lazy-init in _run_in_thread
         self._curl_sessions: dict[str, Any] = {}  # C: shared AsyncSession pool keyed by browser
-        atexit.register(self._close)
+        # GC-friendly cleanup: the finalizer runs when the instance is
+        # collected or at interpreter exit. It holds only a weakref to self,
+        # so it never pins the instance the way ``atexit.register(self._close)``
+        # did (which kept every instantiated Tools alive for the process
+        # lifetime and defeated ``__del__``).
+        self._finalizer = weakref.finalize(self, _close_sync, weakref.ref(self))
 
     def _close(self):
-        """Shut down the thread pool and shared connection pools explicitly.
+        """Shut down the thread pool explicitly. Idempotent.
 
         Call this when the Tools instance is no longer needed
         (e.g. from the harness lifecycle hooks) to ensure no
         threads outlive their owner.
+
+        curl_cffi sessions are NOT closed here: closing them requires
+        ``await`` (``AsyncSession.close()``), which ``__del__`` cannot do.
+        Use :meth:`_aclose` for full cleanup including sessions.
         """
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
             self._thread_pool = None
-        # C: curl_cffi sessions are GC'd with the Tools instance;
         # httpx client is closed asynchronously in _fetch_with_httpx.
 
     def _get_thread_pool(self) -> concurrent.futures.ThreadPoolExecutor:
@@ -284,10 +311,44 @@ class Tools:
                 self._pool_pending_ops -= 1
 
     def __del__(self):
-        # Best-effort cleanup — ``_close()`` is the reliable path.
+        # Best-effort cleanup — ``_close()`` is the reliable path. The
+        # weakref.finalize registered in __init__ covers the GC and
+        # interpreter-exit paths as well. Idempotent via the None check.
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
             self._thread_pool = None
+
+    async def _close_session(self, session) -> None:
+        """Best-effort close of a single curl session. Never raises.
+
+        curl_cffi 0.15.0 ``AsyncSession`` exposes ``close()`` (async); fall
+        back to ``aclose()`` in case a future version renames it.
+        """
+        try:
+            close = getattr(session, "aclose", None) or getattr(session, "close", None)
+            if close is not None:
+                res = close()
+                if hasattr(res, "__await__"):
+                    await res
+        except Exception as exc:
+            # Never let teardown mask the real error.
+            logger.warning("failed to close curl session: %s", exc)
+
+    async def _aclose(self) -> None:
+        """Close all cached curl sessions and the thread pool. Idempotent.
+
+        This is the complete async teardown for a Tools instance. The Open
+        WebUI harness has no async tool-teardown hook, so call it from your
+        own lifecycle code (``_close()`` covers the pool only). Sessions are
+        closed explicitly because curl_cffi ``AsyncSession`` has no
+        destructor (verified against 0.15.0 source) -- an open session keeps
+        its keep-alive connection pool, cookies and multi-handle alive.
+        """
+        sessions = list(self._curl_sessions.values())
+        self._curl_sessions.clear()
+        for session in sessions:
+            await self._close_session(session)
+        self._close()
 
     # ──────────────────────────────────────────────
     #  Core tool method
@@ -844,9 +905,11 @@ class Tools:
     ) -> FetchResult:
         """Fetch using curl_cffi's async API with TLS fingerprinting.
 
-        C: Reuses shared AsyncSession per browser profile for connection
-        pooling (keep-alive, cookie reuse).  Sessions are cached in
-        ``self._curl_sessions`` keyed by browser impersonate string.
+        C: Reuses shared AsyncSession per (browser, proxy) pair for
+        connection pooling (keep-alive, cookie reuse).  Sessions are cached
+        in ``self._curl_sessions`` keyed by ``f"{browser}::{proxy}"``; the
+        proxy is part of the key so a valve change yields a fresh session
+        instead of silently reusing the old proxy's connection pool.
         """
         from curl_cffi.requests import AsyncSession
 
@@ -854,14 +917,24 @@ class Tools:
 
         proxies_dict = {"http": proxy, "https": proxy} if proxy else None
 
-        # C: get or create a reusable session for this browser profile
-        session = self._curl_sessions.get(browser)
-        if session is None:
+        # C: get or create a reusable session for this (browser, proxy) pair.
+        cache_key = f"{browser}::{proxy or 'direct'}"
+        session = self._curl_sessions.pop(cache_key, None)
+        if session is not None:
+            # Refresh LRU position (dict preserves insertion order).
+            self._curl_sessions[cache_key] = session
+        else:
+            if len(self._curl_sessions) >= MAX_CACHED_SESSIONS:
+                # Evict the least-recently-used session and close it so its
+                # connection pool does not linger.
+                evicted_key, evicted = next(iter(self._curl_sessions.items()))
+                del self._curl_sessions[evicted_key]
+                await self._close_session(evicted)
             session = AsyncSession(
                 impersonate=browser,
                 proxies=proxies_dict,
             )
-            self._curl_sessions[browser] = session
+            self._curl_sessions[cache_key] = session
 
         try:
             resp = await session.get(
