@@ -128,6 +128,31 @@ is inserted to prevent 400 errors from strict providers.
   fetching the absolute URL need valid credentials; the filter itself
   does not issue tokens.
 
+## Open Options: File Deduplication
+
+Not yet implemented. Options for addressing the duplication issues
+above:
+
+1. **Hash-based dedup in `_persist_base64`**: before persisting a pasted
+   image, decode the `data:` URI, compute `sha256(bytes)`, and look up
+   an existing file owned by the user with that hash in
+   `files.meta["file_hash"]` (Open WebUI already stores it in
+   `upload_file_handler`). If found, reuse its URL instead of writing a
+   new file. Fixes physical file duplication across turns; idempotent,
+   safe, and survives restarts (no in-memory state).
+2. **Dedup `<file>` tags in the inlet**: keep a `seen` set keyed by
+   file id/url so the same image referenced from historical + current
+   messages is tagged only once. Stops the injected `<attached_files>`
+   block from growing with duplicates. Note: the second block added by
+   `add_file_context()` (which runs after filters, in Open WebUI
+   middleware) cannot be fixed from the filter.
+3. **Rewrite the stored message after persisting (invasive)**: replace
+   the `data:` URI in the saved user message with the new file reference
+   and add the file to `message.files`, so later turns don't reload the
+   base64 at all. Risk: mutating stored chat content; the image may stop
+   rendering in the UI if the `files` entry is not added correctly.
+   Makes option 1 unnecessary but is riskier.
+
 ## Valves
 
 | Valve | Default | Description |
