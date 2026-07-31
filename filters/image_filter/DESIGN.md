@@ -30,8 +30,11 @@ A **Filter** (class `Filter`) registered in the filter pipeline that
 runs before `chat_completion_files_handler`. It does the following:
 
 1. **Strips image file refs from `body["files"]`** — so RAG never sees them.
-2. **Strips `image_url` blocks** from reconstructed message content — so
-   they never become base64 in the LLM context.
+2. **Strips `image_url` blocks** from message content — by the time the
+   filter runs, `convert_url_images_to_base64()` has already converted
+   them to base64 in memory, so stripping them is what keeps that base64
+   out of the LLM context (the filter does not *prevent* the conversion;
+   it removes the result of it from the payload).
 3. **Injects `<attached_files>` block** with `<file>` tags into the last
    user message, matching `add_file_context()` format, so the model knows
    images were attached and can reference them by absolute file URL.

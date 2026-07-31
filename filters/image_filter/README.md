@@ -20,8 +20,10 @@ image files stored on disk by Open WebUI.
 
 1. Images uploaded via `+` (already persisted on disk by Open WebUI's
    upload API) are removed from the LLM payload without touching the file
-2. Pasted images (Ctrl+V, `data:` URIs) are persisted as permanent files
-   with **content-hash dedup**: the URI is decoded once, `sha256` is
+2. Pasted images (Ctrl+V) and re-hydrated history images arrive as
+   `data:` URIs (base64) — `convert_url_images_to_base64()` already ran
+   before the filter. These are persisted as permanent files with
+   **content-hash dedup**: the URI is decoded once, `sha256` is
    computed over the raw bytes (the same digest Open WebUI stores in
    `files.meta["file_hash"]`), and an existing file owned by the user
    with the same hash is reused instead of writing a new one — then
@@ -33,7 +35,9 @@ image files stored on disk by Open WebUI.
 
 ## File References
 
-The `<attached_files>` block contains one `<file>` tag per image:
+The `<attached_files>` block contains one `<file>` tag per **unique**
+image — the same file referenced from history and the current message
+is tagged only once (deduplicated within each request):
 
 ```xml
 <file type="image" id="abc123" url="https://your-owui-host.example/api/v1/files/abc123/content"/>
