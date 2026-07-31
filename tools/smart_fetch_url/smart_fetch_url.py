@@ -58,6 +58,10 @@ MAX_BATCH_LENGTH = 10
 CPU_COUNT = os.cpu_count() or 2
 THREAD_POOL_WORKERS = max(4, CPU_COUNT * 2)
 THREAD_TIMEOUT_SEC = 5
+# Upper bound for the curl session cache. 2 sessions per browser x 4
+# browsers is the realistic max; the cap keeps the cache bounded even if
+# the admin rotates proxies at runtime.
+MAX_CACHED_SESSIONS = 8
 MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK = 30
 GLOBAL_OPERATION_TIMEOUT_SEC = 30
 DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -901,9 +905,11 @@ class Tools:
     ) -> FetchResult:
         """Fetch using curl_cffi's async API with TLS fingerprinting.
 
-        C: Reuses shared AsyncSession per browser profile for connection
-        pooling (keep-alive, cookie reuse).  Sessions are cached in
-        ``self._curl_sessions`` keyed by browser impersonate string.
+        C: Reuses shared AsyncSession per (browser, proxy) pair for
+        connection pooling (keep-alive, cookie reuse).  Sessions are cached
+        in ``self._curl_sessions`` keyed by ``f"{browser}::{proxy}"``; the
+        proxy is part of the key so a valve change yields a fresh session
+        instead of silently reusing the old proxy's connection pool.
         """
         from curl_cffi.requests import AsyncSession
 
@@ -911,14 +917,24 @@ class Tools:
 
         proxies_dict = {"http": proxy, "https": proxy} if proxy else None
 
-        # C: get or create a reusable session for this browser profile
-        session = self._curl_sessions.get(browser)
-        if session is None:
+        # C: get or create a reusable session for this (browser, proxy) pair.
+        cache_key = f"{browser}::{proxy or 'direct'}"
+        session = self._curl_sessions.pop(cache_key, None)
+        if session is not None:
+            # Refresh LRU position (dict preserves insertion order).
+            self._curl_sessions[cache_key] = session
+        else:
+            if len(self._curl_sessions) >= MAX_CACHED_SESSIONS:
+                # Evict the least-recently-used session and close it so its
+                # connection pool does not linger.
+                evicted_key, evicted = next(iter(self._curl_sessions.items()))
+                del self._curl_sessions[evicted_key]
+                await self._close_session(evicted)
             session = AsyncSession(
                 impersonate=browser,
                 proxies=proxies_dict,
             )
-            self._curl_sessions[browser] = session
+            self._curl_sessions[cache_key] = session
 
         try:
             resp = await session.get(
