@@ -19,6 +19,7 @@ This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iter
 | Module file | `owui_meta.py` (same naming rule as `smart_fetch_url.py`) |
 | Versioning | `version:` field in the module header is bumped every iteration (0.1.0 → 1.0.0) |
 | Dependencies | stdlib + `httpx` only (bundled with Open WebUI); tests use `pytest` + `pytest-asyncio` (`asyncio_mode = auto`) |
+| Docstrings (Open WebUI contract) | reST `:param name:` directives, one per signature parameter, **each description on a single line** — OWUI v0.10.2 parses per line (`parse_docstring`), continuation lines are dropped from the param and leak into the function description. `__request__`/`__*` params are never documented (harness-injected). Enforced by `test/test_docstrings.py` |
 
 ## 2. Security invariants (enforced in every iteration, verified by tests)
 
