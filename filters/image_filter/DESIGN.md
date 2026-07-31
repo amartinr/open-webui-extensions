@@ -107,11 +107,6 @@ is inserted to prevent 400 errors from strict providers.
 
 ## Known Limitations
 
-- **Mixed uploads in one message**: if a user uploads via `+` *and*
-  pastes another image in the same message, the pasted image falls into
-  the `has_uploaded` branch (global flag) and is stripped without being
-  persisted or referenced. Only pure paths (`+` only, or paste only) are
-  handled correctly today.
 - **Re-persistence of pasted images across turns (mostly fixed)**: pasted
   images stay in the stored chat message as `data:` URIs, and the
   filter's Step 2 walks *all* user messages, so every turn still hashes
@@ -121,13 +116,14 @@ is inserted to prevent 400 errors from strict providers.
   the check-then-insert has no unique index behind it (TOCTOU), so two
   strictly concurrent requests could still write two files — worst case
   equals the pre-dedup behavior, it never reuses another user's file.
-- **Growing duplicate references**: for `+` uploads, historical messages
-  are re-hydrated with `image_url` blocks each turn, so the injected
-  `<attached_files>` block re-tags past images and grows with the
-  conversation. With native function calling, `add_file_context()` (which
-  runs *after* filters) prepends its own `<attached_files>` block from
-  the stored message `files`, so the last user message can carry two
-  blocks referencing the same file.
+- **Growing duplicate references (partially fixed)**: for `+` uploads,
+  historical messages are re-hydrated with `image_url` blocks each turn;
+  since v2.11.0 the filter's own `<attached_files>` block no longer
+  grows (tag dedup by id/url, see "Tag Deduplication" below). With
+  native function calling, `add_file_context()` (which runs *after*
+  filters) still prepends its own `<attached_files>` block from the
+  stored message `files`, so the last user message can carry two blocks
+  — the core's duplicates cannot be fixed from the filter.
 - **Authenticated downloads**: `/api/v1/files/{id}/content` requires
   authentication (JWT or API key) and ownership checks. External tools
   fetching the absolute URL need valid credentials; the filter itself
@@ -180,15 +176,40 @@ Known trade-offs:
   hash lookup (the JSON-subscript query used by
   `get_pending_files_for_knowledge()` would be the heavier alternative).
 
-## Remaining Options
+## Tag Deduplication (v2.11.0)
 
-2. **Dedup `<file>` tags in the inlet**: keep a `seen` set keyed by
-   file id/url so the same image referenced from historical + current
-   messages is tagged only once. Stops the injected `<attached_files>`
-   block from growing with duplicates. Note: the second block added by
-   `add_file_context()` (which runs after filters, in Open WebUI
-   middleware) cannot be fixed from the filter. (Not implemented.)
-3. **Rewrite the stored message after persisting (invasive)**: replace
+Implemented: option 2 of the former "Open Options" list. The injected
+`<attached_files>` block is deduplicated **within each request**, so the
+same file is never tagged more than once.
+
+- The inlet keeps a `seen` set keyed by file id — or by the id extracted
+  from a `/api/v1/files/{id}/content` URL (relative or absolute);
+  external URLs key by the full URL. Every source of tags goes through
+  the same dedup: `body["files"]` refs, pasted-and-persisted images,
+  re-hydrated historical `image_url` blocks.
+- The v2.10.0 content-hash dedup is what makes this effective: pasted
+  images now resolve to a **stable** file id, so the same image
+  referenced from history and from the current message collapses to one
+  tag. Without it, each turn would mint a new UUID and the `seen` set
+  would have nothing to collapse (the op-1-enables-op-2 relationship).
+- **Fixes the "mixed uploads" limitation**: the `has_uploaded` global
+  gate — which silently dropped pasted images whenever a `+` upload
+  existed — is removed. The `seen` set replaces it precisely: a `+`
+  upload and its own `image_url` twin deduplicate by id, while a
+  genuinely pasted image is still persisted and tagged.
+- Persisted pastes now carry the **real file id** in their `<file>` tag
+  (`id="{file_id}"`, returned alongside the URL by `_persist_base64()`),
+  matching the `+` upload format and keeping the builtin `view_file`
+  tool working.
+- Synthetic placeholder tags (`url="(base64 stripped)"`) are **never**
+  deduplicated: each one reports a distinct persistence failure.
+- Limit: `add_file_context()` in the core middleware still prepends its
+  own `<attached_files>` block after filters run; that block's
+  duplicates cannot be fixed from the filter.
+
+## Remaining Option
+
+1. **Rewrite the stored message after persisting (invasive)**: replace
    the `data:` URI in the saved user message with the new file reference
    and add the file to `message.files`, so later turns don't reload the
    base64 at all. Risk: mutating stored chat content; the image may stop

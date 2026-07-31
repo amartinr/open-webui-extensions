@@ -26,8 +26,9 @@ image files stored on disk by Open WebUI.
    `files.meta["file_hash"]`), and an existing file owned by the user
    with the same hash is reused instead of writing a new one — then
    removed from the payload
-3. An `<attached_files>` block with `<file>` tags is injected so the
-   model knows about the images
+3. A deduplicated `<attached_files>` block with `<file>` tags is
+   injected so the model knows about the images — the same file
+   referenced from history and the current message is tagged only once
 4. Non-image files (PDFs, documents) pass through unchanged
 
 ## File References

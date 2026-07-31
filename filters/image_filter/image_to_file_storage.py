@@ -1,14 +1,15 @@
 """
 title: Image to File Storage
 author: pi-agent
-description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects <attached_files> with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images.
+description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects a deduplicated <attached_files> block with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images.
 required_open_webui_version: 0.5.0
-version: 2.10.0
+version: 2.11.0
 """
 
 import base64
 import hashlib
 import logging
+import re
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -62,6 +63,48 @@ def _decode_base64_uri(url: str) -> Optional[tuple[bytes, str]]:
     if not raw:
         return None
     return raw, content_type
+
+
+_FILES_URL_RE = re.compile(r"/api/v1/files/([^/]+)/content")
+
+
+def _file_id_from_url(url: str) -> Optional[str]:
+    """Extract the file id from a (relative or absolute) file content URL
+    (`/api/v1/files/{id}/content`), or None."""
+    m = _FILES_URL_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def _file_dedup_key(file: dict) -> str:
+    """Canonical key for deduplicating <file> tags within one request.
+
+    The same underlying file can be referenced from different sources in
+    one payload: `body["files"]` (by id), a `/api/v1/files/{id}/content`
+    URL (relative or absolute), or an external URL. The key collapses all
+    of those to one tag. Returns "" for synthetic tags (e.g. the
+    "(base64 stripped)" placeholder), which must never be deduplicated.
+    """
+    file_id = file.get("id")
+    if file_id:
+        return f"id:{file_id}"
+    url = file.get("url", "")
+    if not url or url == "(base64 stripped)":
+        return ""
+    from_url = _file_id_from_url(url)
+    if from_url:
+        return f"id:{from_url}"
+    return f"url:{url}"
+
+
+def _append_file_tag(file_tags: list[str], seen: set[str], file: dict, base_url: str = "") -> None:
+    """Append a <file> tag, skipping it when the same file (by id or file
+    URL) was already tagged in this request."""
+    key = _file_dedup_key(file)
+    if key:
+        if key in seen:
+            return
+        seen.add(key)
+    file_tags.append(_format_file_tag(file, base_url))
 
 
 def _format_file_tag(file: dict, base_url: str = "") -> str:
@@ -160,7 +203,7 @@ class Filter:
     ) -> dict:
         messages: list[dict] = body.get("messages", [])
         file_tags: list[str] = []
-        has_uploaded = False
+        seen: set[str] = set()
         base_url = await _get_public_base_url(__request__) if __request__ is not None else ""
 
         # ── Step 1: handle body["files"] ────────────────────────────────────
@@ -169,8 +212,7 @@ class Filter:
             non_images = []
             for f in files:
                 if _is_image_file(f):
-                    has_uploaded = True
-                    file_tags.append(_format_file_tag(f, base_url))
+                    _append_file_tag(file_tags, seen, f, base_url)
                 else:
                     non_images.append(f)
             body["files"] = non_images if non_images else None
@@ -189,16 +231,15 @@ class Filter:
                         new_content.append(item)
                         continue
                     url = item.get("image_url", {}).get("url", "")
-                    if has_uploaded:
-                        pass  # handled by step 1
-                    elif _is_base64_uri(url):
-                        purl = await self._persist_base64(url, __request__, __metadata__, __user__)
-                        if purl:
-                            file_tags.append(_format_file_tag({"url": purl, "type": "image"}, base_url))
+                    if _is_base64_uri(url):
+                        persisted = await self._persist_base64(url, __request__, __metadata__, __user__)
+                        if persisted:
+                            purl, fid = persisted
+                            _append_file_tag(file_tags, seen, {"id": fid, "url": purl, "type": "image"}, base_url)
                         else:
                             file_tags.append(_format_file_tag({"url": "(base64 stripped)", "type": "image"}, base_url))
                     else:
-                        file_tags.append(_format_file_tag({"url": url, "type": "image"}, base_url))
+                        _append_file_tag(file_tags, seen, {"url": url, "type": "image"}, base_url)
                 msg["content"] = new_content if new_content else [{"type": "text", "text": ""}]
 
         # ── Step 3: inject <attached_files> ─────────────────────────────────
@@ -212,7 +253,7 @@ class Filter:
             try:
                 await __event_emitter__({
                     "type": "status",
-                    "data": {"description": f"Stored {len(file_tags)} image(s). Removed from context.", "done": True},
+                    "data": {"description": f"Prepared {len(file_tags)} image(s). Removed from context.", "done": True},
                 })
             except Exception:
                 pass
@@ -220,7 +261,7 @@ class Filter:
         return body
 
     # ------------------------------------------------------------------
-    async def _persist_base64(self, url: str, request, metadata, user) -> str | None:
+    async def _persist_base64(self, url: str, request, metadata, user) -> Optional[tuple[str, str]]:
         """Persist a pasted image, reusing an existing file when the same
         content is already stored for this user.
 
@@ -229,7 +270,7 @@ class Filter:
         `files.meta["file_hash"]` — so an existing file can be looked up
         and reused instead of writing a new one. On a miss, the decoded
         bytes go straight to `upload_image()` (no second decode). Returns
-        a relative `/api/v1/files/{id}/content` URL, or None on failure.
+        a `(relative file URL, file id)` pair, or None on failure.
         """
         decoded = _decode_base64_uri(url)
         if decoded is None:
@@ -245,7 +286,10 @@ class Filter:
             existing = await self._find_file_by_hash(user_model.id, file_hash)
             if existing and existing.get("id"):
                 await self._link_file_to_message(existing["id"], metadata, user_model)
-                return request.app.url_path_for("get_file_content_by_id", id=existing["id"])
+                return (
+                    request.app.url_path_for("get_file_content_by_id", id=existing["id"]),
+                    existing["id"],
+                )
 
             from open_webui.routers.images import upload_image
 
@@ -254,8 +298,8 @@ class Filter:
                 "message_id": (metadata or {}).get("message_id"),
                 "session_id": (metadata or {}).get("session_id"),
             }
-            _, image_url = await upload_image(request, raw, content_type, meta, user_model)
-            return image_url
+            file_item, image_url = await upload_image(request, raw, content_type, meta, user_model)
+            return image_url, file_item.id
         except Exception as exc:
             log.warning("_persist_base64 failed: %s", exc)
             return None
