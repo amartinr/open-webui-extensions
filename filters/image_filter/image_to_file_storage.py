@@ -118,6 +118,21 @@ class Filter:
         messages: list[dict] = body.get("messages", [])
         file_tags: list[str] = []
 
+        # Resolve the server base URL so file paths become absolute URLs
+        # that downstream tools (e.g. ComfyUI) can fetch.
+        base_url = ""
+        if __request__ is not None:
+            try:
+                base_url = str(__request__.base_url).rstrip("/")
+            except Exception:
+                pass
+
+        def _abs(url: str) -> str:
+            """Prepend base_url if *url* is a relative path."""
+            if base_url and url and url.startswith("/"):
+                return base_url + url
+            return url
+
         # ── Step 1: handle body["files"] (uploaded via "+" button) ──────────
         # These images are already persisted by the upload API.  The base64
         # blocks in the message content (added by convert_url_images_to_base64)
@@ -130,7 +145,9 @@ class Filter:
             for f in files:
                 if _is_image_file(f):
                     has_uploaded_images = True
-                    file_tags.append(_format_file_tag(f))
+                    tag = dict(f)
+                    tag["url"] = _abs(tag.get("url", ""))
+                    file_tags.append(_format_file_tag(tag))
                 else:
                     non_images.append(f)
             if non_images:
@@ -173,7 +190,7 @@ class Filter:
                         )
                         if persisted:
                             file_tags.append(
-                                _format_file_tag({"url": persisted, "type": "image"})
+                                _format_file_tag({"url": _abs(persisted), "type": "image"})
                             )
                             log.info("Persisted pasted image to %s", persisted)
                         else:
@@ -181,7 +198,7 @@ class Filter:
                             file_tags.append(_format_file_tag({"url": "(base64 stripped)", "type": "image"}))
                     else:
                         # Already a file URL — keep the reference.
-                        file_tags.append(_format_file_tag({"url": url, "type": "image"}))
+                        file_tags.append(_format_file_tag({"url": _abs(url), "type": "image"}))
 
                 message["content"] = new_content if new_content else [
                     {"type": "text", "text": ""}
