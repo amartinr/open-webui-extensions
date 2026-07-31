@@ -1,58 +1,40 @@
 # Image to File Storage Filter
 
-Prevents images uploaded via the `+` button from being injected into the
-LLM context. Images are already stored as permanent files by Open
-WebUI's upload API — this filter simply removes them from the
-LLM-bound payload so they neither undergo RAG embedding nor get
-converted to base64.
+Prevents images from being injected into the LLM context. Strips them
+from the payload and injects `<attached_files>` tags. Optionally uploads
+to ComfyUI so workflows can reference images by local filename.
 
 ## Installation
 
-1. Copy `image_to_file_storage.py` to your Open WebUI functions
-   directory or use the Admin Panel → Functions → Add Function.
+1. Copy `image_to_file_storage.py` to Open WebUI Functions (Admin →
+   Functions → Add Function).
+2. Assign the filter to models (enable it as global filter or per-model).
 
-2. Assign the filter to models or enable it as a global filter.
-
-## How It Works
-
-When you upload an image via the `+` button, Open WebUI:
-
-1. **Uploads and stores** the image as a permanent file
-2. **Returns a file reference** `{id, type: "image", url: "/api/v1/files/{id}/content"}`
-3. **Puts it in `body["files"]`** → later moved to `metadata["files"]` → RAG pipeline tries to embed it (wasteful)
-4. **For saved chats**, reconstructs messages and converts stored image
-   references to `image_url` blocks → then to base64 (bloated context)
-
-This filter intercepts at steps 3-4 and adds a deterministic
-`<attached_files>` block:
-
-- **Removes image entries** from `body["files"]` so RAG skips them
-- **Removes `image_url` blocks** from message content so they never
-  become base64
-- **Injects `<attached_files>`** with `<file>` tags into the last user
-  message, matching Open WebUI's own `add_file_context()` format, so
-  the model is aware of the attached images
-
-Non-image files (PDFs, documents) pass through unchanged.
-
-## Valves (Admin Settings)
+## Valves
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `base_url` | `None` | Public base URL for file references (e.g. `http://open-webui:8080`). File URLs in `<attached_files>` use this instead of auto-detected request base. Leave empty for auto-detect. |
-
-## Downstream Integration
-
-Images remain stored and accessible at:
-```
-/api/v1/files/{id}/content
-```
-
-Use this URL from:
-- **ComfyUI** (via "Load Image by URL" node)
-- **Custom Pipes** that need to read attached images
-- **Any tool** with access to Open WebUI
+| `comfyui_base_url` | `None` | ComfyUI base URL (e.g. `http://akari:8188`). Uploads images so workflows can find them locally. |
+| `comfyui_api_key` | `None` | ComfyUI Bearer token if required. |
 
 ## How It Works
 
-See [DESIGN.md](./DESIGN.md) for the full architecture.
+1. Images uploaded via `+` or pasted are removed from the LLM payload
+2. An `<attached_files>` block with `<file>` tags is injected so the
+   model knows about the images
+3. If `comfyui_base_url` is set, images are uploaded to ComfyUI and a
+   second `<file type="comfyui">` tag with the local filename is added
+4. Non-image files (PDFs, documents) pass through unchanged
+
+## Downstream Integration
+
+When ComfyUI valves are configured, the `<attached_files>` block will
+contain two `<file>` tags per image:
+
+```xml
+<file type="image" id="abc123" url="/api/v1/files/abc123/content"/>
+<file type="comfyui" url="a1b2c3d4.png" name="a1b2c3d4.png"/>
+```
+
+Workflows can reference the file by the ComfyUI-local filename (from
+the `type="comfyui"` tag) without needing authentication.

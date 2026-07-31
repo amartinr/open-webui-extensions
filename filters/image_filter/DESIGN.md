@@ -27,69 +27,18 @@ The result: wasted RAG compute on images + bloated LLM context with
 ## Solution
 
 A **Filter** (class `Filter`) registered in the filter pipeline that
-runs before both `chat_completion_files_handler` and
-`convert_url_images_to_base64()`. It has two independent actions:
+runs before `chat_completion_files_handler`. It does the following:
 
-### 1. Strip image file refs from `body["files"]`
-
-Removes entries with `type: "image"` or `content_type` starting with
-`image/` from `body["files"]` (top-level). At the time the filter
-runs, file references are still at the top-level key;
-`process_chat_payload` moves them into `metadata["files"]` *after*
-the filter pipeline completes. This prevents the RAG pipeline from
-trying to embed images.
-
-Non-image files (documents, PDFs, etc.) pass through unchanged.
-
-### 2. Strip `image_url` blocks from user message content
-
-When messages are reconstructed from DB history, image files are
-converted to `image_url` content blocks (mirroring frontend logic).
-This filter removes those blocks, preventing:
-- `convert_url_images_to_base64()` from converting them to base64
-- The LLM from receiving unusable image data
-
-Since the images are already stored as permanent files, no additional
-storage is needed.
-
-### 3. Inject `<attached_files>` block
-
-After stripping images, the filter injects an `<attached_files>` block
-into the last user message using the **exact same format** as Open
-WebUI's own `add_file_context()`. This gives the model a deterministic,
-stable reference to the attached images:
-
-```xml
-<attached_files>
-<file type="image" id="abc123" url="/api/v1/files/abc123/content" content_type="image/png" name="photo.png"/>
-</attached_files>
-
-[original user text...]
-```
-
-This is deterministic (same input → same output) and does not break
-prefix-based context caching.
-
-### Base64 persistence fallback
-
-Images arrive in two shapes depending on how the user attached them:
-
-| Source | `body["files"]` | Message content |
-|--------|:---:|:---:|
-| Button +  | File ref with ID | `image_url` with base64 (added by `convert_url_images_to_base64`) |
-| Pasted (Ctrl+V) | `None` | `image_url` with base64 (client-side `data:` URI) |
-
-Since the filter runs *after* `convert_url_images_to_base64`, both cases look
-the same at the content level. The filter checks `body["files"]` first: if
-the image was uploaded and already has a file ID, it uses that ID directly
-for the `<file>` tag and skips the base64 persistence.
-
-When `body["files"]` is empty (pasted image), the filter calls Open WebUI's
-`get_image_url_from_base64()` to persist the image and obtain a file URL.
-
-Since filter inlets receive `__user__` as a plain dict, the filter converts
-it to a `UserModel` instance before passing it to the internal upload API,
-which expects attribute access (`user.email`).
+1. **Strips image file refs from `body["files"]`** — so RAG never sees them.
+2. **Strips `image_url` blocks** from reconstructed message content — so
+   they never become base64 in the LLM context.
+3. **Injects `<attached_files>` block** with `<file>` tags into the last
+   user message, matching `add_file_context()` format, so the model knows
+   images were attached.
+4. **Uploads to ComfyUI** (optional) — when `comfyui_base_url` is
+   configured, the filter uploads the image to ComfyUI's `/upload/image`
+   endpoint and adds an extra `<file>` tag with the ComfyUI-local filename
+   that workflows can reference without authentication.
 
 ## Execution Order
 
@@ -97,104 +46,60 @@ which expects attribute access (`user.email`).
 User message (with image uploaded via "+")
     │
     ▼
- convert_url_images_to_base64()   ◄── converts file URLs → base64 in
-    │                                   message content (irrelevant —
-    │                                   body["files"] is untouched here)
-    ▼
- Pipeline Inlet Filters ──►  Image to File Storage (priority 0)
-    │                              │
-    │                              ├── body["files"] ──► remove image entries
-    │                              └── message content ──► strip image_url blocks
-    │                                                   (discards base64 added above)
-    ▼
- files = form_data.pop('files', None)   ◄── no images left
+ convert_url_images_to_base64()   ──► base64 in message content
     │
     ▼
- metadata["files"] = files             ◄── no image refs
+ Image to File Storage (priority 0)
+    │  ├── body["files"] ──► remove image entries
+    │  ├── message content ──► strip image_url blocks
+    │  └── upload to ComfyUI (if configured)
+    ▼
+ files = form_data.pop('files', None)   ──► no images left
     │
     ▼
- chat_completion_files_handler()        ◄── RAG only on non-image files
+ chat_completion_files_handler()   ──► RAG only on non-image files
     │
     ▼
- LLM receives only text content
+ LLM receives text + <attached_files> tags
 ```
 
 ## Key Design Decisions
 
-### 1. Three actions, two valves
+### 1. ComfyUI bypasses auth limitation
 
-| Action | Valve | Default |
-|--------|-------|---------|
-| Strip images from `body["files"]` | `strip_files_metadata` | `True` |
-| Strip `image_url` from message content | `strip_image_url_context` | `True` |
-| Inject `<attached_files>` block | Always active when any image is stripped | — |
-
-The `<attached_files>` injection happens automatically whenever images
-are removed, because without it the model would have no way to know
-that images were attached.
-
-Each action can be toggled independently via Valves:
-
-| Valve | Default | Purpose |
-|-------|---------|---------|
-| `strip_files_metadata` | `True` | Prevent RAG on images |
-| `strip_image_url_context` | `True` | Prevent base64 injection in context |
+External tools (ComfyUI) cannot fetch Open WebUI file URLs because the
+API requires authentication (JWT or API key). By uploading the image
+directly to ComfyUI's `input/` folder, the workflow can reference it by
+local filename — no auth needed.
 
 ### 2. Matches add_file_context() format
 
-The injected `<file>` tags use the exact same format as Open WebUI's
-`add_file_context()` in `middleware.py`. This means:
-- The model sees the same XML structure regardless of whether tags come
-  from this filter or from the builtin RAG pipeline.
-- The block is deterministic: same files → same text → same cache key.
-  Prefix-based context caching is not invalidated between turns.
-- When native FC is enabled, `add_file_context()` also runs later and
-  injects tags for stored messages — the redundancy is harmless and
-  ensures coverage regardless of FC mode.
+The injected `<file>` tags match Open WebUI's `add_file_context()`
+format exactly. The model sees the same XML structure regardless of
+source. The block is deterministic (same input → same output), preserving
+prefix-based context caching.
 
-### 3. No storage calls
+### 3. No duplicate persistence
 
-Unlike earlier versions, this filter never calls
-`get_image_url_from_base64()`. Images uploaded via the `+` button are
-**already stored** by the upload API. The filter just removes
-references from the LLM-bound payload.
+For images uploaded via the `+` button, the filter detects the existing
+file ID in `body["files"]` and does not persist again. It only reads the
+file from disk for the optional ComfyUI upload.
 
-### 4. Filter runs at priority 0
+For pasted images (Ctrl+V), the filter calls Open WebUI's
+`get_image_url_from_base64()` to create a permanent file record, then
+optionally uploads to ComfyUI.
 
-We set `priority = 0` so this filter executes before
-`chat_completion_files_handler`.  It also runs *after*
-`convert_url_images_to_base64`, which means any base64 generated for
-reconstructed messages is discarded by the filter — a small CPU cost
-(~15-20ms per 2MB image) that is far outweighed by the ~160k tokens
-saved in the LLM context.
+### 4. Non-image files pass through unchanged
 
-### 5. Non-image files pass through
+### 5. Graceful message content handling
 
-Only entries matching `image/` content_type or `"image"` type are
-removed. Documents, PDFs, spreadsheets, and other text-based files
-continue to be processed normally through the RAG pipeline.
-
-### 6. Graceful message content handling
-
-After stripping `image_url` blocks, if the content list becomes empty,
-an empty text block `{"type": "text", "text": ""}` is inserted to keep
-the message valid (prevents 400 errors from strict providers).
-
-### 7. Downstream integration
-
-Images remain accessible at their stored URL:
-```
-/api/v1/files/{id}/content
-```
-
-This can be used by:
-- **ComfyUI workflows** (via "Load Image by URL" node)
-- **Custom Pipes** that need to read attached images
-- **Any external tool** with access to Open WebUI
+After stripping, if a message has no content left, an empty text block
+is inserted to prevent 400 errors from strict providers.
 
 ## Valves
 
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `priority` | 0 | Execution order (lower = first). |
-| `base_url` | `None` | Public base URL for file references (e.g. `http://open-webui:8080`). When set, file URLs in the `<attached_files>` block use this instead of the auto-detected request base. Leave empty to auto-detect. |
+| `comfyui_base_url` | `None` | ComfyUI base URL (e.g. `http://akari:8188`). Uploads images to ComfyUI so workflows can reference them locally. |
+| `comfyui_api_key` | `None` | ComfyUI Bearer token if required. |
