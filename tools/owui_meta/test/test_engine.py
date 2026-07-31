@@ -13,7 +13,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import httpx
 import pytest
 
-from helpers import FakeRequest, Recorder, json_response, make_tools
+from helpers import (
+    FakeRequest,
+    Recorder,
+    bearer_credentials,
+    json_response,
+    make_tools,
+)
+
+
+async def test_token_from_http_authorization_credentials_object():
+    # Regression: v0.10.2 AuthTokenMiddleware stores an
+    # HTTPAuthorizationCredentials OBJECT in request.state.token, not a
+    # string. This is what a real authenticated session produces.
+    seen = {}
+
+    def handler(request):
+        seen["auth"] = request.headers.get("authorization")
+        return json_response({"id": "u1", "name": "Abel"})
+
+    tools = make_tools(Recorder(handler), base_url="http://open-webui.private")
+    request = FakeRequest(token=bearer_credentials("sk-real-session-token"))
+    out = await tools.get_my_profile(request)
+    assert seen["auth"] == "Bearer sk-real-session-token"
+    assert '"Abel"' in out
 
 
 async def test_token_forwarded_as_bearer_header():

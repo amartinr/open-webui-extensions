@@ -71,6 +71,8 @@ Implements the Phase 1 MVP from DESIGN §6.1 / §8.
 
 **Verified:** 31 tests pass (`test_engine.py`, `test_user_methods.py`); `import owui_meta` works outside Open WebUI (`Config` stays `None`); Valves build; all 12 method signatures expose only allowlisted typed parameters.
 
+**Post-iteration fix (2026-08-01, `fix(owui_meta): read token from HTTPAuthorizationCredentials`):** live testing against a real authenticated session showed all methods failing with “No authentication token available”. Root cause verified in the v0.10.2 source: `AuthTokenMiddleware` stores an `HTTPAuthorizationCredentials` **object** (`scheme`/`credentials`) in `request.state.token`, not a string. `_require_token` now reads `.credentials` (accepting a plain string for robustness), DESIGN §3.1 corrected, regression test added (`test_token_from_http_authorization_credentials_object`), module version → 0.1.1.
+
 **Pending follow-ups (tracked, not blocking):**
 - `get_my_chats`/`search_chats`/`get_shared_chats`/`get_pinned_chats` responses are assumed to be a bare array (v0.10.2 curl evidence) — re-validate the exact shape when live-testing against the instance in Iteration 5, and adjust `_extract_items` if they return `{items, total}`.
 - `get_chat()` returns the full history and relies on `max_response_chars` truncation — revisit summarization (top messages + total) in Iteration 3.

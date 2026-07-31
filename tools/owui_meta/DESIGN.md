@@ -59,7 +59,7 @@ Calls the internal API → the server treats it as that user
    - `token` cookie (browser web session)
    - Configurable `x-api-key` header (default; renameable via `CUSTOM_API_KEY_HEADER`)
 
-   In all three cases it ends up available as `request.state.token`.
+   In all three cases the credential ends up as `request.state.token`. **Important (verified in the v0.10.2 source): `request.state.token` is NOT a plain string — it is an `HTTPAuthorizationCredentials` object (`scheme`/`credentials`)**, or `None` when no credential was provided (`get_http_authorization_cred` returns the object; the cookie/API-key branches wrap the value in `HTTPAuthorizationCredentials(scheme='Bearer', credentials=...)`). The tool must read `.credentials` (see §8.4/§7.2).
 
 2. **The chat pipeline** (`backend/open_webui/utils/middleware.py`) builds the `extra_params` injected into every tool:
    ```python

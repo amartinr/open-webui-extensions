@@ -12,6 +12,24 @@ import httpx
 
 import owui_meta
 
+try:
+    from fastapi.security import HTTPAuthorizationCredentials as _FakeHTTPAuthCred
+except Exception:  # fastapi may be absent in bare test environments
+    _FakeHTTPAuthCred = None
+
+
+def bearer_credentials(token: str):
+    """Return the exact shape v0.10.2 AuthTokenMiddleware stores in
+    ``request.state.token``: an HTTPAuthorizationCredentials object
+    (``scheme``/``credentials``). Falls back to an equivalent object when
+    fastapi is not installed.
+    """
+    if _FakeHTTPAuthCred is not None:
+        return _FakeHTTPAuthCred(scheme="Bearer", credentials=token)
+    from types import SimpleNamespace
+
+    return SimpleNamespace(scheme="Bearer", credentials=token)
+
 
 class FakeState:
     def __init__(self, token=None):

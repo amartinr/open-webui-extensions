@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.1.0
+version: 0.1.1
 licence: MIT
 """
 
@@ -141,17 +141,35 @@ class Tools:
     def _require_token(self, request: Any) -> str:
         """Extract the requesting user's token from ``request.state.token``.
 
+        In Open WebUI v0.10.2 ``AuthTokenMiddleware`` stores an
+        ``HTTPAuthorizationCredentials`` object (``.scheme``/``.credentials``)
+        in ``request.state.token`` — not a plain string (verified against
+        ``backend/open_webui/utils/asgi_middleware.py`` @ v0.10.2). A plain
+        string is also accepted for robustness across versions.
+
         The token is never logged and never included in any output.
         """
         state = getattr(request, "state", None) if request is not None else None
         token = getattr(state, "token", None) if state is not None else None
-        if not isinstance(token, str) or not token.strip():
+        if token is None:
             raise ToolError(
                 "No authentication token available. This tool must run inside an "
                 "authenticated Open WebUI session or API request (it reads "
                 "__request__.state.token)."
             )
-        return token.strip()
+        # v0.10.2: HTTPAuthorizationCredentials object with .credentials;
+        # a plain string is accepted for robustness across versions/tests.
+        if isinstance(token, str):
+            credentials = token
+        else:
+            credentials = getattr(token, "credentials", None)
+        if not isinstance(credentials, str) or not credentials.strip():
+            raise ToolError(
+                "No authentication token available. This tool must run inside an "
+                "authenticated Open WebUI session or API request (it reads "
+                "__request__.state.token)."
+            )
+        return credentials.strip()
 
     # ──────────────────────────────────────────────
     #  HTTP engine (DESIGN §8.4, §7.2)
