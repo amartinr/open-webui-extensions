@@ -314,6 +314,38 @@ class Tools:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
             self._thread_pool = None
 
+    async def _close_session(self, session) -> None:
+        """Best-effort close of a single curl session. Never raises.
+
+        curl_cffi 0.15.0 ``AsyncSession`` exposes ``close()`` (async); fall
+        back to ``aclose()`` in case a future version renames it.
+        """
+        try:
+            close = getattr(session, "aclose", None) or getattr(session, "close", None)
+            if close is not None:
+                res = close()
+                if hasattr(res, "__await__"):
+                    await res
+        except Exception as exc:
+            # Never let teardown mask the real error.
+            logger.warning("failed to close curl session: %s", exc)
+
+    async def _aclose(self) -> None:
+        """Close all cached curl sessions and the thread pool. Idempotent.
+
+        This is the complete async teardown for a Tools instance. The Open
+        WebUI harness has no async tool-teardown hook, so call it from your
+        own lifecycle code (``_close()`` covers the pool only). Sessions are
+        closed explicitly because curl_cffi ``AsyncSession`` has no
+        destructor (verified against 0.15.0 source) -- an open session keeps
+        its keep-alive connection pool, cookies and multi-handle alive.
+        """
+        sessions = list(self._curl_sessions.values())
+        self._curl_sessions.clear()
+        for session in sessions:
+            await self._close_session(session)
+        self._close()
+
     # ──────────────────────────────────────────────
     #  Core tool method
     # ──────────────────────────────────────────────
