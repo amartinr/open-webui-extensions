@@ -6,7 +6,8 @@ Verifies the fixes for resource management in Tools:
 - F1: instances are no longer pinned by atexit (weakref.finalize instead);
        del + gc.collect() reclaims them without any atexit.unregister call.
 - F2: _aclose() closes every cached curl session, empties the cache, is
-       idempotent, and never raises even if a session's close() fails.
+       idempotent, never raises even if a session's close() fails, and
+       _close() remains pool-only (sessions need the async path).
 - F3: the session cache is keyed by (browser, proxy); a proxy change creates
        a fresh session with the correct proxy, same-key calls reuse, and the
        cache is bounded by MAX_CACHED_SESSIONS with LRU eviction that closes
@@ -15,60 +16,24 @@ Verifies the fixes for resource management in Tools:
 
 import asyncio
 import gc
+import subprocess
 import sys
 import weakref
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # for `from helpers import ...`
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # for `from smart_fetch_url import ...`
 
-from smart_fetch_url import Tools  # noqa: E402
+from helpers import (
+    FakeAsyncSession,
+    REPO_DIR,
+    cleanup_tools,
+    install_fake_sessions,
+    restore_sessions,
+)
+from smart_fetch_url import Tools
 
-
-# ═══════════════════════════════════════════════
-#  Test helpers
-# ═══════════════════════════════════════════════
-
-class FakeResponse:
-    headers = {"content-type": "text/html; charset=utf-8"}
-    url = "https://example.com/final"
-    status_code = 200
-    content = b"<html><body><p>hello world</p></body></html>"
-    text = "<html><body><p>hello world</p></body></html>"
-
-
-class FakeAsyncSession:
-    """Records every created session; close() sets ``closed``."""
-
-    _created: list["FakeAsyncSession"] = []
-
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-        self.closed = False
-        FakeAsyncSession._created.append(self)
-
-    async def get(self, *args, **kwargs):
-        return FakeResponse()
-
-    async def close(self):
-        self.closed = True
-
-
-def install_fake_sessions():
-    """Monkeypatch curl_cffi's AsyncSession with a recording fake.
-
-    The tool imports AsyncSession lazily inside _fetch_with_curl_cffi, so
-    patching the module attribute is enough.
-    """
-    import curl_cffi.requests as ccr
-
-    original = ccr.AsyncSession
-    FakeAsyncSession._created = []
-    ccr.AsyncSession = FakeAsyncSession
-    return ccr, original
-
-
-def restore_sessions(ccr, original):
-    ccr.AsyncSession = original
+PROBE = Path(__file__).resolve().parent / "probe_unbounded.py"
 
 
 # ═══════════════════════════════════════════════
@@ -90,41 +55,42 @@ def test_instance_collected_without_atexit_unregister():
     )
 
 
-def test_many_instances_with_live_pools_reclaimed():
+def test_instances_and_threads_reclaimed_in_no_cache_harness():
     """No-cache harness scenario: many Tools() with live pool threads.
 
-    Pre-fix, atexit pinned every instance, so their pool threads survived
+    Runs the probe in a subprocess for clean isolation (thread counts).
+    Pre-fix, atexit pinned every instance so the pool threads survived
     del + gc indefinitely. Post-fix the instances are collected, the
-    executors lose their last strong reference, and the worker threads exit
-    on their own (workers hold only a weakref to the executor).
+    executors lose their last strong reference, and the worker threads
+    exit on their own (workers hold only a weakref to the executor).
+
+    Output lines: baseline / after_create / after_del_gc_no_atexit /
+    after_aclose.
     """
-    import threading
-    import time
+    r = subprocess.run(
+        [sys.executable, str(PROBE), str(REPO_DIR)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert r.returncode == 0, f"probe failed:\n{r.stderr}"
+    print(r.stdout)
 
-    instances = []
-    for _ in range(4):
-        t = Tools()
-        t._get_thread_pool().submit(time.sleep, 0.2)
-        instances.append(t)
-    time.sleep(0.4)
+    parsed = {}
+    for line in r.stdout.strip().splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            parsed[k.strip()] = int(v.strip())
 
-    refs = [weakref.ref(t) for t in instances]
-    del t  # the loop variable would otherwise pin the last instance
-    del instances
-    gc.collect()
-    for wr in refs:
-        assert wr() is None, "no atexit handler may pin instances"
-
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        alive = sum(
-            1 for th in threading.enumerate() if th.name.startswith("smart_fetch")
-        )
-        if alive == 0:
-            break
-        time.sleep(0.1)
-        gc.collect()
-    assert alive == 0, "pool threads must be reclaimed after del + gc"
+    assert parsed["baseline"] == 0, "clean process should have no smart_fetch threads"
+    assert parsed["after_create"] >= 6, "6 instances x pool submit should spawn threads"
+    assert parsed["after_del_gc_no_atexit"] == 0, (
+        "instances must be reclaimed after del + gc (no atexit pinning), so "
+        "the pool threads must exit on their own"
+    )
+    assert parsed["after_aclose"] == 0, (
+        "explicit _aclose() must terminate the pool threads"
+    )
 
 
 # ═══════════════════════════════════════════════
@@ -188,6 +154,30 @@ def test_aclose_handles_sync_close():
     asyncio.run(scenario())
 
 
+def test_close_is_pool_only():
+    """_close() must NOT close or drop curl sessions.
+
+    Closing sessions requires await (AsyncSession.close()), which the sync
+    _close() path cannot do; only _aclose() handles sessions. This pins the
+    documented contract.
+    """
+    async def scenario():
+        tools = Tools()
+        tools._curl_sessions["firefox::direct"] = FakeAsyncSession()
+        sess = tools._curl_sessions["firefox::direct"]
+
+        tools._close()
+        assert tools._curl_sessions["firefox::direct"] is sess, (
+            "_close() must not remove sessions from the cache"
+        )
+        assert sess.closed is False, (
+            "_close() must not close curl sessions (async-only)"
+        )
+        await cleanup_tools(tools)
+
+    asyncio.run(scenario())
+
+
 # ═══════════════════════════════════════════════
 #  F3 — (browser, proxy) keying + LRU bound
 # ═══════════════════════════════════════════════
@@ -200,8 +190,8 @@ def test_proxy_change_creates_new_session():
             await tools._fetch_with_curl_cffi(
                 "https://a.example", "chrome", {}, 5000, proxy=None
             )
-            assert len(FakeAsyncSession._created) == 1
-            assert FakeAsyncSession._created[0].kwargs["proxies"] is None
+            assert len(FakeAsyncSession.created) == 1
+            assert FakeAsyncSession.created[0].kwargs["proxies"] is None
             assert tools._curl_sessions.get("chrome::direct") is not None
             assert "chrome" not in tools._curl_sessions, "no legacy bare-key entry"
 
@@ -210,10 +200,10 @@ def test_proxy_change_creates_new_session():
                 "https://b.example", "chrome", {}, 5000,
                 proxy="http://proxy-b:8080",
             )
-            assert len(FakeAsyncSession._created) == 2, (
+            assert len(FakeAsyncSession.created) == 2, (
                 "proxy change must create a new session (old key no longer reused)"
             )
-            new = FakeAsyncSession._created[1]
+            new = FakeAsyncSession.created[1]
             assert new.kwargs["proxies"] == {
                 "http": "http://proxy-b:8080",
                 "https": "http://proxy-b:8080",
@@ -223,7 +213,7 @@ def test_proxy_change_creates_new_session():
             assert "chrome::direct" in tools._curl_sessions
         finally:
             restore_sessions(ccr, original)
-            await tools._aclose()
+            await cleanup_tools(tools)
 
     asyncio.run(scenario())
 
@@ -237,12 +227,12 @@ def test_same_key_reuses_session():
                 await tools._fetch_with_curl_cffi(
                     "https://a.example", "firefox", {}, 5000, proxy="http://p1:1"
                 )
-            assert len(FakeAsyncSession._created) == 1, (
+            assert len(FakeAsyncSession.created) == 1, (
                 "same (browser, proxy) key must reuse the cached session"
             )
         finally:
             restore_sessions(ccr, original)
-            await tools._aclose()
+            await cleanup_tools(tools)
 
     asyncio.run(scenario())
 
@@ -276,7 +266,7 @@ def test_session_cache_lru_bound():
             )
 
             evicted = next(
-                s for s in FakeAsyncSession._created
+                s for s in FakeAsyncSession.created
                 if (s.kwargs.get("proxies") or {}).get("https") == "http://p1:1"
             )
             assert evicted.closed, (
@@ -284,6 +274,6 @@ def test_session_cache_lru_bound():
             )
         finally:
             restore_sessions(ccr, original)
-            await tools._aclose()
+            await cleanup_tools(tools)
 
     asyncio.run(scenario())
