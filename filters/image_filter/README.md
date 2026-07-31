@@ -39,8 +39,7 @@ Non-image files (PDFs, documents) pass through unchanged.
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `strip_files_metadata` | `True` | Remove image refs from `body["files"]` (top-level) to prevent RAG. |
-| `strip_image_url_context` | `True` | Remove `image_url` blocks from message content to prevent base64. |
+| `base_url` | `None` | Public base URL for file references (e.g. `http://open-webui:8080`). File URLs in `<attached_files>` use this instead of auto-detected request base. Leave empty for auto-detect. |
 
 ## Downstream Integration
 

@@ -197,5 +197,4 @@ This can be used by:
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `priority` | 0 | Execution order (lower = first). |
-| `strip_files_metadata` | `True` | Remove image refs from `body["files"]` (top-level) to prevent RAG. |
-| `strip_image_url_context` | `True` | Remove `image_url` blocks from message content to prevent base64. |
+| `base_url` | `None` | Public base URL for file references (e.g. `http://open-webui:8080`). When set, file URLs in the `<attached_files>` block use this instead of the auto-detected request base. Leave empty to auto-detect. |

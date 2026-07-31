@@ -101,6 +101,17 @@ def _ensure_user_model(user: Any) -> Any:
 class Filter:
     class Valves(BaseModel):
         priority: int = Field(default=0, description="Execution order. Lower values run first.")
+        base_url: Optional[str] = Field(
+            default=None,
+            description=(
+                "Public base URL for file references, e.g. "
+                "http://open-webui:8080.  When set, file URLs in the "
+                "<attached_files> block use this value instead of the "
+                "auto-detected request base_url.  Leave empty to "
+                "auto-detect (may produce an internal Docker URL that "
+                "downstream tools cannot reach)."
+            ),
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -121,7 +132,9 @@ class Filter:
         # Resolve the server base URL so file paths become absolute URLs
         # that downstream tools (e.g. ComfyUI) can fetch.
         base_url = ""
-        if __request__ is not None:
+        if self.valves.base_url:
+            base_url = self.valves.base_url.rstrip("/")
+        elif __request__ is not None:
             try:
                 base_url = str(__request__.base_url).rstrip("/")
             except Exception:
