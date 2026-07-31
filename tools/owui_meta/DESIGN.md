@@ -247,6 +247,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `fallback_base_url` | `http://localhost:8080` | Last resort if the global URL is empty or unreachable |
 | `timeout` | `15` | HTTP timeout in seconds |
 | `max_response_chars` | `8000` | Truncation of the response returned to the model |
+| `output_format` | `markdown` | Format of the response returned to the model: `markdown` (default, see §8.8) or `json` |
 | *(no credential valves)* | — | **By design**: auth is automatic via `request.state.token` |
 
 ### 8.3 Method signatures
@@ -272,7 +273,7 @@ async def <method>(self, __user__: dict, __request__: Request, <typed parameters
 4. Validate Content-Type == application/json (if not → error)
 5. Map HTTP errors (401/403/404/5xx) to readable messages
 6. Truncate response (max_response_chars)
-7. Return JSON to the model
+7. Return the result to the model in the configured format (Markdown by default, §8.8)
 ```
 
 ### 8.5 Optional events (UX)
@@ -361,6 +362,49 @@ Implementation notes:
 - All filtering needs (`content_type`, `size`, `created_at`) are available on the listing; no binary download is required to filter.
 - The upload endpoint (`POST /api/v1/files/`) additionally returns `status`, `path` (container path) and `data.status`, which are not present in the listing — relevant only if the tool ever writes.
 
+### 8.8 Response format: Markdown-first for the model (decision 2026-08-01)
+
+**Problem observed:** language models often read **plain text / Markdown** more reliably than deeply nested JSON. A table with columns is immediately actionable; the equivalent JSON array of objects forces the model to mentally parse structure and reduces reliability when the model must pick fields (IDs, sizes, dates) out of it.
+
+**Decision:** the tool returns the response to the model as **Markdown by default** (plain text, no code fences around whole payloads, no JSON). A `output_format` valve (`markdown` default | `json`) lets an admin force JSON when a specific model handles it better.
+
+**Formatting rules** (all renderers):
+- **Lists → Markdown tables.** One table per resource. The summary line above the table always states counts: `**Files: 2 (2 total on server)**`.
+- **Raw values, no parsing burden on the model:**
+  - Sizes are shown as **raw integer bytes** (`8796`, `152340`) — never formatted with unit prefixes (`8.8 KB`). Sizes are stored as numbers in the backend API (`meta.size` is an `int`, see §8.7), and the tool passes them through as numbers. The column header states the unit (`Size (bytes)`) so the value stays unambiguous.
+  - Timestamps are rendered as readable local dates/times (e.g. `2026-07-30 08:00`) instead of epoch integers — models handle ISO-like dates better than 10-digit epochs, and the raw epoch is preserved nowhere the model must use.
+  - **IDs are always present** in the table (e.g. a `ID` column), because the model needs them to call follow-up methods (`get_chat(id)`, `get_file_content(id)`).
+- **Details (profile, single items) → flat bullets** (`- Name: Abel`).
+- **File content → fenced block** with the content type as language hint (e.g. ` ```csv `). Binary content → a one-line note with metadata (no bytes).
+- **Chat history → heading + per-message blocks** (`**user** …` / `**assistant** …`).
+- **Errors → plain-text one-liners**, not JSON: `Error: Not authenticated: …`.
+
+**Worked examples** (what the model sees for `get_my_files()` and `get_my_chats()`):
+
+```markdown
+**Files: 2 (2 total on server)**
+
+| Filename | Type | Size (bytes) | Created | Origin chat | ID |
+|---|---|---|---|---|---|
+| generated-image.png | image/png | 8796 | 2026-07-30 | b5d844f0-85c5-4cdc-8cf3-4f2366bc249e | 643f81c9-2bc8-44d7-b4a1-994cdb1c503b |
+| budget-report.csv | text/csv | 152340 | 2026-07-28 | — | 5e1b76e0-9b7e-4b3e-b3b5-111111111111 |
+
+---
+
+**Recent chats: 2**
+
+| Title | Updated | ID |
+|---|---|---|
+| Budget planning | 2026-07-30 08:00 | b5d844f0-85c5-4cdc-8cf3-4f2366bc249e |
+| Ideas | 2026-07-01 | aaaa |
+```
+
+**Design constraints preserved:**
+- The renderers **summarize exactly as before** (top N + `total` in the summary line; never full dumps) — Markdown is a *presentation* of the same summarized data, not an invitation to return more.
+- `max_response_chars` truncation still applies to the rendered Markdown.
+- The summarizer logic from §8.6/§8.7 (which fields to keep, `total`, origin cross-referencing) is unchanged; only the final serialization changes (`_ok`/`_error`/renderers).
+- `output_format` is a **server-side valve** (not user-configurable) so the admin controls what models receive.
+
 ---
 
 ## 9. Lessons from the tests (for implementation)
@@ -419,6 +463,7 @@ Implementation notes:
 - [ ] Admin methods (§6.2) with role check
 - [ ] Status events with `__event_emitter__` (§8.5)
 - [ ] **Pagination, sorting and filtering** across all list/search functions (§8.6): iterate pages, per-resource sort criteria, typed filters (type/size for files, text/status for chats) and smart result summarization (e.g. list titles without full history)
+- [ ] **Markdown-first output** (§8.8): renderers per resource (tables for lists, bullets for details, fenced blocks for content), `output_format` valve, raw sizes in bytes
 
 ### Phase 3 — Other considerations
 - [ ] Evaluate whether it's worth proposing as a PR to the Open WebUI core (e.g. exposing an explicit `__token__` in `extra_params`, in addition to `__request__`)
@@ -434,3 +479,4 @@ Implementation notes:
 4. **Integrate the tool into a specific instance model or make it available to all models the admin decides?**
 5. **What is the pagination default per resource?** (e.g. chats: latest 10; files: all of page 1 with `total`; search: top N by relevance) — to be defined in Phase 1 with the desired UX.
 6. **Expose `page`/`page_size` to the model or do transparent internal iteration?** (recommended: transparent with a maximum page limit to prevent cost abuse)
+7. **Response format for the model** — **RESOLVED (2026-08-01):** Markdown-first by default (`output_format` valve, see §8.8). JSON remains available as an opt-in valve for models that handle it better.
