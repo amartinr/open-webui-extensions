@@ -1,17 +1,12 @@
 """
 title: Image to File Storage
 author: pi-agent
-description: Strips images from LLM context to prevent RAG and base64 bloat. Injects <attached_files> with file references. When ComfyUI valves are set, uploads images to ComfyUI so workflows can reference them by local filename without auth.
+description: Strips images from LLM context to prevent RAG and base64 bloat. Injects <attached_files> with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images.
 required_open_webui_version: 0.5.0
-version: 2.7.0
+version: 2.9.0
 """
 
-import asyncio
-import base64
-import io
 import logging
-import mimetypes
-import uuid
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -21,13 +16,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-_IMAGE_MIME_EXT = {
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-}
 
 
 def _is_image_file(file_ref: Any) -> bool:
@@ -54,20 +42,15 @@ def _is_base64_uri(url: str) -> bool:
     return url.startswith("data:image/") and ";base64," in url
 
 
-def _decode_base64_uri(url: str) -> tuple[bytes, str]:
-    """Return (image_bytes, mime_type) from a data: URI."""
-    header, encoded = url.split(",", 1)
-    mime = header.split(";")[0].lstrip("data:") or "image/png"
-    return base64.b64decode(encoded), mime
-
-
-def _format_file_tag(file: dict) -> str:
+def _format_file_tag(file: dict, base_url: str = "") -> str:
     file_id = file.get("id") or file.get("url", "")
     attrs = f'type="{file.get("type", "file")}"'
     if file_id:
         attrs += f' id="{file_id}"'
     url = file.get("url", "")
     if url:
+        if base_url and url.startswith("/"):
+            url = f"{base_url}{url}"
         attrs += f' url="{url}"'
     if file.get("content_type"):
         attrs += f' content_type="{file["content_type"]}"'
@@ -111,29 +94,24 @@ def _ensure_user_model(user: Any) -> Any:
     return user
 
 
-async def _upload_to_comfyui(base_url: str, api_key: str | None, img_bytes: bytes, mime: str) -> str | None:
-    """Upload image bytes to ComfyUI; return the local filename."""
-    import aiohttp
-    from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL
-    from open_webui.utils.session_pool import get_session
+async def _get_public_base_url(request) -> str:
+    """Return the public base URL of this Open WebUI instance.
 
-    ext = _IMAGE_MIME_EXT.get(mime.lower()) or mimetypes.guess_extension(mime) or ".png"
-    filename = f"{uuid.uuid4().hex}{ext}"
+    Prefers the admin-configured "WebUI URL" setting (webui.url), falling
+    back to the request's base URL when unset. Lets the injected <file>
+    tags carry absolute URLs that external tools can fetch.
+    """
+    try:
+        from open_webui.models.config import Config
 
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        webui_url = await Config.get("webui.url")
+        if webui_url:
+            return str(webui_url).rstrip("/")
+    except Exception as exc:
+        log.warning("Failed to read webui.url config: %s", exc)
 
-    form = aiohttp.FormData()
-    form.add_field("image", io.BytesIO(img_bytes), filename=filename, content_type=mime)
-    form.add_field("type", "input")
-
-    session = await get_session()
-    url = f"{base_url.rstrip('/')}/api/upload/image"
-    async with session.post(url, data=form, headers=headers, ssl=AIOHTTP_CLIENT_SESSION_SSL) as resp:
-        resp.raise_for_status()
-        result = await resp.json()
-        return result.get("name") or filename
+    base = getattr(request, "base_url", None)
+    return str(base).rstrip("/") if base else ""
 
 
 # ---------------------------------------------------------------------------
@@ -144,18 +122,6 @@ async def _upload_to_comfyui(base_url: str, api_key: str | None, img_bytes: byte
 class Filter:
     class Valves(BaseModel):
         priority: int = Field(default=0, description="Execution order. Lower values run first.")
-        comfyui_base_url: Optional[str] = Field(
-            default=None,
-            description=(
-                "ComfyUI base URL, e.g. http://akari:8188. When set, the "
-                "filter uploads images to ComfyUI's /upload/image endpoint "
-                "so workflows can find them by local filename."
-            ),
-        )
-        comfyui_api_key: Optional[str] = Field(
-            default=None,
-            description="ComfyUI API key (Bearer token) if required.",
-        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -172,11 +138,8 @@ class Filter:
     ) -> dict:
         messages: list[dict] = body.get("messages", [])
         file_tags: list[str] = []
-
-        # Track file IDs from body["files"] so we can read them from disk
-        # later for ComfyUI upload.
-        uploaded_ids: list[str] = []
         has_uploaded = False
+        base_url = await _get_public_base_url(__request__) if __request__ is not None else ""
 
         # ── Step 1: handle body["files"] ────────────────────────────────────
         files: Optional[list] = body.get("files")
@@ -185,16 +148,12 @@ class Filter:
             for f in files:
                 if _is_image_file(f):
                     has_uploaded = True
-                    fid = f.get("id", "")
-                    if fid:
-                        uploaded_ids.append(fid)
-                    file_tags.append(_format_file_tag(f))
+                    file_tags.append(_format_file_tag(f, base_url))
                 else:
                     non_images.append(f)
             body["files"] = non_images if non_images else None
 
         # ── Step 2: strip image_url from message content ────────────────────
-        pasted_bytes: list[tuple[bytes, str]] = []
         if messages:
             for msg in messages:
                 if msg.get("role") != "user":
@@ -213,62 +172,20 @@ class Filter:
                     elif _is_base64_uri(url):
                         purl = await self._persist_base64(url, __request__, __metadata__, __user__)
                         if purl:
-                            file_tags.append(_format_file_tag({"url": purl, "type": "image"}))
-                            try:
-                                pasted_bytes.append(_decode_base64_uri(url))
-                            except Exception:
-                                pass
+                            file_tags.append(_format_file_tag({"url": purl, "type": "image"}, base_url))
                         else:
-                            file_tags.append(_format_file_tag({"url": "(base64 stripped)", "type": "image"}))
+                            file_tags.append(_format_file_tag({"url": "(base64 stripped)", "type": "image"}, base_url))
                     else:
-                        file_tags.append(_format_file_tag({"url": url, "type": "image"}))
+                        file_tags.append(_format_file_tag({"url": url, "type": "image"}, base_url))
                 msg["content"] = new_content if new_content else [{"type": "text", "text": ""}]
 
-        # ── Step 3: upload to ComfyUI if configured ─────────────────────────
-        comfy_ok = bool(self.valves.comfyui_base_url)
-        if comfy_ok:
-            # 3a: pasted images
-            for img_bytes, mime in pasted_bytes:
-                try:
-                    fname = await _upload_to_comfyui(
-                        self.valves.comfyui_base_url, self.valves.comfyui_api_key, img_bytes, mime
-                    )
-                    if fname:
-                        file_tags.append(_format_file_tag({"url": fname, "type": "comfyui", "name": fname}))
-                except Exception as exc:
-                    log.warning("ComfyUI upload (pasted) failed: %s", exc)
-
-            # 3b: uploaded files — read from Open WebUI disk and re-upload
-            if uploaded_ids:
-                from open_webui.models.files import Files
-                from open_webui.storage.provider import Storage
-
-                import aiofiles
-
-                for fid in uploaded_ids:
-                    try:
-                        rec = await Files.get_file_by_id(fid)
-                        if not rec:
-                            continue
-                        fpath = await asyncio.to_thread(Storage.get_file, rec.path)
-                        async with aiofiles.open(fpath, "rb") as fh:
-                            img_bytes = await fh.read()
-                        mime = rec.meta.get("content_type", "image/png")
-                        fname = await _upload_to_comfyui(
-                            self.valves.comfyui_base_url, self.valves.comfyui_api_key, img_bytes, mime
-                        )
-                        if fname:
-                            file_tags.append(_format_file_tag({"url": fname, "type": "comfyui", "name": fname}))
-                    except Exception as exc:
-                        log.warning("ComfyUI upload (file %s) failed: %s", fid, exc)
-
-        # ── Step 4: inject <attached_files> ─────────────────────────────────
+        # ── Step 3: inject <attached_files> ─────────────────────────────────
         if file_tags and messages:
             ref = _build_attached_files(file_tags)
             if ref:
                 _prepend_to_user_message(messages, ref)
 
-        # ── Step 5: notify ─────────────────────────────────────────────────
+        # ── Step 4: notify ─────────────────────────────────────────────────
         if file_tags and __event_emitter__:
             try:
                 await __event_emitter__({

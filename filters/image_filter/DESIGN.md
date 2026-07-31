@@ -34,11 +34,7 @@ runs before `chat_completion_files_handler`. It does the following:
    they never become base64 in the LLM context.
 3. **Injects `<attached_files>` block** with `<file>` tags into the last
    user message, matching `add_file_context()` format, so the model knows
-   images were attached.
-4. **Uploads to ComfyUI** (optional) — when `comfyui_base_url` is
-   configured, the filter uploads the image to ComfyUI's `/upload/image`
-   endpoint and adds an extra `<file>` tag with the ComfyUI-local filename
-   that workflows can reference without authentication.
+   images were attached and can reference them by absolute file URL.
 
 ## Execution Order
 
@@ -51,8 +47,7 @@ User message (with image uploaded via "+")
     ▼
  Image to File Storage (priority 0)
     │  ├── body["files"] ──► remove image entries
-    │  ├── message content ──► strip image_url blocks
-    │  └── upload to ComfyUI (if configured)
+    │  └── message content ──► strip image_url blocks
     ▼
  files = form_data.pop('files', None)   ──► no images left
     │
@@ -65,29 +60,40 @@ User message (with image uploaded via "+")
 
 ## Key Design Decisions
 
-### 1. ComfyUI bypasses auth limitation
-
-External tools (ComfyUI) cannot fetch Open WebUI file URLs because the
-API requires authentication (JWT or API key). By uploading the image
-directly to ComfyUI's `input/` folder, the workflow can reference it by
-local filename — no auth needed.
-
-### 2. Matches add_file_context() format
+### 1. Matches add_file_context() format
 
 The injected `<file>` tags match Open WebUI's `add_file_context()`
 format exactly. The model sees the same XML structure regardless of
 source. The block is deterministic (same input → same output), preserving
 prefix-based context caching.
 
+### 2. Absolute file URLs for downstream tools
+
+The injected `<file>` tags carry **absolute** URLs resolved from the
+admin-configured "WebUI URL" (`webui.url`), falling back to
+`request.base_url` when unset. Downstream tools (e.g. ComfyUI nodes that
+load images by URL) can fetch the image directly without knowing the
+host. The `id` attribute is preserved so Open WebUI's builtin `view_file`
+tool keeps working unchanged. Relative paths are prefixed only when they
+start with `/`; data URIs and already-absolute URLs pass through
+unchanged.
+
 ### 3. No duplicate persistence
 
 For images uploaded via the `+` button, the filter detects the existing
-file ID in `body["files"]` and does not persist again. It only reads the
-file from disk for the optional ComfyUI upload.
+file ID in `body["files"]` and does not persist again — the file is
+already on disk.
 
 For pasted images (Ctrl+V), the filter calls Open WebUI's
 `get_image_url_from_base64()` to create a permanent file record, then
-optionally uploads to ComfyUI.
+references it by URL. This is the same mechanism Open WebUI itself uses
+for pasted images.
+
+The `__user__` dict passed to filter inlets is converted to a `UserModel`
+(`_ensure_user_model()`) because `upload_file_handler` expects attribute
+access (e.g. `user.email`); without this the persistence would fail. If
+persistence fails, a placeholder tag `<file url="(base64 stripped)">`
+is injected so the model still knows an image was attached.
 
 ### 4. Non-image files pass through unchanged
 
@@ -96,10 +102,34 @@ optionally uploads to ComfyUI.
 After stripping, if a message has no content left, an empty text block
 is inserted to prevent 400 errors from strict providers.
 
+## Known Limitations
+
+- **Mixed uploads in one message**: if a user uploads via `+` *and*
+  pastes another image in the same message, the pasted image falls into
+  the `has_uploaded` branch (global flag) and is stripped without being
+  persisted or referenced. Only pure paths (`+` only, or paste only) are
+  handled correctly today.
+- **Re-persistence of pasted images across turns**: pasted images stay
+  in the stored chat message as `data:` URIs (they never go through the
+  upload API). The filter's Step 2 walks *all* user messages, so on
+  every subsequent turn `load_messages_from_db()` reloads that content
+  and `_persist_base64()` writes a brand-new file (new UUID, no hash
+  dedup). One paste can yield N copies on disk / N `files` rows after
+  N turns.
+- **Growing duplicate references**: for `+` uploads, historical messages
+  are re-hydrated with `image_url` blocks each turn, so the injected
+  `<attached_files>` block re-tags past images and grows with the
+  conversation. With native function calling, `add_file_context()` (which
+  runs *after* filters) prepends its own `<attached_files>` block from
+  the stored message `files`, so the last user message can carry two
+  blocks referencing the same file.
+- **Authenticated downloads**: `/api/v1/files/{id}/content` requires
+  authentication (JWT or API key) and ownership checks. External tools
+  fetching the absolute URL need valid credentials; the filter itself
+  does not issue tokens.
+
 ## Valves
 
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `priority` | 0 | Execution order (lower = first). |
-| `comfyui_base_url` | `None` | ComfyUI base URL (e.g. `http://akari:8188`). Uploads images to ComfyUI so workflows can reference them locally. |
-| `comfyui_api_key` | `None` | ComfyUI Bearer token if required. |

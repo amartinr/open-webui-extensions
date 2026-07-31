@@ -1,8 +1,8 @@
 # Image to File Storage Filter
 
 Prevents images from being injected into the LLM context. Strips them
-from the payload and injects `<attached_files>` tags. Optionally uploads
-to ComfyUI so workflows can reference images by local filename.
+from the payload and injects `<attached_files>` tags referencing the
+image files stored on disk by Open WebUI.
 
 ## Installation
 
@@ -14,27 +14,29 @@ to ComfyUI so workflows can reference images by local filename.
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `comfyui_base_url` | `None` | ComfyUI base URL (e.g. `http://akari:8188`). Uploads images so workflows can find them locally. |
-| `comfyui_api_key` | `None` | ComfyUI Bearer token if required. |
+| `priority` | `0` | Execution order. Lower values run first. |
 
 ## How It Works
 
-1. Images uploaded via `+` or pasted are removed from the LLM payload
-2. An `<attached_files>` block with `<file>` tags is injected so the
+1. Images uploaded via `+` (already persisted on disk by Open WebUI's
+   upload API) are removed from the LLM payload without touching the file
+2. Pasted images (Ctrl+V, `data:` URIs) are persisted as permanent files
+   via `get_image_url_from_base64()` — the same mechanism Open WebUI uses
+   natively — then removed from the payload
+3. An `<attached_files>` block with `<file>` tags is injected so the
    model knows about the images
-3. If `comfyui_base_url` is set, images are uploaded to ComfyUI and a
-   second `<file type="comfyui">` tag with the local filename is added
 4. Non-image files (PDFs, documents) pass through unchanged
 
-## Downstream Integration
+## File References
 
-When ComfyUI valves are configured, the `<attached_files>` block will
-contain two `<file>` tags per image:
+The `<attached_files>` block contains one `<file>` tag per image:
 
 ```xml
-<file type="image" id="abc123" url="/api/v1/files/abc123/content"/>
-<file type="comfyui" url="a1b2c3d4.png" name="a1b2c3d4.png"/>
+<file type="image" id="abc123" url="https://your-owui-host.example/api/v1/files/abc123/content"/>
 ```
 
-Workflows can reference the file by the ComfyUI-local filename (from
-the `type="comfyui"` tag) without needing authentication.
+The URL is made **absolute** using the admin-configured **WebUI URL**
+(Admin Settings → General → `webui.url`), falling back to the request's
+base URL when unset. The `id` attribute keeps the builtin `view_file`
+tool working unchanged, and the absolute URL can be passed to external
+tools (e.g. ComfyUI nodes that load images by URL).
