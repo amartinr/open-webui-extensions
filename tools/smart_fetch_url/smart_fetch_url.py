@@ -17,7 +17,7 @@ import logging
 import os
 import re
 import time
-import atexit
+import weakref
 from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlparse
@@ -95,6 +95,21 @@ class _RateLimiter:
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last = time.monotonic()
+
+
+def _close_sync(wr):
+    """Shut down a Tools instance's lazily-created thread pool.
+
+    Registered with ``weakref.finalize`` so it runs when the instance is
+    collected (or at interpreter exit if it is still alive). It receives a
+    weakref to the instance -- never captures ``self`` or the pool, which
+    would keep them alive. The pool is created lazily on first use, so it is
+    resolved here (at fire time), not at registration time.
+    """
+    inst = wr()
+    if inst is not None and inst._thread_pool is not None:
+        inst._thread_pool.shutdown(wait=False, cancel_futures=True)
+        inst._thread_pool = None
 
 
 class Tools:
@@ -198,19 +213,27 @@ class Tools:
         self._pool_pending_ops = 0
         self._thread_semaphore: Optional[asyncio.Semaphore] = None  # B: lazy-init in _run_in_thread
         self._curl_sessions: dict[str, Any] = {}  # C: shared AsyncSession pool keyed by browser
-        atexit.register(self._close)
+        # GC-friendly cleanup: the finalizer runs when the instance is
+        # collected or at interpreter exit. It holds only a weakref to self,
+        # so it never pins the instance the way ``atexit.register(self._close)``
+        # did (which kept every instantiated Tools alive for the process
+        # lifetime and defeated ``__del__``).
+        self._finalizer = weakref.finalize(self, _close_sync, weakref.ref(self))
 
     def _close(self):
-        """Shut down the thread pool and shared connection pools explicitly.
+        """Shut down the thread pool explicitly. Idempotent.
 
         Call this when the Tools instance is no longer needed
         (e.g. from the harness lifecycle hooks) to ensure no
         threads outlive their owner.
+
+        curl_cffi sessions are NOT closed here: closing them requires
+        ``await`` (``AsyncSession.close()``), which ``__del__`` cannot do.
+        Use :meth:`_aclose` for full cleanup including sessions.
         """
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
             self._thread_pool = None
-        # C: curl_cffi sessions are GC'd with the Tools instance;
         # httpx client is closed asynchronously in _fetch_with_httpx.
 
     def _get_thread_pool(self) -> concurrent.futures.ThreadPoolExecutor:
@@ -284,7 +307,9 @@ class Tools:
                 self._pool_pending_ops -= 1
 
     def __del__(self):
-        # Best-effort cleanup — ``_close()`` is the reliable path.
+        # Best-effort cleanup — ``_close()`` is the reliable path. The
+        # weakref.finalize registered in __init__ covers the GC and
+        # interpreter-exit paths as well. Idempotent via the None check.
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=False, cancel_futures=True)
             self._thread_pool = None
