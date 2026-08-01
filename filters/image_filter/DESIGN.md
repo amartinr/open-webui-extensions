@@ -126,25 +126,11 @@ is inserted to prevent 400 errors from strict providers.
   native function calling, `add_file_context()` (which runs *after*
   filters) still prepends its own `<attached_files>` block from the
   stored message `files`, so the last user message can carry two blocks
-  — the core's duplicates cannot be fixed from the filter.
-
-  **Future option — clean up via the manifold pipe**: `add_file_context()`
-  runs *after* the filter inlets, but *before* the model provider is
-  called. A pipe (manifold model, e.g. `pipes/agent_loop_guard/`) is the
-  last code that sees the assembled payload, so it could collapse all
-  `<attached_files>` blocks into one and deduplicate `<file>` tags by
-  id, using the path of the URL (minus scheme/domain) as the canonical
-  key. Notes:
-
-  - This repo's `agent_loop_guard` pipe is a proxy already used for all
-    models (single user deployment), so it would cover every chat;
-    not part of this branch's scope — pipe code stays untouched here.
-  - Dedup key should be the URL **path** (`/api/v1/files/{id}/content`)
-    so relative (core) and absolute (filter) URLs of the same file
-    collapse together; the pipe could also normalize to absolute URLs
-    to keep downstream tools (ComfyUI) working.
-  - Best-effort / fail-open: a cleanup error must never break the
-    gateway forwarding.
+  — the core's duplicates cannot be fixed from the filter. See
+  "Attached-Files Accumulation — Verified Mechanism" below for the
+  verified pipeline order, the two independent sources of blocks, and
+  the pipe-based cleanup design (not implemented — pipe code stays
+  untouched in this branch).
 - **Authenticated downloads**: `/api/v1/files/{id}/content` requires
   authentication (JWT or API key) and ownership checks. External tools
   fetching the absolute URL need valid credentials; the filter itself
@@ -242,6 +228,113 @@ same file is never tagged more than once.
 - Limit: `add_file_context()` in the core middleware still prepends its
   own `<attached_files>` block after filters run; that block's
   duplicates cannot be fixed from the filter.
+
+## Attached-Files Accumulation — Verified Mechanism (2026-08-01)
+
+*Verified against open-webui `main` (`backend/open_webui/utils/middleware.py`,
+`backend/open_webui/utils/chat.py`, `backend/open_webui/functions/__init__.py`).
+Line numbers below refer to `main` at verification time. The deployed Open
+WebUI version was not available for inspection — the ordering was verified
+from the code path, not by runtime tracing.*
+
+### Why a filter cannot fix the accumulation
+
+The filter inlet runs early in `process_chat_payload()`; the core's own
+`add_file_context()` runs *afterwards*; and the pipe is the last code
+before the provider. A filter therefore never sees (or can fix) the blocks
+the core adds after it. Order inside `process_chat_payload()` (middleware.py):
+
+```
+re-hydrate stored history  (message.files → image_url parts)
+  → convert_url_images_to_base64()      [line 2396]
+  → filter inlets                       [line 2517: process_filter_functions]
+  → files = form_data.pop('files')      [line 2600]
+  → add_file_context()                  [line 2865, only when
+                                          use_builtin_tools: native FC]
+  → generate_chat_completion()          (utils/chat.py)
+      → model.get('pipe') → generate_function_chat_completion()
+            → pipe(body, ...)           ← LAST code before the provider
+```
+
+### Two independent sources of `<attached_files>` blocks
+
+| Source | When | Tag format |
+|--------|------|------------|
+| image_filter (Step 3) | in the inlet, before RAG | one block prepended to the last user message; absolute URLs (`webui.url`); `type="image"` + `id` |
+| core `add_file_context()` (middleware.py:1570) | after all filters, per stored user message that has non-`data:` `files` | one block **per user message**; URLs as stored (relative `/api/v1/files/{id}/content`); `type` from stored file |
+
+Both can be present in the final payload: with native function calling the
+same turn can carry the filter's block **plus** one core block per
+historical user message that has files.
+
+### Why the block grows every turn (observed behaviour)
+
+1. The core re-hydrates the stored history each turn: every stored user
+   message's `files` (images) become `image_url` parts, then base64
+   (line 2396).
+2. The filter's Step 2 walks **all** user messages, strips those
+   `image_url` parts and tags them — so its own block is rebuilt each turn
+   as the union of **all images of the conversation**, not just the
+   current turn's.
+3. `add_file_context()` adds one block per stored user message that has
+   files.
+
+Net effect: the last user message carries an `<attached_files>` block with
+every image ever attached (the filter's), plus the core's blocks, every
+turn. The v2.11.0 dedup only collapses duplicates **within one request** —
+it does not stop the set from growing linearly with new images, nor does
+it touch the core's blocks.
+
+### Unverified claim: "the id changed between the raw and the resolved form"
+
+A report from another agent described a "raw" upload-turn form
+`<file type="file" url="{uuid}" content_type=... name=...>` (bare UUID, no
+`/api/v1/files/` path) and that the same image later appeared with a
+different `id`. This could not be reproduced from the code:
+`format_file_tag()` (middleware.py:1570) always emits the stored
+`file.id`, and no frontend code in `main` emits a bare-UUID `url` inside
+`<attached_files>`. Treat the raw form as deployment/version specific and
+**unverified**. The path-based dedup key below is robust either way for
+resolved URLs; a bare-UUID `url` needs its own fallback (design note 4).
+
+### Design for the pipe cleanup (not implemented — out of this branch's scope)
+
+The pipe is the last code that sees the assembled payload:
+`generate_function_chat_completion()` calls `pipe(body, ...)` and its
+return goes straight to the provider/gateway (functions.py:150-345). This
+repo's `agent_loop_guard` pipe is already a manifold proxy for all models
+(single-user deployment) and already mutates `messages` in-place before
+forwarding — it would cover every chat without extra deployment. A
+cleanup step in the pipe could:
+
+1. **Collapse** all `<attached_files>` blocks (filter's + core's, across
+   all messages) into a single block on the last user message.
+2. **Deduplicate `<file>` tags** with a canonical key, in order:
+   - the URL **path** (`/api/v1/files/{id}/content`) — collapses the
+     filter's absolute URL and the core's relative URL of the same file;
+   - the bare `id` when the URL is absent;
+   - a bare-UUID `url` (the unverified raw form) → treat the UUID as the
+     file id;
+   - external URLs → the full URL.
+3. **Normalize to absolute URLs** (`webui.url`, same fallback as the
+   filter) so downstream tools (ComfyUI URL-loading nodes) keep working.
+4. **Fail-open**: any cleanup error must be logged and the payload
+   forwarded unchanged — a cleanup bug must never break the gateway
+   forwarding.
+
+**Open decision — scope of the collapsed block.**
+
+- **(a) Collapse + dedup** (documented default): the block still contains
+  all images of the conversation each turn, deduplicated. Deterministic
+  (preserves prefix-based context caching), matches what the model has
+  seen so far.
+- **(b) Only the current turn's images**: strip older attachments from the
+  block. Fewer tokens per turn, but changes semantics (the model stops
+  seeing older attachments), the block is no longer the stable union, and
+  prefix-caching benefits shrink.
+
+(a) is the default; (b) is a deliberate deviation that must be chosen
+consciously.
 
 ## Remaining Option
 

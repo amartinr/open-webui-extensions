@@ -48,3 +48,15 @@ The URL is made **absolute** using the admin-configured **WebUI URL**
 base URL when unset. The `id` attribute keeps the builtin `view_file`
 tool working unchanged, and the absolute URL can be passed to external
 tools (e.g. ComfyUI nodes that load images by URL).
+
+## Known Limitations
+
+- **Accumulation of `<attached_files>` across turns**: the filter's own
+  block is rebuilt each turn as the union of **all** images of the
+  conversation, and with native function calling the core's
+  `add_file_context()` adds its own blocks *after* the filter runs — so
+  the last user message can carry several `<attached_files>` blocks and
+  every image ever attached. This cannot be fixed from the filter (it
+  runs too early in the pipeline); see `DESIGN.md` → "Attached-Files
+  Accumulation — Verified Mechanism" for the verified pipeline order and
+  the pipe-based cleanup design.
