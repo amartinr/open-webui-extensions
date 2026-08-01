@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.3.0
+version: 0.3.1
 licence: MIT
 """
 
@@ -349,6 +349,103 @@ class Tools:
             lines.append("| " + " | ".join(self._esc_md(c) for c in row) + " |")
         return "\n".join(lines)
 
+    # ──────────────────────────────────────────────
+    #  Hierarchical JSON → Markdown (research-based, DESIGN §8.8)
+    #
+    #  Strategy per llm-md / research (1000+ cases):
+    #    - shallow objects → key-value bullet list (bold keys)
+    #    - uniform arrays of objects → Markdown table
+    #    - deep nesting (depth > 3) → indented hierarchy / YAML-ish bullets
+    #    - never embed raw JSON in a bullet (hurts comprehension)
+    #  Keys are humanized (snake_case → Title Case); scalar values stay raw
+    #  (true/false/null, numbers without unit prefixes).
+    # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _humanize_key(key: Any) -> str:
+        s = str(key).strip()
+        if not s:
+            return ""
+        words = s.replace("_", " ").replace("-", " ").split()
+        return " ".join(w[:1].upper() + w[1:] if w else w for w in words)
+
+    @staticmethod
+    def _md_scalar(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    def _md_uniform_keys(self, items: list) -> Optional[list[str]]:
+        """Return the shared keys when >80% of the dicts share them."""
+        if len(items) < 2:
+            return None
+        from collections import Counter
+
+        key_sets = [tuple(sorted(d.keys())) for d in items if isinstance(d, dict)]
+        if not key_sets or len(key_sets) < 2:
+            return None
+        common = Counter(key_sets).most_common(1)[0]
+        if common[1] / len(key_sets) >= 0.8:
+            return list(common[0])
+        return None
+
+    def _md_hierarchy(self, value: Any, depth: int = 0) -> str:
+        """Render arbitrary JSON as hierarchical Markdown bullets."""
+        pad = "  " * depth
+        if isinstance(value, dict):
+            if not value:
+                return f"{pad}- (empty)"
+            lines = []
+            for key, val in value.items():
+                label = self._humanize_key(key)
+                if isinstance(val, dict) and val:
+                    lines.append(f"{pad}- **{label}**")
+                    lines.append(self._md_hierarchy(val, depth + 1))
+                elif isinstance(val, list):
+                    if val and self._md_uniform_keys(val):
+                        keys = self._md_uniform_keys(val)
+                        rows = [[item.get(k) for k in keys] for item in val]
+                        table = self._md_table([self._humanize_key(k) for k in keys], rows)
+                        for tl in table.split("\n"):
+                            lines.append(pad + "  " + tl)
+                    else:
+                        lines.append(
+                            f"{pad}- **{label}**: " + ", ".join(self._md_scalar(x) for x in val)
+                        )
+                else:
+                    lines.append(f"{pad}- **{label}**: {self._md_scalar(val)}")
+            return "\n".join(lines)
+        if isinstance(value, list):
+            if not value:
+                return f"{pad}- (empty)"
+            if self._md_uniform_keys(value):
+                keys = self._md_uniform_keys(value)
+                rows = [[item.get(k) for k in keys] for item in value]
+                return self._md_table([self._humanize_key(k) for k in keys], rows)
+            lines = []
+            for i, item in enumerate(value, 1):
+                if isinstance(item, dict) and item:
+                    inner = self._md_hierarchy(item, depth)
+                    inner_lines = inner.split("\n")
+                    head = inner_lines[0]
+                    prefix = f"{pad}{i}. "
+                    if head.startswith(pad + "- "):
+                        head = prefix + head[len(pad + "- "):]
+                    elif head.startswith(pad):
+                        head = prefix + head[len(pad):]
+                    else:
+                        head = prefix + head
+                    out_lines = [head]
+                    for line in inner_lines[1:]:
+                        out_lines.append("  " + line if line.strip() else line)
+                    lines.append("\n".join(out_lines))
+                else:
+                    lines.append(f"{pad}{i}. {self._md_scalar(item)}")
+            return "\n".join(lines)
+        return f"{pad}- {self._md_scalar(value)}"
+
     def _render(self, kind: str, payload: Any) -> str:
         if kind == "profile":
             return self._render_profile(payload)
@@ -380,8 +477,10 @@ class Tools:
             if value is not None:
                 lines.append(f"- {label}: {value}")
         perms = p.get("permissions")
-        if perms:
-            lines.append(f"- Permissions: {json.dumps(perms, ensure_ascii=False)}")
+        if isinstance(perms, dict) and perms:
+            lines.append("")
+            lines.append("**Permissions**")
+            lines.append(self._md_hierarchy(perms))
         return "\n".join(lines)
 
     def _render_models(self, p: dict) -> str:
@@ -421,7 +520,10 @@ class Tools:
                 continue
             role = message.get("role", "message")
             lines.append(f"**{role}**")
-            lines.append(str(content))
+            if isinstance(content, str):
+                lines.append(content)
+            else:
+                lines.append(self._md_hierarchy(content))
             lines.append("")
         return "\n".join(lines).rstrip()
 

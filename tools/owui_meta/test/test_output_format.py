@@ -40,7 +40,60 @@ async def test_profile_is_bullets():
     assert "- Email: amartinr@lowendlab.com" in out
     assert "- Role: user" in out
     assert "- ID: 16dcaa6d-7122-4cd5-bc01-823064998d75" in out
+    assert "**Permissions**" in out
+    # permissions rendered as a hierarchy, NOT raw JSON
+    assert "- **Chat**" in out
+    assert "  - **Controls**: true" in out
+    assert "{" not in out
+    assert "}" not in out
     assert not out.lstrip().startswith("{")  # not JSON
+
+
+async def test_profile_permissions_hierarchy_full():
+    # A permissions object like the real v0.10.2 profile: deeply nested, must
+    # render as indented bullets (hybrid strategy), never embedded JSON.
+    perms = {
+        "workspace": {"models": False, "knowledge": True, "prompts": True},
+        "chat": {"controls": True, "file_upload": True, "delete": True},
+        "features": {"api_keys": True, "web_search": True},
+        "settings": {"interface": True},
+    }
+
+    def handler(request):
+        return json_response({"id": "u1", "name": "Abel", "role": "user", "permissions": perms})
+
+    out = await md_tools(handler).get_my_profile(FakeRequest())
+    assert "- **Workspace**" in out
+    assert "  - **Models**: false" in out
+    assert "  - **Knowledge**: true" in out
+    assert "- **Features**" in out
+    assert "  - **Api Keys**: true" in out  # snake_case key humanized
+    assert "{" not in out
+    assert "}" not in out
+
+
+async def test_multimodal_chat_content_renders_hierarchy():
+    # Chat message content can be a list of parts (multimodal); it must render
+    # as hierarchy, not Python repr / JSON.
+    def handler(request):
+        return json_response({
+            "id": CHAT_ID, "title": "Media",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "here is the result"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+                ]},
+            ],
+        })
+
+    out = await md_tools(handler).get_chat(CHAT_ID, __request__=FakeRequest())
+    assert "**assistant**" in out
+    assert "1. **Type**: text" in out
+    assert "  - **Text**: here is the result" in out
+    assert "2. **Type**: image_url" in out
+    assert "  - **Image Url**" in out
+    assert "    - **Url**: data:image/png;base64,AAA" in out
+    assert "{" not in out
 
 
 async def test_files_table_with_raw_bytes():

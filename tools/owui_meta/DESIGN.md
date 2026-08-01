@@ -378,6 +378,17 @@ Implementation notes:
 - **File content → fenced block** with the content type as language hint (e.g. ` ```csv `). Binary content → a one-line note with metadata (no bytes).
 - **Chat history → heading + per-message blocks** (`**user** …` / `**assistant** …`).
 - **Errors → plain-text one-liners**, not JSON: `Error: Not authenticated: …`.
+- **Nested objects → hierarchical bullets, never embedded JSON.** Deeply nested structures (e.g. the profile's `permissions` object, depth ~3) are rendered as an indented bullet hierarchy with humanized keys (`snake_case` → `Title Case`):
+  ```markdown
+  **Permissions**
+  - **Workspace**
+    - **Models**: false
+    - **Knowledge**: true
+    - **Models Import**: false
+  - **Chat**
+    - **Controls**: true
+  ```
+  Scalar values stay raw (`true`/`false`/`null`, numbers without prefixes). Multimodal chat content (a list of parts) renders the same way. This follows the research-backed JSON→Markdown strategies (llm-md / 1000+ case study): key-value bullet lists for shallow objects, tables for uniform arrays (>80% key similarity), indented hierarchy for deep nesting, and **never raw JSON embedded in a bullet** (it hurts comprehension).
 
 **Worked examples** (what the model sees for `get_my_files()` and `get_my_chats()`):
 

@@ -137,6 +137,7 @@ Implements DESIGN §8.8 (decision 2026-08-01), pulled ahead of Iterations 2–5 
 - Markdown renderers per resource: lists → tables, profile → bullets, chat → heading + per-message blocks, file text → fenced block with language hint, file binary → metadata note, errors → plain-text `Error: …` one-liners.
 - **Raw numeric values** (byte sizes passed through unformatted — `8796`, no `KB` prefix), readable UTC dates, **IDs always present** in tables for follow-up calls.
 - `_error` returns `Error: <message>` in markdown / `{"error": …}` in json; `_ok` dispatches by kind.
+- Nested objects (profile `permissions`, multimodal chat content) render as **indented bullet hierarchies** with humanized keys — never embedded JSON (research-backed JSON→MD strategy).
 - Tests: `test/test_output_format.py` (markdown rendering, raw bytes, no token, json mode still works); existing suites updated to opt into `output_format="json"` where they parse structured output.
 
 **Definition of done:** the tool returns readable Markdown by default (tables/bullets), JSON remains available via valve — 54 tests green.
