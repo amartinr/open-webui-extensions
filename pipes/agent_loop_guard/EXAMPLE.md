@@ -81,3 +81,10 @@ Turn 4 (you type "tell me more now", no new image)
 - **After**: each file lives exactly once, in the message where it was
   uploaded → the shared history is identical turn after turn → full
   cache and a flat block.
+
+> **Update (filter v2.12.0)**: the `image_filter` now announces pasted
+> images only in the turn they are pasted (it no longer re-announces
+> re-hydrated history), so the "moving union block" in the BEFORE panel
+> no longer occurs even without the pipe. The pipe's cleanup still
+> collapses the core's per-message blocks with the filter's current-turn
+> block and deduplicates by UUID.

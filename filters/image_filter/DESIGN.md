@@ -110,27 +110,31 @@ is inserted to prevent 400 errors from strict providers.
 
 ## Known Limitations
 
+- **Pasted images are announced only once** (v2.12.0): the filter now
+  only tags images from the **last user message** (the current turn's
+  attachments). Re-hydrated history from earlier turns is stripped but
+  not re-announced, so no image is re-injected forever. Consequence: the
+  model retains conversational memory of the image but loses the file
+  reference (id/URL) in later turns — if a tool needs it again the user
+  re-attaches the image.
 - **Re-persistence of pasted images across turns (mostly fixed)**: pasted
-  images stay in the stored chat message as `data:` URIs, and the
-  filter's Step 2 walks *all* user messages, so every turn still hashes
-  the pasted content. Since v2.10.0 the content-hash dedup (below)
-  reuses the first persisted file, so one paste yields one file on disk
-  / one `files` row instead of N copies after N turns. Remaining caveat:
-  the check-then-insert has no unique index behind it (TOCTOU), so two
-  strictly concurrent requests could still write two files — worst case
-  equals the pre-dedup behavior, it never reuses another user's file.
-- **Growing duplicate references (partially fixed)**: for `+` uploads,
-  historical messages are re-hydrated with `image_url` blocks each turn;
-  since v2.11.0 the filter's own `<attached_files>` block no longer
-  grows (tag dedup by id/url, see "Tag Deduplication" below). With
-  native function calling, `add_file_context()` (which runs *after*
-  filters) still prepends its own `<attached_files>` block from the
-  stored message `files`, so the last user message can carry two blocks
-  — the core's duplicates cannot be fixed from the filter. See
-  "Attached-Files Accumulation — Verified Mechanism" below for the
-  verified pipeline order, the two independent sources of blocks, and
-  the pipe-based cleanup design (not implemented — pipe code stays
-  untouched in this branch).
+  images stay in the stored chat message as `data:` URIs. Since v2.12.0
+  the filter only persists/announces them in the turn they are pasted
+  (last user message); earlier, every turn hashed the pasted content.
+  Since v2.10.0 the content-hash dedup reuses the first persisted file,
+  so one paste yields one file on disk / one `files` row instead of N
+  copies after N turns. Remaining caveat: the check-then-insert has no
+  unique index behind it (TOCTOU), so two strictly concurrent requests
+  could still write two files — worst case equals the pre-dedup
+  behavior, it never reuses another user's file.
+- **Core `add_file_context()` blocks remain**: with native function
+  calling, the core still prepends its own `<attached_files>` block per
+  stored user message *after* the filter runs (from stored
+  `message.files`). Those blocks are per-message, stable and cached; the
+  `agent_loop_guard` pipe collapses and deduplicates them with the
+  filter's block. See "Attached-Files Accumulation — Verified Mechanism"
+  below for the verified pipeline order, the two independent sources of
+  blocks, and the pipe-based cleanup design.
 - **Authenticated downloads**: `/api/v1/files/{id}/content` requires
   authentication (JWT or API key) and ownership checks. External tools
   fetching the absolute URL need valid credentials; the filter itself
@@ -267,23 +271,28 @@ Both can be present in the final payload: with native function calling the
 same turn can carry the filter's block **plus** one core block per
 historical user message that has files.
 
-### Why the block grows every turn (observed behaviour)
+### Why the block grows every turn (observed behaviour — fixed in v2.12.0)
 
 1. The core re-hydrates the stored history each turn: every stored user
    message's `files` (images) become `image_url` parts, then base64
    (line 2396).
-2. The filter's Step 2 walks **all** user messages, strips those
-   `image_url` parts and tags them — so its own block is rebuilt each turn
-   as the union of **all images of the conversation**, not just the
-   current turn's.
+2. **Before v2.12.0** the filter's Step 2 walked **all** user messages,
+   stripped those `image_url` parts and tagged them — so its own block
+   was rebuilt each turn as the union of **all images of the
+   conversation**. Since v2.12.0 the filter only tags images from the
+   **last user message** (the current turn); re-hydrated history is
+   stripped but not re-announced, so the filter's block only ever
+   contains the current turn's images.
 3. `add_file_context()` adds one block per stored user message that has
-   files.
+   files (stable, cached).
 
-Net effect: the last user message carries an `<attached_files>` block with
-every image ever attached (the filter's), plus the core's blocks, every
-turn. The v2.11.0 dedup only collapses duplicates **within one request** —
-it does not stop the set from growing linearly with new images, nor does
-it touch the core's blocks.
+Net effect (v2.12.0): the filter's block carries only the current turn's
+images; the core's per-message blocks carry each `+` upload once in its
+own message. The `agent_loop_guard` pipe collapses the core blocks with
+the filter's block and deduplicates by UUID (image tags only). The
+v2.11.0 dedup collapses duplicates **within one request**; v2.12.0
+removes the cross-turn re-announcement that made pasted images reappear
+forever.
 
 ### Unverified claim: "the id changed between the raw and the resolved form"
 
@@ -297,15 +306,15 @@ different `id`. This could not be reproduced from the code:
 **unverified**. The path-based dedup key below is robust either way for
 resolved URLs; a bare-UUID `url` needs its own fallback (design note 4).
 
-### Design for the pipe cleanup (not implemented — out of this branch's scope)
+### Design for the pipe cleanup (implemented in `pipes/agent_loop_guard`)
 
 The pipe is the last code that sees the assembled payload:
 `generate_function_chat_completion()` calls `pipe(body, ...)` and its
 return goes straight to the provider/gateway (functions.py:150-345). This
 repo's `agent_loop_guard` pipe is already a manifold proxy for all models
 (single-user deployment) and already mutates `messages` in-place before
-forwarding — it would cover every chat without extra deployment. A
-cleanup step in the pipe could:
+forwarding — it covers every chat without extra deployment. The cleanup
+step (v2.2.0+) does:
 
 1. **Collapse** all `<attached_files>` blocks (filter's + core's, across
    all messages) into a single block on the last user message.

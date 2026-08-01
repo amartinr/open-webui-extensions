@@ -171,6 +171,12 @@ filter's absolute form). **Non-image tags (PDFs, documents) are left
 untouched**: they are never deduplicated nor rewritten. Disable with the
 `ATTACHED_FILES_CLEANUP` valve.
 
+Since filter v2.12.0, pasted images are announced only in the turn they
+are pasted (the filter no longer re-announces re-hydrated history), so the
+"moving union block" scenario no longer occurs — the pipe's remaining job
+is to collapse the core's per-message blocks with the filter's current-
+turn block and deduplicate by UUID.
+
 See `DESIGN.md` §18 and `filters/image_filter/DESIGN.md` →
 "Attached-Files Accumulation" for details, and `EXAMPLE.md` for a
 side-by-side before/after walkthrough.

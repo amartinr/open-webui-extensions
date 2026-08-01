@@ -20,24 +20,30 @@ image files stored on disk by Open WebUI.
 
 1. Images uploaded via `+` (already persisted on disk by Open WebUI's
    upload API) are removed from the LLM payload without touching the file
-2. Pasted images (Ctrl+V) and re-hydrated history images arrive as
-   `data:` URIs (base64) — `convert_url_images_to_base64()` already ran
-   before the filter. These are persisted as permanent files with
-   **content-hash dedup**: the URI is decoded once, `sha256` is
-   computed over the raw bytes (the same digest Open WebUI stores in
-   `files.meta["file_hash"]`), and an existing file owned by the user
-   with the same hash is reused instead of writing a new one — then
-   removed from the payload
+2. Pasted images (Ctrl+V) arrive as `data:` URIs (base64) —
+   `convert_url_images_to_base64()` already ran before the filter. They
+   are persisted as permanent files with **content-hash dedup**: the URI
+   is decoded once, `sha256` is computed over the raw bytes (the same
+   digest Open WebUI stores in `files.meta["file_hash"]`), and an
+   existing file owned by the user with the same hash is reused instead
+   of writing a new one — then removed from the payload
 3. A deduplicated `<attached_files>` block with `<file>` tags is
-   injected so the model knows about the images — the same file
-   referenced from history and the current message is tagged only once
-4. Non-image files (PDFs, documents) pass through unchanged
+   injected so the model knows about the images of the **current turn**
+   — the same file referenced from the current message and `body["files"]`
+   is tagged only once
+4. Re-hydrated history images (from earlier turns) are **stripped but
+   not re-announced**: their base64 never reaches the LLM, but they are
+   not re-tagged either — they were already announced in their own turn,
+   the model retains conversational memory, and re-injecting an
+   ever-staler image every turn wastes tokens and breaks prefix caching
+5. Non-image files (PDFs, documents) pass through unchanged
 
 ## File References
 
 The `<attached_files>` block contains one `<file>` tag per **unique**
-image — the same file referenced from history and the current message
-is tagged only once (deduplicated within each request):
+image of the **current turn** — the same file referenced from the
+current message and `body["files"]` is tagged only once (deduplicated
+within each request):
 
 ```xml
 <file type="image" id="abc123" url="https://your-owui-host.example/api/v1/files/abc123/content"/>
@@ -51,12 +57,15 @@ tools (e.g. ComfyUI nodes that load images by URL).
 
 ## Known Limitations
 
-- **Accumulation of `<attached_files>` across turns**: the filter's own
-  block is rebuilt each turn as the union of **all** images of the
-  conversation, and with native function calling the core's
-  `add_file_context()` adds its own blocks *after* the filter runs — so
-  the last user message can carry several `<attached_files>` blocks and
-  every image ever attached. This cannot be fixed from the filter (it
-  runs too early in the pipeline); see `DESIGN.md` → "Attached-Files
-  Accumulation — Verified Mechanism" for the verified pipeline order and
-  the pipe-based cleanup design.
+- **Pasted images are announced only once** (in the turn they are
+  pasted). In later turns the re-hydrated history is stripped but not
+  re-tagged, so the model no longer sees the file reference in context —
+  it retains conversational memory of the image, but if a tool needs the
+  file id/URL again the user re-attaches it. (v2.12.0)
+- **Core `add_file_context()` blocks remain**: with native function
+  calling, the core still prepends its own `<attached_files>` block per
+  stored user message *after* the filter runs. Those blocks are
+  per-message, stable and cached; the `agent_loop_guard` pipe collapses
+  and deduplicates them with the filter's block. See `DESIGN.md` →
+  "Attached-Files Accumulation — Verified Mechanism" for the pipeline
+  order and the pipe-based cleanup.

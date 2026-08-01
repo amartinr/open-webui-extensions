@@ -479,17 +479,19 @@ any error is logged and the payload is forwarded unchanged.
 Two independent sources inject `<attached_files>` blocks into the payload:
 
 1. The **image_filter inlet** prepends ONE block to the **last** user
-   message — the union of all conversation images, with absolute URLs.
+   message — the **current turn's** images only (since filter v2.12.0;
+   before that it was the union of all conversation images, re-announced
+   every turn).
 2. The core's **`add_file_context()`** (runs after filters, native function
    calling only) prepends one block **per stored user message** that has
    files — that message's own files, relative URLs.
 
-The filter's union block **moves** to the new last user message every turn
-and re-tags files already tagged in earlier messages. That is what breaks
-prefix caching: the last user message differs between turn N (has the union
-block) and turn N+1 (does not), so the provider's cache cannot extend past
-it. A naive "collapse everything into one block on the last message" keeps
-the moving/growing block and does not fix the problem.
+So the payload can carry several per-message core blocks plus the
+filter's current-turn block, with the same file tagged in more than one
+place (a `+` upload is in its own message's core block and again in the
+current-turn filter block when re-attached; a pasted image that the core
+skips is only in the filter's block). That duplication is what the pipe
+collapses.
 
 ### Semantics (deterministic, cache-safe)
 

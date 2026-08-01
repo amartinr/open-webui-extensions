@@ -1,9 +1,9 @@
 """
 title: Image to File Storage
 author: pi-agent
-description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects a deduplicated <attached_files> block with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images.
+description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects a deduplicated <attached_files> block with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images. Pasted images are announced only in the turn they are pasted — later turns strip the re-hydrated history without re-announcing it.
 required_open_webui_version: 0.5.0
-version: 2.11.0
+version: 2.12.0
 """
 
 import base64
@@ -219,27 +219,45 @@ class Filter:
 
         # ── Step 2: strip image_url from message content ────────────────────
         if messages:
-            for msg in messages:
+            # Only the LAST user message can carry a *new* attachment for
+            # this turn. Re-hydrated history (stored data: URIs / image_url
+            # from earlier turns) is stripped but NOT re-announced: those
+            # images were already tagged in their own turn, and re-tagging
+            # them every turn would re-inject an ever-staler image forever
+            # (wasted tokens, breaks prefix caching). The model retains
+            # conversational memory of earlier attachments; if the user
+            # needs the file again they re-attach it.
+            last_user_idx = None
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    last_user_idx = i
+                    break
+
+            for idx, msg in enumerate(messages):
                 if msg.get("role") != "user":
                     continue
                 content = msg.get("content")
                 if not isinstance(content, list):
                     continue
+                announce = idx == last_user_idx
                 new_content = []
                 for item in content:
                     if not _is_image_url_block(item):
                         new_content.append(item)
                         continue
                     url = item.get("image_url", {}).get("url", "")
-                    if _is_base64_uri(url):
-                        persisted = await self._persist_base64(url, __request__, __metadata__, __user__)
-                        if persisted:
-                            purl, fid = persisted
-                            _append_file_tag(file_tags, seen, {"id": fid, "url": purl, "type": "image"}, base_url)
+                    if announce:
+                        if _is_base64_uri(url):
+                            persisted = await self._persist_base64(url, __request__, __metadata__, __user__)
+                            if persisted:
+                                purl, fid = persisted
+                                _append_file_tag(file_tags, seen, {"id": fid, "url": purl, "type": "image"}, base_url)
+                            else:
+                                file_tags.append(_format_file_tag({"url": "(base64 stripped)", "type": "image"}, base_url))
                         else:
-                            file_tags.append(_format_file_tag({"url": "(base64 stripped)", "type": "image"}, base_url))
-                    else:
-                        _append_file_tag(file_tags, seen, {"url": url, "type": "image"}, base_url)
+                            _append_file_tag(file_tags, seen, {"url": url, "type": "image"}, base_url)
+                    # else: historical re-hydration — stripped (keeps base64
+                    # out of the LLM context) but not re-announced.
                 msg["content"] = new_content if new_content else [{"type": "text", "text": ""}]
 
         # ── Step 3: inject <attached_files> ─────────────────────────────────
