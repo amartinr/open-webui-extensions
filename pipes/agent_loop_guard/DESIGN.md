@@ -378,6 +378,7 @@ counter so the user knows how many tool calls remain.
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before runaway guard fires. `0` = disabled |
 | `MAX_CONSECUTIVE_TOOL_CALLS` | `4` | Consecutive identical calls before loop guard fires (min 3) |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to remove |
+| `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks across user messages (cache-safe: each file tagged once, earliest message wins). `False` = forward payloads unchanged |
 
 **Validation:** `MAX_TOOL_CALLS_PER_TURN` must be **greater than**
 `MAX_CONSECUTIVE_TOOL_CALLS` when both are enabled. Enforced by Pydantic's
@@ -462,3 +463,75 @@ gateway destination.
 | R3 | `tool_choice: "none"` causes raw DSML leakage | Pipe forwards transparently; the gateway handles DSML parsing. |
 | R4 | DSML buffer corrupts `reasoning_content` | No buffering in `_stream()` — transparent SSE proxy. |
 | R5 | Guard text appears as tool result content | By design — the guard message is a legitimate tool result. The LLM is instructed via the message text to stop and summarise. |
+
+---
+
+## 18. Attached-Files Cleanup (v2.2.0)
+
+Since v2.2.0 the pipe also cleans up `<attached_files>` blocks (see
+`filters/image_filter/DESIGN.md` → "Attached-Files Accumulation" for the
+problem statement). The cleanup runs after the guard analysis and blocklist,
+just before the payload is forwarded to the gateway, and is **fail-open**:
+any error is logged and the payload is forwarded unchanged.
+
+### Why the pipe, and why cache-safe
+
+Two independent sources inject `<attached_files>` blocks into the payload:
+
+1. The **image_filter inlet** prepends ONE block to the **last** user
+   message — the union of all conversation images, with absolute URLs.
+2. The core's **`add_file_context()`** (runs after filters, native function
+   calling only) prepends one block **per stored user message** that has
+   files — that message's own files, relative URLs.
+
+The filter's union block **moves** to the new last user message every turn
+and re-tags files already tagged in earlier messages. That is what breaks
+prefix caching: the last user message differs between turn N (has the union
+block) and turn N+1 (does not), so the provider's cache cannot extend past
+it. A naive "collapse everything into one block on the last message" keeps
+the moving/growing block and does not fix the problem.
+
+### Semantics (deterministic, cache-safe)
+
+- **Each file is tagged exactly once**, in the **earliest user message**
+  where it appears (canonical key: URL path of
+  `/api/v1/files/{id}/content` → collapses the filter's absolute URL and
+  the core's relative URL of the same file; then `id`; then a bare-UUID
+  `url`; then the full external URL).
+- Multiple blocks in one message **collapse into one** (core's exact
+  format), preserving attribute order.
+- Historical per-message blocks stay **byte-stable between turns** (pure
+  function of the payload + stored history), so the cached prefix extends
+  through the whole conversation — the same depth as without the filter.
+- The last user message only keeps **genuinely new** images; every image
+  remains visible to the model via its original message's block.
+- Relative URLs are normalized to **absolute** (`webui.url` via `Config`,
+  falling back to `__request__.base_url`) so downstream tools (ComfyUI
+  URL-loading nodes) keep working.
+- Placeholder tags (`url="(base64 stripped)"`) are preserved and never
+  deduplicated (each reports a distinct persistence failure).
+- Only **user** messages are touched; system/assistant/tool messages and
+  non-text content parts pass through untouched.
+
+### Interaction with the tool-call loop
+
+The cleanup mutates message dicts **in place** (same objects that survive
+the middleware's shallow copies, exactly like the guard does). It is
+**idempotent**: re-running it on an already-cleaned list is a no-op, so
+tool-call iterations re-submitting the shared history stay consistent.
+
+### Valve
+
+`ATTACHED_FILES_CLEANUP` (admin valve, default `True`) turns the cleanup
+on/off. When off, payloads are forwarded exactly as Open WebUI built them.
+
+### Edge cases
+
+| Case | Handling |
+|------|----------|
+| Same file re-attached in a later turn | Tagged only at first occurrence; still visible via that message's block |
+| Blocks in `str` content vs list content | Both parsed; blocks may be concatenated (core+filter) or merged into the first text part |
+| `<attached_files>` block without `<file>` tags | Ignored — user text that literally contains the tag is left untouched |
+| Message content empty after stripping | Empty text part inserted (`[{"type": "text", "text": ""}]`) to avoid 400s on strict providers |
+| `base_url` unavailable | Relative URLs kept as-is (dedup still applies) |
+| Any parsing/dedup error | Logged; payload forwarded unchanged (fail-open) |

@@ -113,6 +113,7 @@ Configured in the Function admin panel.
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before runaway guard fires. `0` = disabled |
 | `MAX_CONSECUTIVE_TOOL_CALLS` | `4` | Consecutive identical calls before loop guard fires (min 3) |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
+| `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks across user messages (cache-safe: each file tagged once, earliest message wins). `False` = forward payloads unchanged |
 
 > **Validation**: `MAX_TOOL_CALLS_PER_TURN` must be **greater than**
 > `MAX_CONSECUTIVE_TOOL_CALLS` when both are enabled. The pipe validates
@@ -147,6 +148,26 @@ These template variables are resolved at runtime with the current user's
 data. Unlike Open WebUI's global `ENABLE_FORWARD_USER_INFO_HEADERS` (which
 only works for native OpenAI/Ollama routing), this works inside the pipe
 for any gateway destination.
+
+## Attached-Files Cleanup
+
+Since v2.2.0 the pipe also cleans up `<attached_files>` blocks that Open
+WebUI injects (the `image_filter` inlet prepends a growing union block to
+the last user message; the core's `add_file_context()` prepends one block
+per stored user message). Without cleanup, the last user message carries
+duplicate tags and the union block moves/grows every turn, which breaks
+LLM prefix caching.
+
+The cleanup is **cache-safe**: each file is tagged exactly once, in the
+earliest user message where it appears, so the history prefix stays
+byte-identical between turns (deterministic, idempotent, fail-open). The
+model still sees every image via its original message's block; the last
+user message only keeps genuinely new images. Relative URLs are normalized
+to absolute (`webui.url`, fallback `request.base_url`) so downstream tools
+keep working. Disable with the `ATTACHED_FILES_CLEANUP` valve.
+
+See `DESIGN.md` §18 and `filters/image_filter/DESIGN.md` →
+"Attached-Files Accumulation" for details.
 
 ---
 

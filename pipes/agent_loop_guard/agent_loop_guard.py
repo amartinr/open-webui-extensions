@@ -2,7 +2,7 @@
 title: Agent Loop Guard
 author: open-webui-tools
 author_url: https://github.com/your-org/open-webui-tools
-version: 2.1.0
+version: 2.2.0
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
 """
@@ -50,6 +50,182 @@ def _build_guard_message(status: str, tool: str | None, total: int, max_calls: i
     return ""
 
 
+# --------------------------------------------------------------------------
+# Attached-files cleanup (cache-safe)
+# --------------------------------------------------------------------------
+#
+# Open WebUI injects <attached_files> blocks in two places:
+#   - the image_filter inlet prepends ONE block to the LAST user message
+#     (union of all conversation images, absolute URLs);
+#   - the core's add_file_context() prepends one block per stored user
+#     message that has files (that message's own files, relative URLs).
+#
+# The filter's union block MOVES to the last user message every turn and
+# re-tags files already tagged in earlier messages' core blocks. That
+# breaks prefix caching: the last user message differs between turn N
+# (has the union block) and turn N+1 (does not), so the provider's cache
+# cannot extend past it.
+#
+# This cleanup is deterministic (a pure function of the payload) and
+# cache-safe: each file is tagged exactly once, in the earliest user
+# message where it appears. Historical per-message blocks stay byte-
+# stable between turns (as long as stored history is unchanged), so the
+# cached prefix extends through the whole history. The model still sees
+# every image via the historical per-message blocks; the last user
+# message only keeps genuinely new images. Multiple blocks in one
+# message collapse into one; relative URLs are normalized to absolute
+# (webui.url / request base URL) so downstream tools keep working.
+#
+# Fail-open by design: callers wrap the call in try/except and forward
+# the payload unchanged on error.
+
+_BLOCK_RE = re.compile(r"<attached_files>(.*?)</attached_files>", re.DOTALL)
+_FILE_TAG_RE = re.compile(r"<file\b([^>]*?)/?>")
+_ATTR_RE = re.compile(r'([\w:.-]+)="([^"]*)"')
+_FILES_URL_RE = re.compile(r"/api/v1/files/([^/]+)/content")
+_PLACEHOLDER = "(base64 stripped)"
+
+
+def _parse_file_tags(text: str) -> list[dict]:
+    """Parse all `<file .../>` tags inside `<attached_files>` blocks in `text`.
+
+    Returns a list of tag dicts: `{"raw": str, "attrs": [(name, value), ...]}`
+    with attribute order preserved. Blocks that contain no `<file>` tag are
+    ignored (defensive: user text that literally contains `<attached_files>`
+    is left untouched).
+    """
+    tags = []
+    for block in _BLOCK_RE.finditer(text or ""):
+        for raw in _FILE_TAG_RE.findall(block.group(1)):
+            attrs = [(m.group(1), m.group(2)) for m in _ATTR_RE.finditer(raw)]
+            if not attrs:
+                continue
+            tags.append({"raw": f"<file{raw}>", "attrs": attrs})
+    return tags
+
+
+def _file_dedup_key(tag: dict) -> str:
+    """Canonical key for a parsed `<file>` tag.
+
+    Order: URL path of `/api/v1/files/{id}/content` (collapses the
+    filter's absolute URL and the core's relative URL of the same file),
+    then the `id` attribute, then a bare-UUID `url` (the unverified raw
+    upload form), then the full external URL. Placeholder tags
+    (`(base64 stripped)`) return "" — they are never deduplicated.
+    """
+    attrs = dict(tag["attrs"])
+    url = attrs.get("url", "") or ""
+    if url and url != _PLACEHOLDER:
+        m = _FILES_URL_RE.search(url)
+        if m:
+            return f"id:{m.group(1)}"
+        if "/" not in url and ":" not in url:
+            return f"id:{url}"  # bare UUID (raw upload form)
+        return f"url:{url}"
+    file_id = attrs.get("id", "") or ""
+    if file_id and file_id != _PLACEHOLDER:
+        return f"id:{file_id}"
+    return ""
+
+
+def _normalize_tag(tag: dict, base_url: str) -> str:
+    """Re-emit the tag, replacing a relative `url` with an absolute one.
+
+    Attribute order is preserved (deterministic). Only URLs starting with
+    `/` are prefixed; `data:` URIs, absolute URLs and bare UUIDs pass
+    through unchanged.
+    """
+    attrs = tag["attrs"]
+    if not base_url:
+        return tag["raw"]
+    out = []
+    for name, value in attrs:
+        if name == "url" and value.startswith("/"):
+            value = f"{base_url}{value}"
+        out.append(f'{name}="{value}"')
+    return "<file " + " ".join(out) + "/>"
+
+
+def _build_block(tags: list[dict], base_url: str) -> str:
+    """Build a single `<attached_files>` block (core's exact format)."""
+    if not tags:
+        return ""
+    lines = [_normalize_tag(t, base_url) for t in tags]
+    return "<attached_files>\n" + "\n".join(lines) + "\n</attached_files>\n\n"
+
+
+def _dedupe_tags(tags: list[dict], seen: set[str]) -> list[dict]:
+    """Keep tags whose canonical key has not been seen before.
+
+    Placeholder tags (key "") are always kept and never added to `seen`.
+    """
+    kept = []
+    for tag in tags:
+        key = _file_dedup_key(tag)
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        kept.append(tag)
+    return kept
+
+
+def _cleanup_attached_files(messages: list, base_url: str = "") -> None:
+    """Collapse and deduplicate `<attached_files>` blocks across user messages.
+
+    Pure function of the payload (deterministic → cache-safe). Each file is
+    tagged exactly once, in the earliest user message where it appears;
+    multiple blocks in one message collapse into one; relative URLs are
+    normalized to absolute when `base_url` is available. Mutates `messages`
+    in place (the same dicts survive the middleware's shallow copies).
+    Fail-open by design: callers wrap in try/except and forward unchanged.
+    """
+    seen: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+
+        content = message.get("content")
+        if isinstance(content, str):
+            tags = _parse_file_tags(content)
+            if not tags:
+                continue
+            kept = _dedupe_tags(tags, seen)
+            cleaned = re.sub(r"^\n+", "", _BLOCK_RE.sub("", content))
+            block = _build_block(kept, base_url)
+            if block:
+                message["content"] = block + cleaned
+            elif cleaned:
+                message["content"] = cleaned
+            else:
+                message["content"] = [{"type": "text", "text": ""}]
+
+        elif isinstance(content, list):
+            tags = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    tags.extend(_parse_file_tags(part.get("text", "")))
+            if not tags:
+                continue
+            kept = _dedupe_tags(tags, seen)
+
+            new_content = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    cleaned = re.sub(
+                        r"^\n+", "", _BLOCK_RE.sub("", part.get("text", ""))
+                    )
+                    if cleaned:
+                        new_content.append({**part, "text": cleaned})
+                else:
+                    new_content.append(part)
+
+            block = _build_block(kept, base_url)
+            if block:
+                new_content.insert(0, {"type": "text", "text": block})
+            message["content"] = new_content if new_content else [{"type": "text", "text": ""}]
+
+
 class Pipe:
     class Valves(BaseModel):
         GATEWAY_BASE_URL: str = Field(
@@ -84,6 +260,13 @@ class Pipe:
             default="",
             description="Comma-separated (or newline-separated) tool names to REMOVE from the agent's tool list. "
             'Example: "delete_file, terminal_execute".',
+        )
+        ATTACHED_FILES_CLEANUP: bool = Field(
+            default=True,
+            description="Collapse and deduplicate <attached_files> blocks across user messages. "
+            "Cache-safe: each file is tagged exactly once, in the earliest user message "
+            "where it appears, so the history prefix stays byte-stable between turns. "
+            "Set to False to forward payloads unchanged.",
         )
 
         @model_validator(mode="after")
@@ -148,6 +331,26 @@ class Pipe:
     # ------------------------------------------------------------------
     # Gateway helpers
     # ------------------------------------------------------------------
+
+    async def _get_public_base_url(self, request) -> str:
+        """Return the public base URL of this Open WebUI instance.
+
+        Prefers the admin-configured "WebUI URL" setting (webui.url),
+        falling back to the request's base URL when unset. Mirrors
+        image_filter so normalized file URLs stay consistent. Returns ""
+        when neither is available (relative URLs are then left as-is).
+        """
+        try:
+            from open_webui.models.config import Config
+
+            webui_url = await Config.get("webui.url")
+            if webui_url:
+                return str(webui_url).rstrip("/")
+        except Exception as exc:
+            log.warning("Failed to read webui.url config: %s", exc)
+
+        base = getattr(request, "base_url", None)
+        return str(base).rstrip("/") if base else ""
 
     def _build_gateway_headers(
         self,
@@ -325,6 +528,7 @@ class Pipe:
         __user__: Optional[dict] = None,
         __metadata__: Optional[dict] = None,
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
+        __request__=None,
     ):
         messages = body.get("messages", [])
         if not messages:
@@ -381,8 +585,21 @@ class Pipe:
             except Exception:
                 pass
 
-        # --- Apply blocklist and forward ------------------------------------
+        # --- Apply blocklist -----------------------------------------------
         self._apply_tool_blocklist(body)
+
+        # --- Attached-files cleanup (fail-open, cache-safe) -----------------
+        if getattr(self.valves, "ATTACHED_FILES_CLEANUP", True):
+            try:
+                base_url = (
+                    await self._get_public_base_url(__request__)
+                    if __request__ is not None
+                    else ""
+                )
+                _cleanup_attached_files(messages, base_url)
+            except Exception as exc:
+                log.warning("attached_files cleanup failed (fail-open): %s", exc)
+
         payload = {**body, "model": real_model, "messages": messages}
 
         try:
