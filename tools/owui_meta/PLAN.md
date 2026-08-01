@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** In progress
+**Status:** In progress — Iterations 0, 1 and 6 **done**; Iterations 2–5 pending
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -40,7 +40,7 @@ This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iter
 
 ---
 
-## Iteration 0 — Baseline (docs + scaffolding)
+## Iteration 0 — Baseline (docs + scaffolding) ✅ DONE (commit `fd2d087`)
 
 **Commit:** `docs(owui_meta): add design document, implementation plan and scaffolding`
 
@@ -127,7 +127,7 @@ Implements DESIGN §8.6 across the list/search methods:
 
 **Definition of done:** live suite passes against the instance (or documents concrete failures as follow-ups); README complete.
 
-## Iteration 6 — Markdown-first output (pulled forward per user request) ✅ DONE (commit `a2f1d2b`)
+## Iteration 6 — Markdown-first output (pulled forward per user request) ✅ DONE (commits `3b27b22`, `e5a10ab`, `436ead7`)
 
 **Commit:** `feat(owui_meta): return markdown-first output for the model (DESIGN §8.8)`
 
@@ -141,11 +141,36 @@ Implements DESIGN §8.8 (decision 2026-08-01), pulled ahead of Iterations 2–5 
 - **Bold restricted to headings** (token saving): keys in hierarchies/tables are plain.
 - Tests: `test/test_output_format.py` (markdown rendering, raw bytes, no token, json mode still works); existing suites updated to opt into `output_format="json"` where they parse structured output.
 
-**Definition of done:** the tool returns readable Markdown by default (tables/bullets), JSON remains available via valve — 54 tests green.
+**Follow-up refinements within this iteration:**
+- `e5a10ab` — `feat(owui_meta): render nested objects as hierarchical markdown, no embedded JSON`: nested objects (profile `permissions`, multimodal chat content) were still emitted as raw JSON inside a bullet; added `_md_hierarchy` (research-backed JSON→MD strategies, llm-md) — bullets for shallow objects, tables for uniform arrays, indented hierarchy for deep nesting, humanized keys, **never raw JSON**.
+- `436ead7` — `perf(owui_meta): restrict markdown bold to headings to save tokens`: removed `**…**` from hierarchy keys and table cells; bold kept only on headings/sections.
+- DESIGN §8.8 and README updated to document both refinements.
+
+**Definition of done:** the tool returns readable Markdown by default (tables/bullets), JSON remains available via valve — 56 tests green.
 
 ---
 
-## 4. Out of scope (per DESIGN §2)
+## 5. Modifications made on the fly (deviations from the original plan)
+
+These changes were not in the initial plan; they emerged during development / live validation and were folded in as they happened.
+
+| # | When | Change | Why | Commit(s) |
+|---|---|---|---|---|
+| 1 | After Iter 1 (live test) | **Token is an `HTTPAuthorizationCredentials` object, not a str** — `_require_token` reads `.credentials` | v0.10.2 `AuthTokenMiddleware` stores the object in `request.state.token`; the original DESIGN §3.1 assumed a string. Live session returned “No authentication token available”. | `07306c8` |
+| 2 | After Iter 1 (live test) | **`Config.get` is async** — `_resolve_base_url` became a coroutine that awaits it | v0.10.2 `Config.get(key, default=None)` is `async`; calling it without `await` raised `'coroutine' object has no attribute 'rstrip'`. | `db8c1cd` |
+| 3 | After Iter 1 (live test) | **Canonical trailing-slash route map** — listings need `/`, sub-resources and `/api/models` must not | v0.10.2 registers listing routes with a trailing slash; without it the SPA HTML catch-all returns 200. The original plan had several routes with the wrong slash. Also added `allow_ndjson` for `/api/v1/chats/all`. | `27b5ffc` |
+| 4 | Design decision (user) | **Markdown-first output** — new `output_format` valve, renderers per resource; pulled forward as Iteration 6 ahead of Iterations 2–5 | The user observed agents read plain text / tables better than JSON; the live agent output revealed the tool still returned JSON. DESIGN §8.8 added. | `f6ff876` (design), `3b27b22` |
+| 5 | Design decision (user) | **No embedded JSON in Markdown** — nested objects render as indented bullet hierarchies (research-backed, llm-md) | `permissions` was dumped as raw JSON inside a bullet; user asked for hierarchical formatting. | `e5a10ab` |
+| 6 | Design decision (user) | **Bold restricted to headings** — keys/cells plain | Save tokens; `**…**` in every key wasted ~160 tokens per `permissions` dump. | `436ead7` |
+| 7 | During Iter 1 | **Docstring contract** — reST `:param` single-line, `__*` never documented, enforced by `test/test_docstrings.py` (replicates the v0.10.2 parsers verbatim) | User asked whether docstrings were formatted as Open WebUI expects; verified against source and pinned with a regression test. | `f34b4e4`, `9c91a3f` |
+| 8 | During Iter 1 | **`output_format` valve** added to Valves (later became Iteration 6) | Needed to offer JSON as opt-in for models that prefer structured objects. | `3b27b22` |
+| 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite in Iteration 5 is still pending; these were one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
+
+**Unchanged commitments:** scope confined to `tools/owui_meta/`; one commit per iteration; Conventional Commits; all docs/code in English; no credentials ever configured or stored.
+
+---
+
+## 6. Out of scope (per DESIGN §2)
 
 - RAG/retrieval (`/api/v1/retrieval*`, `rag*`, `embed*`, `rerank*`) — globally bypassed on the instance.
 - Memories (`/api/v1/memories*`).
