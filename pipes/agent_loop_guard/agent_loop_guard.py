@@ -111,6 +111,18 @@ def _parse_file_tags(text: str) -> list[dict]:
     return tags
 
 
+def _is_image_attrs(attrs) -> bool:
+    """True when the tag describes an image (by `type` or `content_type`).
+
+    Accepts either the raw attrs list `[(name, value), ...]` or a dict.
+    """
+    if isinstance(attrs, list):
+        attrs = dict(attrs)
+    if attrs.get("type") == "image":
+        return True
+    return (attrs.get("content_type") or "").lower().startswith("image/")
+
+
 def _extract_uuid(tag: dict) -> str:
     """Extract the file UUID from a parsed `<file>` tag.
 
@@ -145,47 +157,53 @@ def _canonical_type(attrs: dict) -> str:
 def _file_dedup_key(tag: dict) -> str:
     """Canonical key for a parsed `<file>` tag.
 
-    The file UUID is unique, so dedup is a simple UUID match: the same
-    file collapses across the filter's absolute form, the core's relative
-    form, and this deployment's bare-UUID raw form. External URLs (no
-    UUID) key by the full URL. Placeholder tags (`(base64 stripped)`)
-    return "" — they are never deduplicated.
+    Only IMAGE tags take part in the cleanup; non-image tags return "" so
+    they are always kept and never participate in dedup. The file UUID is
+    unique, so dedup is a simple UUID match: the same image collapses
+    across the filter's absolute form, the core's relative form, and this
+    deployment's bare-UUID raw form. External image URLs (no UUID) key by
+    the full URL. Placeholder tags (`(base64 stripped)`) return "" — they
+    are never deduplicated either.
     """
+    attrs = dict(tag["attrs"])
+    if not _is_image_attrs(attrs):
+        return ""  # non-image tags: never deduplicated, never seen-marked
     uuid = _extract_uuid(tag)
     if uuid:
         return f"id:{uuid}"
-    url = dict(tag["attrs"]).get("url", "") or ""
+    url = attrs.get("url", "") or ""
     if url and url != _PLACEHOLDER:
         return f"url:{url}"
     return ""
 
 
 def _normalize_tag(tag: dict, base_url: str) -> str:
-    """Re-emit the tag in the pipe's canonical format.
+    """Re-emit a tag in the pipe's canonical format.
 
-    When the tag carries a file UUID, emit OUR format — `type="image"` for
-    images, `id="{uuid}"`, and an absolute `/api/v1/files/{uuid}/content`
-    URL (relative when no base URL is available) — plus `content_type` and
-    `name` when present. The same file therefore renders identically
+    Only IMAGE tags are re-emitted in our canonical format — `type="image"`,
+    `id="{uuid}"`, and an absolute `/api/v1/files/{uuid}/content` URL
+    (relative when no base URL is available) — plus `content_type` and
+    `name` when present. The same image therefore renders identically
     regardless of which source produced it, keeping the builtin `view_file`
     tool (uses `id`) and external URL loaders (ComfyUI) working.
 
-    Tags without a UUID (external URLs, `data:` URIs, placeholders) are
-    re-emitted preserving their attributes, with relative URLs prefixed
-    when a base URL exists. Attribute order is deterministic.
+    Non-image tags (PDFs, documents, external URLs, `data:` URIs,
+    placeholders) are re-emitted **unchanged**, with relative URLs prefixed
+    when a base URL exists (attribute order preserved, deterministic).
     """
     attrs = tag["attrs"]
-    uuid = _extract_uuid(tag)
-    if uuid:
-        attrs_dict = dict(attrs)
-        parts = [f'type="{_canonical_type(attrs_dict)}"', f'id="{uuid}"']
-        rel = f"/api/v1/files/{uuid}/content"
-        parts.append(f'url="{base_url + rel if base_url else rel}"')
-        for name in ("content_type", "name"):
-            value = attrs_dict.get(name)
-            if value:
-                parts.append(f'{name}="{value}"')
-        return "<file " + " ".join(parts) + "/>"
+    if _is_image_attrs(attrs):
+        uuid = _extract_uuid(tag)
+        if uuid:
+            attrs_dict = dict(attrs)
+            parts = [f'type="{_canonical_type(attrs_dict)}"', f'id="{uuid}"']
+            rel = f"/api/v1/files/{uuid}/content"
+            parts.append(f'url="{base_url + rel if base_url else rel}"')
+            for name in ("content_type", "name"):
+                value = attrs_dict.get(name)
+                if value:
+                    parts.append(f'{name}="{value}"')
+            return "<file " + " ".join(parts) + "/>"
 
     out = []
     for name, value in attrs:
@@ -194,8 +212,12 @@ def _normalize_tag(tag: dict, base_url: str) -> str:
         out.append(f'{name}="{value}"')
     return "<file " + " ".join(out) + "/>"
 
+
 def _build_block(tags: list[dict], base_url: str) -> str:
-    """Build a single `<attached_files>` block (core's exact format)."""
+    """Build a single `<attached_files>` block (core's exact format).
+
+    Image tags are re-emitted in our canonical format; non-image tags are
+    re-emitted unchanged (preserving their original relative URL)."""
     if not tags:
         return ""
     lines = [_normalize_tag(t, base_url) for t in tags]

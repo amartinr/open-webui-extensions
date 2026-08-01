@@ -163,11 +163,13 @@ earliest user message where it appears, so the history prefix stays
 byte-identical between turns (deterministic, idempotent, fail-open). The
 model still sees every image via its original message's block; the last
 user message only keeps genuinely new images. Dedup is a simple **UUID
-match** (the file UUID is unique), and every file tag is re-emitted in
-**our canonical format** (`id` + absolute `/api/v1/files/{id}/content`
-URL) so the same file looks identical regardless of which source produced
+match** (the file UUID is unique), and every **image** tag is re-emitted
+in **our canonical format** (`id` + absolute `/api/v1/files/{id}/content`
+URL) so the same image looks identical regardless of which source produced
 it (Open WebUI's raw bare-UUID form, the core's relative form, or the
-filter's absolute form). Disable with the `ATTACHED_FILES_CLEANUP` valve.
+filter's absolute form). **Non-image tags (PDFs, documents) are left
+untouched**: they are never deduplicated nor rewritten. Disable with the
+`ATTACHED_FILES_CLEANUP` valve.
 
 See `DESIGN.md` §18 and `filters/image_filter/DESIGN.md` →
 "Attached-Files Accumulation" for details, and `EXAMPLE.md` for a

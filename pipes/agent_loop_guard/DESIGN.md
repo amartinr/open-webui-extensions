@@ -513,6 +513,13 @@ the moving/growing block and does not fix the problem.
   them, so the same file always renders identically and both `view_file`
   (uses `id`) and ComfyUI (URL) keep working. Placeholder tags
   (`(base64 stripped)`) are preserved as-is.
+- **Only image tags participate in the cleanup.** Non-image tags (PDFs,
+  documents) are never deduplicated nor rewritten to our format — they
+  keep their original attributes (`type`, `id`, `name`, `content_type`)
+  and only their relative URL becomes absolute inside the re-emitted
+  block, which is harmless and useful. The image_filter already lets
+  non-image files pass through to RAG; the pipe must not change how they
+  are presented to the model.
 - Only **user** messages are touched; system/assistant/tool messages and
   non-text content parts pass through untouched.
 
