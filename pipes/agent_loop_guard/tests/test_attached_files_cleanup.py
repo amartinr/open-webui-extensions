@@ -141,18 +141,24 @@ def test_normalize_relative_url():
     )
 
 
-def test_normalize_leaves_absolute_and_data_uris():
-    assert _normalize_tag(_tag({"url": "http://h/api/v1/files/a/content"}), BASE).endswith(
-        'url="http://h/api/v1/files/a/content"/>'
-    )
+def test_normalize_canonicalizes_file_urls_keeps_data_uris():
+    # Absolute /api/v1/files/{id}/content URLs are canonicalized to our
+    # format (id + our absolute URL) — same file, same rendering,
+    # regardless of which source produced it. data: URIs (no UUID) pass
+    # through as-is.
+    out = _normalize_tag(_tag({"url": "http://h/api/v1/files/a/content"}), BASE)
+    assert 'id="a"' in out
+    assert out.endswith('url="http://open-webui.private/api/v1/files/a/content"/>')
     assert _normalize_tag(_tag({"url": "data:image/png;base64,AAA"}), BASE).endswith(
         'url="data:image/png;base64,AAA"/>'
     )
 
 
-def test_normalize_without_base_url_returns_raw():
-    tag = _tag({"url": "/api/v1/files/f1/content"})
-    assert _normalize_tag(tag, "") == tag["raw"]
+def test_normalize_without_base_url_emits_id_format():
+    # No base URL available → still emit our format (id + relative URL),
+    # so view_file keeps working.
+    tag = _tag({"type": "image", "id": "f1", "url": "/api/v1/files/f1/content"})
+    assert _normalize_tag(tag, "") == '<file type="image" id="f1" url="/api/v1/files/f1/content"/>'
 
 
 def test_build_block_core_format():
@@ -163,6 +169,49 @@ def test_build_block_core_format():
         "</attached_files>\n\n"
     )
     assert _build_block([], BASE) == ""
+
+
+def test_raw_core_form_normalized_to_our_format():
+    # This deployment's core emits <file type="file" url="{uuid}" .../>
+    # (bare UUID, no /api/v1/files/ path). The pipe must re-emit it in
+    # OUR format: id + absolute URL, so view_file (id) and ComfyUI (URL)
+    # both work.
+    raw = (
+        "<attached_files>\n"
+        '<file type="file" url="79cb1456-2b61-4b84-9769-787f5f6eb859" content_type="image/png" name="home.png"/>\n'
+        "</attached_files>\n\n"
+    )
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": raw}, {"type": "text", "text": "What do you see?"}]}
+    ]
+    _cleanup_attached_files(messages, BASE)
+    assert messages[0]["content"][0]["text"] == (
+        "<attached_files>\n"
+        '<file type="image" id="79cb1456-2b61-4b84-9769-787f5f6eb859" '
+        'url="http://open-webui.private/api/v1/files/79cb1456-2b61-4b84-9769-787f5f6eb859/content" '
+        'content_type="image/png" name="home.png"/>\n'
+        "</attached_files>\n\n"
+    )
+
+
+def test_raw_and_filter_form_dedup_to_one_tag_keeping_ours():
+    # Both forms of the same UUID in the same message → ONE tag, our format.
+    raw = '<file type="file" url="79cb1456-2b61-4b84-9769-787f5f6eb859" content_type="image/png" name="home.png"/>'
+    ours = (
+        '<file type="image" id="79cb1456-2b61-4b84-9769-787f5f6eb859" '
+        'url="http://open-webui.private/api/v1/files/79cb1456-2b61-4b84-9769-787f5f6eb859/content"/>'
+    )
+    text = (
+        "<attached_files>\n" + raw + "\n</attached_files>\n\n"
+        "<attached_files>\n" + ours + "\n</attached_files>\n\n" + "Hi"
+    )
+    messages = [{"role": "user", "content": text}]
+    _cleanup_attached_files(messages, BASE)
+    content = messages[0]["content"]
+    assert content.count("<file") == 1
+    assert 'id="79cb1456-2b61-4b84-9769-787f5f6eb859"' in content
+    assert content.count("url=") == 1
+    assert content.count("(base64 stripped)") == 0
 
 
 # ---------------------------------------------------------------------------

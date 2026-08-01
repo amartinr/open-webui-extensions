@@ -494,10 +494,11 @@ the moving/growing block and does not fix the problem.
 ### Semantics (deterministic, cache-safe)
 
 - **Each file is tagged exactly once**, in the **earliest user message**
-  where it appears (canonical key: URL path of
-  `/api/v1/files/{id}/content` → collapses the filter's absolute URL and
-  the core's relative URL of the same file; then `id`; then a bare-UUID
-  `url`; then the full external URL).
+  where it appears. Dedup is a simple **UUID match** (the file UUID is
+  unique): the same file collapses across the filter's absolute form, the
+  core's relative form, and this deployment's bare-UUID raw form
+  (`<file type="file" url="{uuid}" .../>`). External URLs key by the
+  full URL; placeholders are never deduplicated.
 - Multiple blocks in one message **collapse into one** (core's exact
   format), preserving attribute order.
 - Historical per-message blocks stay **byte-stable between turns** (pure
@@ -505,11 +506,13 @@ the moving/growing block and does not fix the problem.
   through the whole conversation — the same depth as without the filter.
 - The last user message only keeps **genuinely new** images; every image
   remains visible to the model via its original message's block.
-- Relative URLs are normalized to **absolute** (`webui.url` via `Config`,
-  falling back to `__request__.base_url`) so downstream tools (ComfyUI
-  URL-loading nodes) keep working.
-- Placeholder tags (`url="(base64 stripped)"`) are preserved and never
-  deduplicated (each reports a distinct persistence failure).
+- Tags are re-emitted in **our canonical format** — `type="image"` for
+  images, `id="{uuid}"`, and an **absolute**
+  `/api/v1/files/{uuid}/content` URL (`webui.url` via `Config`, falling
+  back to `__request__.base_url`) — regardless of which source produced
+  them, so the same file always renders identically and both `view_file`
+  (uses `id`) and ComfyUI (URL) keep working. Placeholder tags
+  (`(base64 stripped)`) are preserved as-is.
 - Only **user** messages are touched; system/assistant/tool messages and
   non-text content parts pass through untouched.
 

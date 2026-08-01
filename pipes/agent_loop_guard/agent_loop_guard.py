@@ -73,8 +73,15 @@ def _build_guard_message(status: str, tool: str | None, total: int, max_calls: i
 # cached prefix extends through the whole history. The model still sees
 # every image via the historical per-message blocks; the last user
 # message only keeps genuinely new images. Multiple blocks in one
-# message collapse into one; relative URLs are normalized to absolute
-# (webui.url / request base URL) so downstream tools keep working.
+# message collapse into one.
+#
+# Dedup is a simple UUID match (the file UUID is unique) and the emitted
+# tags are always in OUR canonical format — `id="{uuid}"` plus an
+# absolute `/api/v1/files/{uuid}/content` URL — regardless of which
+# source produced them (the filter's absolute form, the core's relative
+# form, or this deployment's bare-UUID raw form). That keeps the builtin
+# `view_file` tool (uses `id`) and external URL loaders (ComfyUI)
+# working, and keeps the same file rendering identically everywhere.
 #
 # Fail-open by design: callers wrap the call in try/except and forward
 # the payload unchanged on error.
@@ -104,47 +111,88 @@ def _parse_file_tags(text: str) -> list[dict]:
     return tags
 
 
-def _file_dedup_key(tag: dict) -> str:
-    """Canonical key for a parsed `<file>` tag.
+def _extract_uuid(tag: dict) -> str:
+    """Extract the file UUID from a parsed `<file>` tag.
 
-    Order: URL path of `/api/v1/files/{id}/content` (collapses the
-    filter's absolute URL and the core's relative URL of the same file),
-    then the `id` attribute, then a bare-UUID `url` (the unverified raw
-    upload form), then the full external URL. Placeholder tags
-    (`(base64 stripped)`) return "" — they are never deduplicated.
+    The UUID can appear as the `id` attribute, as a bare-UUID `url` (this
+    deployment's raw upload form: `<file type="file" url="{uuid}" .../>`),
+    or inside a `/api/v1/files/{uuid}/content` URL (relative or absolute).
+    Returns "" when the tag carries no UUID (external URLs, `data:` URIs,
+    placeholder tags).
     """
     attrs = dict(tag["attrs"])
     url = attrs.get("url", "") or ""
     if url and url != _PLACEHOLDER:
         m = _FILES_URL_RE.search(url)
         if m:
-            return f"id:{m.group(1)}"
+            return m.group(1)
         if "/" not in url and ":" not in url:
-            return f"id:{url}"  # bare UUID (raw upload form)
-        return f"url:{url}"
+            return url  # bare UUID (raw upload form)
     file_id = attrs.get("id", "") or ""
     if file_id and file_id != _PLACEHOLDER:
-        return f"id:{file_id}"
+        return file_id
+    return ""
+
+
+def _canonical_type(attrs: dict) -> str:
+    """Normalize the tag's `type` attribute: images are always `image`."""
+    ct = (attrs.get("content_type") or "").lower()
+    if attrs.get("type") == "image" or ct.startswith("image/"):
+        return "image"
+    return attrs.get("type") or "file"
+
+
+def _file_dedup_key(tag: dict) -> str:
+    """Canonical key for a parsed `<file>` tag.
+
+    The file UUID is unique, so dedup is a simple UUID match: the same
+    file collapses across the filter's absolute form, the core's relative
+    form, and this deployment's bare-UUID raw form. External URLs (no
+    UUID) key by the full URL. Placeholder tags (`(base64 stripped)`)
+    return "" — they are never deduplicated.
+    """
+    uuid = _extract_uuid(tag)
+    if uuid:
+        return f"id:{uuid}"
+    url = dict(tag["attrs"]).get("url", "") or ""
+    if url and url != _PLACEHOLDER:
+        return f"url:{url}"
     return ""
 
 
 def _normalize_tag(tag: dict, base_url: str) -> str:
-    """Re-emit the tag, replacing a relative `url` with an absolute one.
+    """Re-emit the tag in the pipe's canonical format.
 
-    Attribute order is preserved (deterministic). Only URLs starting with
-    `/` are prefixed; `data:` URIs, absolute URLs and bare UUIDs pass
-    through unchanged.
+    When the tag carries a file UUID, emit OUR format — `type="image"` for
+    images, `id="{uuid}"`, and an absolute `/api/v1/files/{uuid}/content`
+    URL (relative when no base URL is available) — plus `content_type` and
+    `name` when present. The same file therefore renders identically
+    regardless of which source produced it, keeping the builtin `view_file`
+    tool (uses `id`) and external URL loaders (ComfyUI) working.
+
+    Tags without a UUID (external URLs, `data:` URIs, placeholders) are
+    re-emitted preserving their attributes, with relative URLs prefixed
+    when a base URL exists. Attribute order is deterministic.
     """
     attrs = tag["attrs"]
-    if not base_url:
-        return tag["raw"]
+    uuid = _extract_uuid(tag)
+    if uuid:
+        attrs_dict = dict(attrs)
+        parts = [f'type="{_canonical_type(attrs_dict)}"', f'id="{uuid}"']
+        rel = f"/api/v1/files/{uuid}/content"
+        parts.append(f'url="{base_url + rel if base_url else rel}"')
+        for name in ("content_type", "name"):
+            value = attrs_dict.get(name)
+            if value:
+                parts.append(f'{name}="{value}"')
+        return "<file " + " ".join(parts) + "/>"
+
     out = []
     for name, value in attrs:
-        if name == "url" and value.startswith("/"):
+        if name == "url" and value.startswith("/") and base_url:
             value = f"{base_url}{value}"
         out.append(f'{name}="{value}"')
     return "<file " + " ".join(out) + "/>"
-
 
 def _build_block(tags: list[dict], base_url: str) -> str:
     """Build a single `<attached_files>` block (core's exact format)."""
