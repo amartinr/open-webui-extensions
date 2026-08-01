@@ -240,3 +240,81 @@ async def test_no_token_in_markdown_output():
     tools = md_tools(handler)
     out = await tools.get_my_profile(FakeRequest(token="sk-secret-abc"))
     assert "sk-secret-abc" not in out
+
+
+async def test_user_valve_overrides_admin_markdown_default():
+    # Admin default is markdown; a user choosing json must get json.
+    import json as _json
+
+    def handler(request):
+        return json_response({"id": "u1", "name": "Abel"})
+
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    uv = tools.UserValves(output_format="json")
+    user = {"valves": uv}
+    out = await tools.get_my_profile(FakeRequest(), __user__=user)
+    payload = _json.loads(out)  # json output is parseable
+    assert payload["name"] == "Abel"
+
+
+async def test_user_valve_default_is_markdown():
+    # UserValves defaults to markdown (the tool's default) — no 'inherit' concept.
+    def handler(request):
+        return json_response({"id": "u1", "name": "Abel"})
+
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    uv = tools.UserValves()  # default markdown
+    user = {"valves": uv}
+    out = await tools.get_my_profile(FakeRequest(), __user__=user)
+    assert "**Profile**" in out  # markdown
+
+
+async def test_user_valve_json_overrides_default_markdown():
+    # A user choosing json must get json even when the tool default is markdown.
+    import json as _json
+
+    def handler(request):
+        return json_response({"id": "u1", "name": "Abel"})
+
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    uv = tools.UserValves(output_format="json")
+    out = await tools.get_my_profile(FakeRequest(), __user__={"valves": uv})
+    payload = _json.loads(out)
+    assert payload["name"] == "Abel"
+
+
+async def test_user_valve_json_overrides_admin_markdown_in_errors():
+    # Errors must also respect the user's format choice.
+    def handler(request):
+        return json_response({"detail": "nope"}, status=403)
+
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    uv = tools.UserValves(output_format="json")
+    out = await tools.get_my_profile(FakeRequest(), __user__={"valves": uv})
+    import json as _json
+
+    payload = _json.loads(out)
+    assert "error" in payload
+    assert "Forbidden" in payload["error"]
+
+
+async def test_user_valve_markdown_overrides_admin_json():
+    # Admin default json; user chooses markdown -> markdown.
+    def handler(request):
+        return json_response({"id": "u1", "name": "Abel"})
+
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    uv = tools.UserValves(output_format="markdown")
+    out = await tools.get_my_profile(FakeRequest(), __user__={"valves": uv})
+    assert "**Profile**" in out
+
+
+async def test_no_user_valves_uses_admin_default():
+    def handler(request):
+        return json_response({"id": "u1", "name": "Abel"})
+
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    out = await tools.get_my_profile(FakeRequest(), __user__=None)
+    import json as _json
+
+    assert _json.loads(out)["name"] == "Abel"

@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.3.1
+version: 0.4.0
 licence: MIT
 """
 
@@ -122,11 +122,56 @@ class Tools:
             ),
         )
 
+    class UserValves(BaseModel):
+        """Per-user overrides, configurable from the chat session.
+
+        ``output_format`` lets each user choose the response format they
+        prefer for their own chats (there is no universal winner — it depends
+        on the model and task). Defaults to ``markdown`` (the tool's default).
+        """
+
+        output_format: Literal["markdown", "json"] = Field(
+            "markdown",
+            description=(
+                "Response format for this user: 'markdown' (default, tables/bullets) "
+                "or 'json' (structured objects)."
+            ),
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "markdown", "label": "Markdown"},
+                        {"value": "json", "label": "JSON"},
+                    ],
+                }
+            },
+        )
+
     def __init__(self):
         self.valves = self.Valves()
+        self.user_valves = self.UserValves()
         # Test seams — never set in production.
         self._transport: Optional[httpx.AsyncBaseTransport] = None
         self._base_url_override: Optional[str] = None
+
+    @staticmethod
+    def _get_user_valves(__user__: Optional[Any]) -> Optional[Any]:
+        """Extract the UserValves object from the __user__ dict if available."""
+        if __user__ is None:
+            return None
+        try:
+            if isinstance(__user__, dict):
+                return __user__.get("valves")
+        except Exception:
+            pass
+        return None
+
+    def _resolve_output_format(self, __user__: Optional[Any]) -> str:
+        """Effective output format: user's choice (if provided) else admin valve."""
+        uv = self._get_user_valves(__user__)
+        if uv is not None and uv.output_format:
+            return uv.output_format
+        return self.valves.output_format
 
     # ──────────────────────────────────────────────
     #  Base URL resolution (DESIGN §4.2)
@@ -298,22 +343,26 @@ class Tools:
         note = f"\n… [truncated from {len(text)} to {max_chars} characters]"
         return text[: max(0, max_chars - len(note))] + note
 
-    def _ok(self, payload: Any, kind: str = "generic") -> str:
+    def _ok(self, payload: Any, kind: str = "generic",
+            output_format: Optional[str] = None) -> str:
         """Serialize a successful result in the configured output format.
 
         ``kind`` selects the Markdown renderer (tables for lists, bullets for
         details, fenced blocks for content). In ``json`` mode every kind is
-        the same structured dump.
+        the same structured dump. ``output_format`` defaults to the admin
+        valve; callers pass the per-user effective format when available.
         """
-        if self.valves.output_format == "json":
+        fmt = output_format or self.valves.output_format
+        if fmt == "json":
             return self._truncate(
                 json.dumps(payload, ensure_ascii=False, indent=2, default=str)
             )
         return self._truncate(self._render(kind, payload))
 
-    def _error(self, message: str) -> str:
+    def _error(self, message: str, output_format: Optional[str] = None) -> str:
         """Serialize an error: plain-text one-liner in markdown, JSON object in json."""
-        if self.valves.output_format == "json":
+        fmt = output_format or self.valves.output_format
+        if fmt == "json":
             return json.dumps({"error": message}, ensure_ascii=False, indent=2)
         return f"Error: {message}"
 
@@ -615,18 +664,19 @@ class Tools:
         )
         return head + "\n\n" + table
 
-    async def _run(self, coro: Any) -> str:
-        """Execute a private implementation, converting failures to safe JSON."""
+    async def _run(self, coro: Any, output_format: Optional[str] = None) -> str:
+        """Execute a private implementation, converting failures to safe output."""
         try:
             return await coro
         except ToolError as exc:
-            return self._error(str(exc))
+            return self._error(str(exc), output_format)
         except Exception as exc:  # pragma: no cover - defensive
             # The token is never part of an exception message (it travels in a
             # header only), so logging the traceback cannot leak it.
             logger.exception("owui_meta: unexpected error")
             return self._error(
-                f"Unexpected internal error ({type(exc).__name__}); see server logs."
+                f"Unexpected internal error ({type(exc).__name__}); see server logs.",
+                output_format,
             )
 
     # ──────────────────────────────────────────────
@@ -710,41 +760,53 @@ class Tools:
     #  Tool methods — user role (DESIGN §6.1)
     # ──────────────────────────────────────────────
 
-    async def get_my_profile(self, __request__: Any = None) -> str:
+    async def get_my_profile(self, __request__: Any = None, __user__: dict = None) -> str:
         """Get the requesting user's own profile: id, name, email, role and permissions.
 
         Use this to learn who you are talking to and what they are allowed to do.
         """
-        return await self._run(self._get_my_profile(__request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_my_profile(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_my_profile(self, request: Any) -> str:
+    async def _get_my_profile(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_PROFILE)
-        return self._ok(json.loads(body), "profile")
+        return self._ok(json.loads(body), "profile", output_format=output_format)
 
-    async def get_models(self, __request__: Any = None) -> str:
+    async def get_models(self, __request__: Any = None, __user__: dict = None) -> str:
         """List the models available to the requesting user (id, name, owner).
 
         Only lightweight metadata is returned, not the full model definitions.
         """
-        return await self._run(self._get_models(__request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_models(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_models(self, request: Any) -> str:
+    async def _get_models(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_MODELS)
         payload = json.loads(body)
         items = payload.get("data") if isinstance(payload, dict) else payload
         models = self._summarize_models(items if isinstance(items, list) else [])
-        return self._ok({"count": len(models), "models": models}, "models")
+        return self._ok({"count": len(models), "models": models}, "models", output_format=output_format)
 
-    async def get_my_chats(self, limit: int = 10, __request__: Any = None) -> str:
+    async def get_my_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None) -> str:
         """List the requesting user's recent chats (id, title, dates).
 
         :param limit: how many chats to return (default 10, max 100).
         """
-        return await self._run(self._get_my_chats(limit, __request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_my_chats(limit, __request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_my_chats(self, limit: Any, request: Any) -> str:
+    async def _get_my_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         limit = self._coerce_limit(limit)
         _status, _ct, body = await self._api_get_json(
@@ -752,31 +814,39 @@ class Tools:
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats")
+        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_chat(self, chat_id: str, __request__: Any = None) -> str:
+    async def get_chat(self, chat_id: str, __request__: Any = None, __user__: dict = None) -> str:
         """Get the full content of one chat (all its messages) by id.
 
         :param chat_id: the chat's UUID.
         """
-        return await self._run(self._get_chat(chat_id, __request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_chat(chat_id, __request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_chat(self, chat_id: Any, request: Any) -> str:
+    async def _get_chat(self, chat_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         chat_id = self._require_id(chat_id, "chat_id")
         _status, _ct, body = await self._api_get_json(
             token, _ROUTE_CHAT.format(chat_id=chat_id)
         )
-        return self._ok(json.loads(body), "chat")
+        return self._ok(json.loads(body), "chat", output_format=output_format)
 
-    async def search_chats(self, text: str, __request__: Any = None) -> str:
+    async def search_chats(self, text: str, __request__: Any = None, __user__: dict = None) -> str:
         """Search the requesting user's chats for a text fragment.
 
         :param text: the search term (matched against chat titles and messages).
         """
-        return await self._run(self._search_chats(text, __request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._search_chats(text, __request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _search_chats(self, text: Any, request: Any) -> str:
+    async def _search_chats(self, text: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         if not isinstance(text, str) or not text.strip():
             raise ToolError("search_chats requires a non-empty 'text' parameter.")
         text = text.strip()[:200]
@@ -786,16 +856,20 @@ class Tools:
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"query": text, "count": len(chats), "total": total, "chats": chats}, "chats")
+        return self._ok({"query": text, "count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_shared_chats(self, limit: int = 10, __request__: Any = None) -> str:
+    async def get_shared_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None) -> str:
         """List chats the requesting user has shared with others.
 
         :param limit: how many chats to return (default 10, max 100).
         """
-        return await self._run(self._get_shared_chats(limit, __request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_shared_chats(limit, __request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_shared_chats(self, limit: Any, request: Any) -> str:
+    async def _get_shared_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         limit = self._coerce_limit(limit)
         _status, _ct, body = await self._api_get_json(
@@ -803,16 +877,20 @@ class Tools:
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats")
+        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_pinned_chats(self, limit: int = 10, __request__: Any = None) -> str:
+    async def get_pinned_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None) -> str:
         """List chats the requesting user has pinned.
 
         :param limit: how many chats to return (default 10, max 100).
         """
-        return await self._run(self._get_pinned_chats(limit, __request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_pinned_chats(limit, __request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_pinned_chats(self, limit: Any, request: Any) -> str:
+    async def _get_pinned_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         limit = self._coerce_limit(limit)
         _status, _ct, body = await self._api_get_json(
@@ -820,25 +898,29 @@ class Tools:
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats")
+        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_my_files(self, __request__: Any = None) -> str:
+    async def get_my_files(self, __request__: Any = None, __user__: dict = None) -> str:
         """List the requesting user's files with metadata.
 
         Returns filename, content type, size (bytes), dates and the origin
         chat/message when the file was generated by a chat. Binary content is
         not fetched — use get_file_content() to read a specific file.
         """
-        return await self._run(self._get_my_files(__request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_my_files(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_my_files(self, request: Any) -> str:
+    async def _get_my_files(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_FILES)
         items, total = self._extract_items(json.loads(body))
         files = self._summarize_files(items)
-        return self._ok({"count": len(files), "total": total, "files": files}, "files")
+        return self._ok({"count": len(files), "total": total, "files": files}, "files", output_format=output_format)
 
-    async def get_file_content(self, file_id: str, __request__: Any = None) -> str:
+    async def get_file_content(self, file_id: str, __request__: Any = None, __user__: dict = None) -> str:
         """Read a file's content by id.
 
         Text files return their content (truncated to max_response_chars).
@@ -846,9 +928,13 @@ class Tools:
 
         :param file_id: the file's UUID.
         """
-        return await self._run(self._get_file_content(file_id, __request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_file_content(file_id, __request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_file_content(self, file_id: Any, request: Any) -> str:
+    async def _get_file_content(self, file_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         file_id = self._require_id(file_id, "file_id")
         path = _ROUTE_FILE_CONTENT.format(file_id=file_id)
@@ -861,20 +947,24 @@ class Tools:
                 "content_type": ct,
                 "size": len(body),
                 "content": text,
-            }, "file_text")
+            }, "file_text", output_format=output_format)
         return self._ok({
             "file_id": file_id,
             "content_type": ct,
             "size": len(body),
             "note": f"Binary content ({ct}) is not returned inline. Use get_my_files() "
                     "for metadata (size, dates, origin).",
-        }, "file_binary")
+        }, "file_binary", output_format=output_format)
 
-    async def get_my_prompts(self, __request__: Any = None) -> str:
+    async def get_my_prompts(self, __request__: Any = None, __user__: dict = None) -> str:
         """List the requesting user's custom prompts (command, name, content)."""
-        return await self._run(self._get_my_prompts(__request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_my_prompts(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_my_prompts(self, request: Any) -> str:
+    async def _get_my_prompts(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_PROMPTS)
         items, _total = self._extract_items(json.loads(body))
@@ -883,13 +973,17 @@ class Tools:
             for item in items
             if isinstance(item, dict)
         ]
-        return self._ok({"count": len(prompts), "prompts": prompts}, "prompts")
+        return self._ok({"count": len(prompts), "prompts": prompts}, "prompts", output_format=output_format)
 
-    async def get_my_tools(self, __request__: Any = None) -> str:
+    async def get_my_tools(self, __request__: Any = None, __user__: dict = None) -> str:
         """List the tools available to the requesting user (id, name, description)."""
-        return await self._run(self._get_my_tools(__request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_my_tools(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_my_tools(self, request: Any) -> str:
+    async def _get_my_tools(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_TOOLS)
         items, _total = self._extract_items(json.loads(body))
@@ -903,13 +997,17 @@ class Tools:
                 "name": item.get("name"),
                 "description": meta.get("description"),
             })
-        return self._ok({"count": len(tools), "tools": tools}, "tools")
+        return self._ok({"count": len(tools), "tools": tools}, "tools", output_format=output_format)
 
-    async def get_knowledge_bases(self, __request__: Any = None) -> str:
+    async def get_knowledge_bases(self, __request__: Any = None, __user__: dict = None) -> str:
         """List the knowledge bases available to the requesting user (id, name, description)."""
-        return await self._run(self._get_knowledge_bases(__request__))
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_knowledge_bases(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
 
-    async def _get_knowledge_bases(self, request: Any) -> str:
+    async def _get_knowledge_bases(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_KNOWLEDGE)
         items, total = self._extract_items(json.loads(body))
@@ -918,4 +1016,4 @@ class Tools:
             for item in items
             if isinstance(item, dict)
         ]
-        return self._ok({"count": len(knowledge), "total": total, "knowledge": knowledge}, "knowledge")
+        return self._ok({"count": len(knowledge), "total": total, "knowledge": knowledge}, "knowledge", output_format=output_format)

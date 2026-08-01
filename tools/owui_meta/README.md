@@ -24,7 +24,8 @@ The tool returns **Markdown by default** (`output_format` valve, default `markdo
 - Lists → **tables** with a summary line (`**Files: 2 (104 total on server)**`), **IDs always present** so the model can call follow-up methods.
 - Raw numeric values passed through unformatted — byte sizes as `8796`, never `8.8 KB`; readable UTC dates.
 - Profile → flat bullets; chat → heading + per-message blocks; file text → fenced block; binary → metadata note; errors → plain-text `Error: …`.
-- Set the valve to `json` for models that prefer structured objects.
+- **`output_format`** — per-user valve, configurable from the chat session (dropdown Markdown/JSON, default Markdown). There is **no admin valve** for the format: each user chooses the format they prefer for their own chats. The tool's built-in default is Markdown.
+- Set it to `json` for models that prefer structured objects.
 
 Example of what the model receives for `get_my_chats()`:
 

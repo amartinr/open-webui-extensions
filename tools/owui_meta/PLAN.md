@@ -133,7 +133,7 @@ Implements DESIGN §8.6 across the list/search methods:
 
 Implements DESIGN §8.8 (decision 2026-08-01), pulled ahead of Iterations 2–5 at the user's request because the live agent output revealed the tool was still returning JSON.
 
-- New valve `output_format: "markdown" | "json"` (default `markdown`; admin-set, no credential implications).
+- New valve `output_format: "markdown" | "json"` — implemented as a **per-user valve** (dropdown Markdown/JSON, default `markdown`; there is **no admin valve** for the format). Each user chooses the format for their own chats.
 - Markdown renderers per resource: lists → tables, profile → bullets, chat → heading + per-message blocks, file text → fenced block with language hint, file binary → metadata note, errors → plain-text `Error: …` one-liners.
 - **Raw numeric values** (byte sizes passed through unformatted — `8796`, no `KB` prefix), readable UTC dates, **IDs always present** in tables for follow-up calls.
 - `_error` returns `Error: <message>` in markdown / `{"error": …}` in json; `_ok` dispatches by kind.
@@ -163,7 +163,7 @@ These changes were not in the initial plan; they emerged during development / li
 | 5 | Design decision (user) | **No embedded JSON in Markdown** — nested objects render as indented bullet hierarchies (research-backed, llm-md) | `permissions` was dumped as raw JSON inside a bullet; user asked for hierarchical formatting. | `e5a10ab` |
 | 6 | Design decision (user) | **Bold restricted to headings** — keys/cells plain | Save tokens; `**…**` in every key wasted ~160 tokens per `permissions` dump. | `436ead7` |
 | 7 | During Iter 1 | **Docstring contract** — reST `:param` single-line, `__*` never documented, enforced by `test/test_docstrings.py` (replicates the v0.10.2 parsers verbatim) | User asked whether docstrings were formatted as Open WebUI expects; verified against source and pinned with a regression test. | `f34b4e4`, `9c91a3f` |
-| 8 | During Iter 1 | **`output_format` valve** added to Valves (later became Iteration 6) | Needed to offer JSON as opt-in for models that prefer structured objects. | `3b27b22` |
+| 8 | Design decision (user) | **`output_format` became a per-user valve** (dropdown Markdown/JSON, default `markdown`; **no admin valve**) — user chooses the format per session | The agent's research showed no universal format winner (depends on model/task); letting each user choose is more pragmatic than an admin global. Initial “inherit/System default” option removed since there is no admin valve to inherit from. | `3b27b22` (initial), user-valve commit |
 | 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite in Iteration 5 is still pending; these were one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
 
 **Unchanged commitments:** scope confined to `tools/owui_meta/`; one commit per iteration; Conventional Commits; all docs/code in English; no credentials ever configured or stored.

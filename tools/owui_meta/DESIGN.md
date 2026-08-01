@@ -247,7 +247,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `fallback_base_url` | `http://localhost:8080` | Last resort if the global URL is empty or unreachable |
 | `timeout` | `15` | HTTP timeout in seconds |
 | `max_response_chars` | `8000` | Truncation of the response returned to the model |
-| `output_format` | `markdown` | Format of the response returned to the model: `markdown` (default, see §8.8) or `json` |
+| `output_format` | `markdown` (per-user valve, default `markdown`) | Format of the response returned to the model: `markdown` (default, see §8.8) or `json`. Chosen per user from the chat session; no admin valve |
 | *(no credential valves)* | — | **By design**: auth is automatic via `request.state.token` |
 
 ### 8.3 Method signatures
@@ -366,7 +366,7 @@ Implementation notes:
 
 **Problem observed:** language models often read **plain text / Markdown** more reliably than deeply nested JSON. A table with columns is immediately actionable; the equivalent JSON array of objects forces the model to mentally parse structure and reduces reliability when the model must pick fields (IDs, sizes, dates) out of it.
 
-**Decision:** the tool returns the response to the model as **Markdown by default** (plain text, no code fences around whole payloads, no JSON). A `output_format` valve (`markdown` default | `json`) lets an admin force JSON when a specific model handles it better.
+**Decision:** the tool returns the response to the model as **Markdown by default** (plain text, no code fences around whole payloads, no JSON). A **per-user `output_format` valve** (`markdown` default | `json`) lets each user choose JSON when a specific model handles it better — there is **no admin valve** for the format (see constraints below).
 
 **Formatting rules** (all renderers):
 - **Lists → Markdown tables.** One table per resource. The summary line above the table always states counts: `**Files: 2 (2 total on server)**`.
@@ -415,7 +415,7 @@ Implementation notes:
 - The renderers **summarize exactly as before** (top N + `total` in the summary line; never full dumps) — Markdown is a *presentation* of the same summarized data, not an invitation to return more.
 - `max_response_chars` truncation still applies to the rendered Markdown.
 - The summarizer logic from §8.6/§8.7 (which fields to keep, `total`, origin cross-referencing) is unchanged; only the final serialization changes (`_ok`/`_error`/renderers).
-- `output_format` is a **server-side valve** (not user-configurable) so the admin controls what models receive.
+- `output_format` is a **per-user valve** (dropdown Markdown/JSON, default Markdown) — **not an admin valve**. There is no admin-level format setting; each user chooses the format for their own chats from the session UI. The tool's built-in default is Markdown.
 
 ---
 
@@ -475,7 +475,7 @@ Implementation notes:
 - [ ] Admin methods (§6.2) with role check
 - [ ] Status events with `__event_emitter__` (§8.5)
 - [ ] **Pagination, sorting and filtering** across all list/search functions (§8.6): iterate pages, per-resource sort criteria, typed filters (type/size for files, text/status for chats) and smart result summarization (e.g. list titles without full history)
-- [ ] **Markdown-first output** (§8.8): renderers per resource (tables for lists, bullets for details, fenced blocks for content), `output_format` valve, raw sizes in bytes
+- [ ] **Markdown-first output** (§8.8): renderers per resource (tables for lists, bullets for details, fenced blocks for content), per-user `output_format` valve, raw sizes in bytes
 
 ### Phase 3 — Other considerations
 - [ ] Evaluate whether it's worth proposing as a PR to the Open WebUI core (e.g. exposing an explicit `__token__` in `extra_params`, in addition to `__request__`)
@@ -491,4 +491,4 @@ Implementation notes:
 4. **Integrate the tool into a specific instance model or make it available to all models the admin decides?**
 5. **What is the pagination default per resource?** (e.g. chats: latest 10; files: all of page 1 with `total`; search: top N by relevance) — to be defined in Phase 1 with the desired UX.
 6. **Expose `page`/`page_size` to the model or do transparent internal iteration?** (recommended: transparent with a maximum page limit to prevent cost abuse)
-7. **Response format for the model** — **RESOLVED (2026-08-01):** Markdown-first by default (`output_format` valve, see §8.8). JSON remains available as an opt-in valve for models that handle it better.
+7. **Response format for the model** — **RESOLVED (2026-08-01):** Markdown-first by default (per-user `output_format` valve, see §8.8). JSON remains available as an opt-in choice for models that handle it better.
