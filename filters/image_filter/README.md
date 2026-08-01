@@ -62,6 +62,14 @@ tools (e.g. ComfyUI nodes that load images by URL).
   re-tagged, so the model no longer sees the file reference in context —
   it retains conversational memory of the image, but if a tool needs the
   file id/URL again the user re-attaches it. (v2.12.0)
+- **A `+` upload shares the core's UUID since v2.12.2**: with native
+  function calling the upload only reaches the filter as a base64
+  `image_url` copy, so v2.12.2 seeds the this-turn hash map from the
+  **stored current user message's `files`** (the same list the core's
+  `add_file_context()` reads) and reuses the current upload's file id —
+  filter and core tag one UUID. The pipe's content-hash backstop
+  (v2.3.0) collapses two different UUIDs with identical bytes as a
+  safety net.
 - **Core `add_file_context()` blocks remain**: with native function
   calling, the core still prepends its own `<attached_files>` block per
   stored user message *after* the filter runs. Those blocks are

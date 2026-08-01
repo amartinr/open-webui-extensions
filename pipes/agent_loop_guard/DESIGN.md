@@ -496,11 +496,13 @@ collapses.
 ### Semantics (deterministic, cache-safe)
 
 - **Each file is tagged exactly once**, in the **earliest user message**
-  where it appears. Dedup is a simple **UUID match** (the file UUID is
-  unique): the same file collapses across the filter's absolute form, the
-  core's relative form, and this deployment's bare-UUID raw form
-  (`<file type="file" url="{uuid}" .../>`). External URLs key by the
-  full URL; placeholders are never deduplicated.
+  where it appears. Dedup keys, in order: (1) **UUID** — the same file
+  collapses across the filter's absolute form, the core's relative form,
+  and this deployment's bare-UUID raw form (`<file type="file"
+  url="{uuid}" .../>`); (2) **content hash** (v2.3.0) — two *different*
+  UUIDs whose files share `meta["file_hash"]` collapse too (first
+  occurrence wins). External URLs key by the full URL; placeholders are
+  never deduplicated.
 - Multiple blocks in one message **collapse into one** (core's exact
   format), preserving attribute order.
 - Historical per-message blocks stay **byte-stable between turns** (pure
@@ -559,20 +561,32 @@ on/off. When off, payloads are forwarded exactly as Open WebUI built them.
   keep working; cleanup restricted to **image tags only** (non-image
   tags untouched); **info-level logs** added for dropped duplicates,
   per-message and per-request summaries.
+- **v2.3.0** — **content-hash backstop**: before the cleanup, the pipe
+  resolves every image tag's UUID to its stored sha256
+  (`meta["file_hash"]`, one indexed `Files.get_file_by_id` per unique
+  UUID, fail-open) and also marks `hash:{digest}` in the seen set. Two
+  **different** UUIDs with identical bytes now collapse (first occurrence
+  wins, same as the UUID rule) — the guaranteed fix for the "model sees
+  two images for one `+` upload" incident even if the filter's this-turn
+  reuse fails (hash metadata missing, re-encoded copy). Non-image tags
+  never participate; a resolution failure degrades to UUID-only dedup.
 - **Filter interplay** — the image_filter must be at **v2.12.1** for the
-  pipe's dedup to be effective on `+` uploads: v2.12.1 makes a single
-  `+` upload produce a single UUID (reusing this-turn `body["files"]` by
-  content hash), so the pipe sees one tag instead of two different UUIDs
-  it cannot collapse. See `filters/image_filter/DESIGN.md` →
-  "Content-Hash Deduplication".
+  pipe's *UUID* dedup to be effective on `+` uploads: v2.12.1 makes a
+  single `+` upload produce a single UUID (reusing this-turn `body["files"]`
+  by content hash), so the pipe sees one tag instead of two different UUIDs
+  it cannot collapse. v2.12.2 extends that reuse to the **stored current
+  message** (native FC path — see `filters/image_filter/DESIGN.md` →
+  "Content-Hash Deduplication"), converging filter and core on one UUID;
+  the pipe's v2.3.0 content-hash dedup remains as the safety net.
 
 **⚠️ TO VERIFY (filter + pipe interplay)**: with the filter at v2.11 the
 model sees **two** images on the first `+` upload turn (duplicate UUID),
-then one. **Update (2026-08-01)**: still observed with v2.12.1 deployed —
-model reports two files on the upload turn, one afterwards. The
-re-hydration fix is confirmed (block appears only in the message where
-the file was uploaded). The remaining duplicate points to the filter's
-this-turn content-hash match failing on the instance (see filter DESIGN
-"Known Limitations"); check the filter logs (`reused this-turn upload`
-vs `persisting new file` / `_file_hash_of failed`) and add a fallback if
-needed.
+then one. **RESOLVED (2026-08-01, v2.12.2 + v2.3.0):** runtime logs from
+a single `+`-upload turn confirmed the mechanism — the filter reused an
+**older identical copy** (`79cb1456...`) via the user-wide lookup while
+`add_file_context()` tagged the current upload (`76680237...`);
+`turn_hash_to_id` was empty because native FC never populates
+`body["files"]` (the middleware pops `files` off the payload message
+before filter inlets). Fixed in the filter (v2.12.2: seed from the
+stored current message's `files`) and backstopped in the pipe (v2.3.0:
+content-hash dedup).

@@ -2,7 +2,7 @@
 title: Agent Loop Guard
 author: open-webui-tools
 author_url: https://github.com/your-org/open-webui-tools
-version: 2.2.0
+version: 2.3.0
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
 """
@@ -237,11 +237,20 @@ def _build_block(tags: list[dict], base_url: str) -> str:
     return "<attached_files>\n" + "\n".join(lines) + "\n</attached_files>\n\n"
 
 
-def _dedupe_tags(tags: list[dict], seen: set[str]) -> list[dict]:
+def _dedupe_tags(tags: list[dict], seen: set[str], hash_lookup: dict[str, str] | None = None) -> list[dict]:
     """Keep tags whose canonical key has not been seen before.
 
     Placeholder tags (key "") are always kept and never added to `seen`.
     Each dropped duplicate is logged at info level for debuggability.
+
+    `hash_lookup` maps a file UUID to its stored sha256
+    (`meta["file_hash"]`) — a content-level dedup backstop. The image_filter
+    is supposed to converge every source on the CURRENT upload's UUID, but
+    if it fails (e.g. hash metadata unavailable, re-encoded base64 copy)
+    two DIFFERENT UUIDs can reference the same bytes. The pipe is the last
+    code before the provider, so it also marks `hash:{digest}` in `seen`:
+    a second tag with different UUID but identical content collapses too
+    (first occurrence wins, same as the UUID rule).
     """
     kept = []
     for tag in tags:
@@ -255,11 +264,75 @@ def _dedupe_tags(tags: list[dict], seen: set[str]) -> list[dict]:
                 )
                 continue
             seen.add(key)
+            if key.startswith("id:") and hash_lookup:
+                digest = hash_lookup.get(key[3:])
+                if digest:
+                    hkey = f"hash:{digest}"
+                    if hkey in seen:
+                        log.info(
+                            "attached_files: dropping tag %s — same content as "
+                            "an earlier tag (sha256=%s...)",
+                            key,
+                            digest[:12],
+                        )
+                        continue
+                    seen.add(hkey)
         kept.append(tag)
     return kept
 
 
-def _cleanup_attached_files(messages: list, base_url: str = "") -> dict:
+def _collect_image_uuids(messages: list) -> list[str]:
+    """Collect the file UUIDs of every image tag in every `<attached_files>`
+    block (deduplicated), so the pipe can resolve their content hashes
+    before the cleanup runs. Non-image tags are skipped — they never take
+    part in the cleanup."""
+    uuids: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        parts = (
+            [{"type": "text", "text": content}]
+            if isinstance(content, str)
+            else (
+                [p for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                if isinstance(content, list)
+                else []
+            )
+        )
+        for part in parts:
+            for tag in _parse_file_tags(part.get("text", "")):
+                if not _is_image_attrs(tag["attrs"]):
+                    continue
+                uuid = _extract_uuid(tag)
+                if uuid and uuid not in seen:
+                    seen.add(uuid)
+                    uuids.append(uuid)
+    return uuids
+
+
+async def _resolve_content_hashes(uuids: list[str]) -> dict[str, str]:
+    """Resolve file UUIDs to their stored sha256 (`meta["file_hash"]`).
+
+    Best-effort and fail-open: any lookup error skips that UUID (the
+    cleanup then falls back to UUID-only dedup). Only image UUIDs reach
+    this point, and each UUID resolves once per request."""
+    resolved: dict[str, str] = {}
+    for uuid in uuids:
+        try:
+            from open_webui.models.files import Files
+
+            fobj = await Files.get_file_by_id(uuid)
+            digest = (getattr(fobj, "meta", None) or {}).get("file_hash")
+            if digest:
+                resolved[uuid] = digest
+        except Exception:
+            continue
+    return resolved
+
+
+def _cleanup_attached_files(messages: list, base_url: str = "", hash_lookup: dict[str, str] | None = None) -> dict:
     """Collapse and deduplicate `<attached_files>` blocks across user messages.
 
     Pure function of the payload (deterministic → cache-safe). Each file is
@@ -294,7 +367,7 @@ def _cleanup_attached_files(messages: list, base_url: str = "") -> dict:
             tags = _parse_file_tags(content)
             if not tags:
                 continue
-            kept = _dedupe_tags(tags, seen)
+            kept = _dedupe_tags(tags, seen, hash_lookup)
             dropped = len(tags) - len(kept)
             stats["blocks_found"] += blocks_found
             stats["tags_kept"] += len(kept)
@@ -338,7 +411,7 @@ def _cleanup_attached_files(messages: list, base_url: str = "") -> dict:
                 for part in content
                 if isinstance(part, dict) and part.get("type") == "text"
             )
-            kept = _dedupe_tags(tags, seen)
+            kept = _dedupe_tags(tags, seen, hash_lookup)
             dropped = len(tags) - len(kept)
             stats["blocks_found"] += blocks_found
             stats["tags_kept"] += len(kept)
@@ -761,7 +834,13 @@ class Pipe:
                     if __request__ is not None
                     else ""
                 )
-                _cleanup_attached_files(messages, base_url)
+                # Content-hash backstop: two different UUIDs with identical
+                # bytes (filter tagged an old copy, core tagged the current
+                # upload) collapse here even when the filter's this-turn
+                # reuse failed. Fail-open: any resolution error degrades to
+                # UUID-only dedup.
+                hash_lookup = await _resolve_content_hashes(_collect_image_uuids(messages))
+                _cleanup_attached_files(messages, base_url, hash_lookup=hash_lookup)
             except Exception as exc:
                 log.warning("attached_files cleanup failed (fail-open): %s", exc)
 

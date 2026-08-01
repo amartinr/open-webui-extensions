@@ -3,7 +3,7 @@ title: Image to File Storage
 author: pi-agent
 description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects a deduplicated <attached_files> block with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images. Pasted images are announced only in the turn they are pasted — later turns strip the re-hydrated history without re-announcing it.
 required_open_webui_version: 0.5.0
-version: 2.12.1
+version: 2.12.2
 """
 
 import base64
@@ -206,6 +206,14 @@ class Filter:
         seen: set[str] = set()
         base_url = await _get_public_base_url(__request__) if __request__ is not None else ""
 
+        # The LAST user message is the current turn's message — the only one
+        # that can carry a *new* attachment.
+        last_user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                last_user_idx = i
+                break
+
         # ── Step 1: handle body["files"] ────────────────────────────────────
         files: Optional[list] = body.get("files")
         # hash -> file id of images uploaded via `+` THIS turn, so pasted /
@@ -225,10 +233,33 @@ class Filter:
                     non_images.append(f)
             body["files"] = non_images if non_images else None
 
+        # Native function calling: a `+` upload does NOT arrive via
+        # body["files"] — the core middleware pops `files` from the payload
+        # message and injects image_url parts into content, which
+        # convert_url_images_to_base64() has already turned into base64 by
+        # the time the filter runs. The file refs still live on the STORED
+        # current user message (DB) — the same list the core's
+        # add_file_context() reads later. Seed the this-turn hash map from
+        # those refs too, so the base64 copy reuses the CURRENT upload's
+        # file id instead of an older identical file found by the user-wide
+        # lookup. Otherwise the filter tags one UUID and the core tags
+        # another for the same image, and the pipe's UUID dedup cannot
+        # collapse them — the model sees "two images" for one upload
+        # (observed 2026-08-01: filter reused old copy 79cb1456..., core
+        # tagged the current upload 76680237...).
+        if last_user_idx is not None:
+            refs = messages[last_user_idx].get("files") or []
+            if not refs:
+                refs = await self._current_turn_file_refs(__metadata__)
+            for f in refs:
+                if _is_image_file(f) and f.get("id"):
+                    h = await self._file_hash_of(f["id"])
+                    if h:
+                        turn_hash_to_id.setdefault(h, f["id"])
+
         # ── Step 2: strip image_url from message content ────────────────────
         announced = 0
         stripped_historical = 0
-        last_user_idx = None
         if messages:
             # Only the LAST user message can carry a *new* attachment for
             # this turn. Re-hydrated history (stored data: URIs / image_url
@@ -238,12 +269,6 @@ class Filter:
             # (wasted tokens, breaks prefix caching). The model retains
             # conversational memory of earlier attachments; if the user
             # needs the file again they re-attach it.
-            last_user_idx = None
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get("role") == "user":
-                    last_user_idx = i
-                    break
-
             for idx, msg in enumerate(messages):
                 if msg.get("role") != "user":
                     continue
@@ -315,10 +340,41 @@ class Filter:
             from open_webui.models.files import Files
 
             fobj = await Files.get_file_by_id(file_id)
-            return (getattr(fobj, "meta", None) or {}).get("file_hash")
+            if fobj is not None:
+                return (getattr(fobj, "meta", None) or {}).get("file_hash")
+            # Fallback for versions where get_file_by_id is unavailable or
+            # returns None: the metadata endpoint exposes the same row.
+            meta = await Files.get_file_metadata_by_id(file_id)
+            if meta is not None:
+                return (getattr(meta, "meta", None) or {}).get("file_hash")
         except Exception as exc:
             log.warning("_file_hash_of failed for %s: %s", file_id, exc)
         return None
+
+    async def _current_turn_file_refs(self, metadata) -> list:
+        """Recover the current user message's file refs from the STORED
+        chat message (native FC path).
+
+        The core middleware pops `files` off the payload message before
+        filter inlets run, but the DB row still carries them — the same
+        list the core's `add_file_context()` reads later (which is why the
+        core tags the current upload's file while the filter would tag an
+        older identical copy). Returns [] when unavailable (fail-soft: the
+        caller falls back to the user-wide content-hash lookup).
+        """
+        meta = metadata or {}
+        chat_id = meta.get("chat_id")
+        message_id = meta.get("message_id") or meta.get("user_message_id")
+        if not chat_id or not message_id:
+            return []
+        try:
+            from open_webui.models.chats import Chats
+
+            msg = await Chats.get_message_by_id_and_message_id(chat_id, message_id)
+            return (msg or {}).get("files", []) or []
+        except Exception as exc:
+            log.warning("_current_turn_file_refs failed: %s", exc)
+            return []
 
     # ------------------------------------------------------------------
     async def _persist_base64(self, url: str, request, metadata, user, known_hashes: Optional[dict] = None) -> Optional[tuple[str, str]]:

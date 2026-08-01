@@ -115,24 +115,34 @@ is inserted to prevent 400 errors from strict providers.
 
 - **⚠️ TO VERIFY — model initially sees two images on `+` upload**: on a
   `+` upload the model has been observed saying "you sent two images" in
-  the first turn, then "one" in later turns. **Update (2026-08-01):**
-  still observed with v2.12.1 deployed — in the upload turn the model
-  reports two files (e.g. "home.png" + "el segundo archivo"), and in
-  later turns it "rectifies" to one. Re-hydration of the block across
-  turns is **confirmed fixed** (the model now reports the block only in
-  the message where the file was uploaded, never repeated).
+  the first turn, then "one" in later turns. **RESOLVED (2026-08-01,
+  v2.12.2):** root cause found and fixed. The logs from a single
+  `+`-upload turn showed:
 
-  The remaining "two files on the upload turn" points to the **this-turn
-  content-hash match failing** (the `image_url` base64 copy is persisted
-  as a second UUID because it did not match the `body["files"]` ref by
-  hash). Next diagnostic: in the filter logs of the upload turn, look for
-  `image_filter: reused this-turn upload ... (content hash match)` vs
-  `image_filter: no content-hash match; persisting new file (sha256=...)`
-  vs `image_filter: _file_hash_of failed for ...`. The first means the
-  "2 files" comes from elsewhere; the other two confirm the hash lookup
-  is failing (likely `meta["file_hash"]` absent on the instance's files,
-  or `Files.get_file_by_id` unavailable in the deployed version). Then
-  add a fallback and revisit.
+  - `image_filter: content-hash dedup hit ... -> file 79cb1456...` — the
+    filter reused an OLDER file with identical content (user-wide lookup);
+  - `attached_files: found 2 block(s), 2 tag(s); kept 2 (0 dropped)` —
+    the second tag came from the core's `add_file_context()`, which tagged
+    the CURRENT upload's file `76680237...`;
+  - no `reused this-turn upload`, no `_file_hash_of failed`, no `persisting
+    new file` — so `turn_hash_to_id` was **empty**: on this deployment
+    (native function calling) a `+` upload does **not** reach the filter
+    via `body["files"]`. Verified against open-webui `main`: the payload
+    is rebuilt from the stored message, its `files` are injected as
+    `image_url` parts, then **`message.pop('files', None)`** runs before
+    the filter inlets — the refs live only on the DB row, which the core's
+    `add_file_context()` reads later.
+
+  Fix (v2.12.2): the filter now seeds the this-turn hash map from the
+  **stored current user message's `files`** too (the same list the core
+  reads, recovered via `Chats.get_message_by_id_and_message_id`), so the
+  base64 copy reuses the CURRENT upload's file id and both sources tag one
+  UUID. `_file_hash_of` also gained a `get_file_metadata_by_id` fallback.
+  Defense-in-depth (pipe v2.3.0): the pipe dedups image tags by **content
+  hash** as well as UUID, so even if the filter's reuse fails (hash
+  metadata missing, re-encoded copy) two different UUIDs with identical
+  bytes collapse before the provider. See
+  `pipes/agent_loop_guard/DESIGN.md` §18.
 - **Pasted images are announced only once** (v2.12.0): the filter now
   only tags images from the **last user message** (the current turn's
   attachments). Re-hydrated history from earlier turns is stripped but
@@ -150,6 +160,16 @@ is inserted to prevent 400 errors from strict providers.
   unique index behind it (TOCTOU), so two strictly concurrent requests
   could still write two files — worst case equals the pre-dedup
   behavior, it never reuses another user's file.
+- **A `+` upload is announced once, sharing the core's UUID (fixed
+  v2.12.2)**: with native function calling the upload reaches the filter
+  only as a base64 `image_url` copy (the middleware pops `files` off the
+  payload message before filter inlets). v2.12.2 seeds the this-turn hash
+  map from the **stored current user message's `files`** (the same list
+  the core's `add_file_context()` reads), so the filter reuses the
+  current upload's file id and both sources tag one UUID. The pipe's
+  content-hash backstop (v2.3.0) additionally collapses two different
+  UUIDs with identical bytes, guaranteeing one tag per image even if the
+  hash lookup fails.
 - **Core `add_file_context()` blocks remain**: with native function
   calling, the core still prepends its own `<attached_files>` block per
   stored user message *after* the filter runs (from stored
@@ -218,6 +238,24 @@ carries one copy). v2.12.1 fixes it by:
   persisting a new file.
 
 Now a single `+` upload yields a single file tag from the first turn.
+
+**v2.12.2 — seed from the stored current message (native FC).** The
+v2.12.1 fix only seeded from `body["files"]`, but with native function
+calling a `+` upload never reaches the filter that way: the middleware
+rebuilds the payload from the stored message, converts its `files` into
+`image_url` parts, and pops `files` off the payload message *before*
+filter inlets run (verified in `middleware.py`). The filter therefore
+saw only the base64 copy; the user-wide lookup then reused an **older**
+identical file instead of the current upload's file, while the core's
+`add_file_context()` tagged the current upload's file — two UUIDs for
+one image, and the pipe's UUID dedup could not collapse them (the
+"model sees 2 images" symptom, 2026-08-01). v2.12.2 seeds
+`turn_hash_to_id` from the **stored current user message's `files`**
+(the same list `add_file_context()` reads, recovered via
+`Chats.get_message_by_id_and_message_id`) in addition to `body["files"]`,
+and gives `_file_hash_of` a `get_file_metadata_by_id` fallback. Now the
+base64 copy reuses the current upload's file id, so the filter's tag and
+the core's tag share one UUID.
 
 Notes on the hash field:
 

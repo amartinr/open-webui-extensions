@@ -88,3 +88,13 @@ Turn 4 (you type "tell me more now", no new image)
 > no longer occurs even without the pipe. The pipe's cleanup still
 > collapses the core's per-message blocks with the filter's current-turn
 > block and deduplicates by UUID.
+
+> **Update (v2.12.2 + v2.3.0, 2026-08-01)**: a `+` upload can still
+> produce two tags in the SAME turn if the filter and the core tag
+> different UUIDs of the same image (filter reused an older identical
+> copy, core tagged the current upload — see filter DESIGN "Content-Hash
+> Deduplication"). Fixed at the source (filter v2.12.2 reuses the
+> current upload's file id from the stored message's `files`) and
+> backstopped in the pipe (v2.3.0 dedups image tags by `meta["file_hash"]`
+> in addition to UUID, so two UUIDs with identical bytes collapse to the
+> first occurrence).

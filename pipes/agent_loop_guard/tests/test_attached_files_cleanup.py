@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent_loop_guard import (
     _build_block,
     _cleanup_attached_files,
+    _collect_image_uuids,
     _dedupe_tags,
     _file_dedup_key,
     _normalize_tag,
@@ -459,3 +460,111 @@ def test_history_prefix_stable_without_base_url():
     _cleanup_attached_files(turn4, "")
     assert turn3[2] == turn4[2]
     assert turn3[4] == turn4[4]
+
+
+# ---------------------------------------------------------------------------
+# Content-hash backstop (v2.3.0)
+# ---------------------------------------------------------------------------
+#
+# 2026-08-01 incident: on a single `+` upload turn the model reported "two
+# images". The core's add_file_context() tagged the CURRENT upload
+# (76680237...) and the image_filter tagged an OLDER identical copy
+# (79cb1456...) — two different UUIDs, so UUID dedup kept both. The pipe is
+# the last code before the provider, so it also dedups by content
+# (`hash_lookup`: uuid -> meta["file_hash"]) and collapses the pair.
+
+
+def test_content_hash_dedup_collapses_two_uuids_same_bytes():
+    upload = "76680237-1167-4692-894d-2de4e02a5b5b"
+    old_copy = "79cb1456-2b61-4b84-9769-787f5f6eb859"
+    digest = "a" * 64
+    text = (
+        "<attached_files>\n"
+        f'<file type="image" id="{upload}" url="/api/v1/files/{upload}/content" name="home.png"/>\n'
+        "</attached_files>\n\n"
+        "<attached_files>\n"
+        f'<file type="image" id="{old_copy}" url="{ABS}/{old_copy}/content"/>\n'
+        "</attached_files>\n\n"
+        "Hi"
+    )
+    messages = [{"role": "user", "content": text}]
+    _cleanup_attached_files(messages, BASE, hash_lookup={upload: digest, old_copy: digest})
+    content = messages[0]["content"]
+    assert content.count("<file") == 1
+    assert f'id="{upload}"' in content  # first occurrence wins (the upload)
+    assert f'id="{old_copy}"' not in content
+
+
+def test_content_hash_dedup_keeps_different_content():
+    a, b = "76680237-1167-4692-894d-2de4e02a5b5b", "79cb1456-2b61-4b84-9769-787f5f6eb859"
+    text = (
+        "<attached_files>\n"
+        f'<file type="image" id="{a}" url="{ABS}/{a}/content"/>\n'
+        f'<file type="image" id="{b}" url="{ABS}/{b}/content"/>\n'
+        "</attached_files>\n\nHi"
+    )
+    messages = [{"role": "user", "content": text}]
+    _cleanup_attached_files(messages, BASE, hash_lookup={a: "a" * 64, b: "b" * 64})
+    assert messages[0]["content"].count("<file") == 2
+
+
+def test_content_hash_dedup_earliest_message_wins():
+    messages = [
+        _user([_core_block("f1"), "First?"]),
+        _user([_core_block("f2"), "Second?"]),  # same bytes as f1, different UUID
+    ]
+    _cleanup_attached_files(messages, BASE, hash_lookup={"f1": "a" * 64, "f2": "a" * 64})
+    assert "id=\"f1\"" in messages[0]["content"][0]["text"]
+    u2 = "\n".join(p["text"] for p in messages[1]["content"] if p.get("type") == "text")
+    assert "id=\"f2\"" not in u2
+
+
+def test_content_hash_dedup_skips_non_image():
+    text = (
+        "<attached_files>\n"
+        '<file type="file" id="pdf1" url="/api/v1/files/pdf1/content" name="a.pdf" content_type="application/pdf"/>\n'
+        '<file type="file" id="pdf2" url="/api/v1/files/pdf2/content" name="b.pdf" content_type="application/pdf"/>\n'
+        "</attached_files>\n\nHi"
+    )
+    messages = [{"role": "user", "content": text}]
+    _cleanup_attached_files(messages, BASE, hash_lookup={"pdf1": "a" * 64, "pdf2": "a" * 64})
+    assert messages[0]["content"].count("<file") == 2  # non-image tags never collapsed
+
+
+def test_content_hash_dedup_miss_falls_back_to_uuid_only():
+    text = _union_block("f1", "f2") + "Hi"
+    messages = [{"role": "user", "content": text}]
+    _cleanup_attached_files(messages, BASE, hash_lookup={})  # resolution failed → UUID-only
+    assert messages[0]["content"].count("<file") == 2
+
+
+def test_content_hash_dedup_idempotent():
+    upload = "76680237-1167-4692-894d-2de4e02a5b5b"
+    old_copy = "79cb1456-2b61-4b84-9769-787f5f6eb859"
+    digest = "a" * 64
+    text = (
+        "<attached_files>\n"
+        f'<file type="image" id="{upload}" url="{ABS}/{upload}/content"/>\n'
+        f'<file type="image" id="{old_copy}" url="{ABS}/{old_copy}/content"/>\n'
+        "</attached_files>\n\nHi"
+    )
+    messages = [{"role": "user", "content": text}]
+    _cleanup_attached_files(messages, BASE, hash_lookup={upload: digest, old_copy: digest})
+    once = copy.deepcopy(messages)
+    _cleanup_attached_files(messages, BASE, hash_lookup={upload: digest, old_copy: digest})
+    assert messages == once
+
+
+def test_collect_image_uuids():
+    text = (
+        "<attached_files>\n"
+        f'<file type="image" id="f1" url="{ABS}/f1/content"/>\n'
+        '<file type="file" id="pdf1" url="/api/v1/files/pdf1/content" name="doc.pdf" content_type="application/pdf"/>\n'
+        "</attached_files>\n\n"
+    )
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": text}]},
+        {"role": "user", "content": _core_block("f2") + _core_block("f1")},  # duplicate f1
+        {"role": "assistant", "content": "x"},
+    ]
+    assert _collect_image_uuids(messages) == ["f1", "f2"]
