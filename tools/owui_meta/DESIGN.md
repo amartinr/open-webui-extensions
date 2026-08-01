@@ -472,7 +472,7 @@ Implementation notes:
 - [ ] Isolation test with a second user (verify they only see their own data)
 
 ### Phase 2 — Extension
-- [ ] Admin methods (§6.2) with role check
+- [ ] ~~Admin methods (§6.2) with role check~~ — **DEFERRED to a future version (2026-08-01)**
 - [ ] Status events with `__event_emitter__` (§8.5)
 - [ ] **Pagination, sorting and filtering** across all list/search functions (§8.6): iterate pages, per-resource sort criteria, typed filters (type/size for files, text/status for chats) and smart result summarization (e.g. list titles without full history)
 - [ ] **Markdown-first output** (§8.8): renderers per resource (tables for lists, bullets for details, fenced blocks for content), per-user `output_format` valve, raw sizes in bytes

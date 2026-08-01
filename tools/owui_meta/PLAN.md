@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** In progress — Iterations 0, 1 and 6 **done**; Iterations 2–5 pending
+**Status:** In progress — Iterations 0, 1 and 6 **done**; Iteration 2 **deferred to a future version**; Iterations 3–5 pending
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -82,15 +82,19 @@ Implements the Phase 1 MVP from DESIGN §6.1 / §8.
 
 **Third post-iteration fix (2026-08-01, `fix(owui_meta): use canonical trailing-slash routes (verified live)`):** live test failed with “Expected JSON … got 'text/html' (HTTP 200)” on `get_my_profile`. Root cause (verified against the v0.10.2 source + live curl): the **listing routes** (`/api/v1/auths/`, `/api/v1/chats/`, `/api/v1/files/`, `/api/v1/prompts/`, `/api/v1/tools/`, `/api/v1/knowledge/`, `/api/v1/users/`) require a **trailing slash** — without it the request falls into the SPA HTML catch-all (HTTP 200, `text/html`). Sub-resources (`/api/v1/chats/search`, `/pinned`, `/shared`, `/api/v1/chats/{id}`, `/api/v1/files/{id}/content`) and `/api/models` must **NOT** have a slash. The route constants were corrected to the canonical map, `_api_get_json` gained `allow_ndjson` (for `/api/v1/chats/all`, which returns `application/x-ndjson`), a new regression suite pins the full route map (`test/test_route_map.py`), DESIGN §5.1/§5.3/§9.8 updated, module version → 0.2.0.
 
-## Iteration 2 — Admin-only methods with role gate
+## Iteration 2 — Admin-only methods with role gate ⏸️ DEFERRED to a future version (2026-08-01)
 
-**Commit:** `feat(owui_meta): add admin-only methods with role gate`
+**Commit:** *(none — not implemented)*
+
+**Decision:** the user decided **not to implement admin methods for now**; they are moved to a future version of the tool. This iteration is removed from the current scope.
 
 - Methods from §6.2: `list_users`, `get_user`, `list_all_chats`, `get_admin_config`.
 - Role check `__user__.get('role') == 'admin'` **before any HTTP call**; non-admin (or missing `__user__`) → explicit refusal, no request issued, no information leak.
 - **Tests** (`test/test_admin_methods.py`): user role blocked with transport asserting zero requests; admin role proceeds; missing `__user__` refused.
 
-**Definition of done:** regular users get a clean refusal; admins get data; both proven by tests.
+**Definition of done (when picked up again):** regular users get a clean refusal; admins get data; both proven by tests.
+
+**Tracked as future work:** see “Future versions” in this document.
 
 ## Iteration 3 — Pagination, sorting and typed filters
 
@@ -127,7 +131,7 @@ Implements DESIGN §8.6 across the list/search methods:
 
 **Definition of done:** live suite passes against the instance (or documents concrete failures as follow-ups); README complete.
 
-## Iteration 6 — Markdown-first output (pulled forward per user request) ✅ DONE (commits `3b27b22`, `e5a10ab`, `436ead7`)
+## Iteration 6 — Markdown-first output (pulled forward per user request) ✅ DONE (commits `3b27b22`, `e5a10ab`, `436ead7`, `2823c35`)
 
 **Commit:** `feat(owui_meta): return markdown-first output for the model (DESIGN §8.8)`
 
@@ -144,13 +148,14 @@ Implements DESIGN §8.8 (decision 2026-08-01), pulled ahead of Iterations 2–5 
 **Follow-up refinements within this iteration:**
 - `e5a10ab` — `feat(owui_meta): render nested objects as hierarchical markdown, no embedded JSON`: nested objects (profile `permissions`, multimodal chat content) were still emitted as raw JSON inside a bullet; added `_md_hierarchy` (research-backed JSON→MD strategies, llm-md) — bullets for shallow objects, tables for uniform arrays, indented hierarchy for deep nesting, humanized keys, **never raw JSON**.
 - `436ead7` — `perf(owui_meta): restrict markdown bold to headings to save tokens`: removed `**…**` from hierarchy keys and table cells; bold kept only on headings/sections.
-- DESIGN §8.8 and README updated to document both refinements.
+- `2823c35` — `feat(owui_meta): per-user output_format valve (markdown/json dropdown)`: `output_format` became a **per-user valve** (dropdown Markdown/JSON, default `markdown`; no admin valve, no “inherit” option — the tool's built-in default is Markdown).
+- DESIGN §8.8 and README updated to document all refinements.
 
 **Definition of done:** the tool returns readable Markdown by default (tables/bullets), JSON remains available via valve — 56 tests green.
 
 ---
 
-## 5. Modifications made on the fly (deviations from the original plan)
+## 6. Modifications made on the fly (deviations from the original plan)
 
 These changes were not in the initial plan; they emerged during development / live validation and were folded in as they happened.
 
@@ -163,14 +168,24 @@ These changes were not in the initial plan; they emerged during development / li
 | 5 | Design decision (user) | **No embedded JSON in Markdown** — nested objects render as indented bullet hierarchies (research-backed, llm-md) | `permissions` was dumped as raw JSON inside a bullet; user asked for hierarchical formatting. | `e5a10ab` |
 | 6 | Design decision (user) | **Bold restricted to headings** — keys/cells plain | Save tokens; `**…**` in every key wasted ~160 tokens per `permissions` dump. | `436ead7` |
 | 7 | During Iter 1 | **Docstring contract** — reST `:param` single-line, `__*` never documented, enforced by `test/test_docstrings.py` (replicates the v0.10.2 parsers verbatim) | User asked whether docstrings were formatted as Open WebUI expects; verified against source and pinned with a regression test. | `f34b4e4`, `9c91a3f` |
-| 8 | Design decision (user) | **`output_format` became a per-user valve** (dropdown Markdown/JSON, default `markdown`; **no admin valve**) — user chooses the format per session | The agent's research showed no universal format winner (depends on model/task); letting each user choose is more pragmatic than an admin global. Initial “inherit/System default” option removed since there is no admin valve to inherit from. | `3b27b22` (initial), user-valve commit |
+| 8 | Design decision (user) | **`output_format` became a per-user valve** (dropdown Markdown/JSON, default `markdown`; **no admin valve**) — user chooses the format per session | The agent's research showed no universal format winner (depends on model/task); letting each user choose is more pragmatic than an admin global. Initial “inherit/System default” option removed since there is no admin valve to inherit from. | `3b27b22` (initial), `2823c35` (per-user) |
+| 10 | Scope decision (user) | **Admin-only methods deferred** (Iteration 2 removed from current scope) | The user decided not to implement admin methods for now; moved to a future version. Tracked in “Future versions”. | — |
 | 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite in Iteration 5 is still pending; these were one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
 
 **Unchanged commitments:** scope confined to `tools/owui_meta/`; one commit per iteration; Conventional Commits; all docs/code in English; no credentials ever configured or stored.
 
 ---
 
-## 6. Out of scope (per DESIGN §2)
+## 7. Future versions (deferred work)
+
+Work intentionally postponed to a future version of the tool (not part of the current branch scope):
+
+- **Admin-only methods** (former Iteration 2, DESIGN §6.2): `list_users`, `get_user`, `list_all_chats`, `get_admin_config` — with the runtime role gate (`__user__.role == 'admin'` before any HTTP call). Deferred by user decision (2026-08-01).
+- Anything else not explicitly in the current iterations (per DESIGN §2 / out-of-scope list below).
+
+---
+
+## 8. Out of scope (per DESIGN §2)
 
 - RAG/retrieval (`/api/v1/retrieval*`, `rag*`, `embed*`, `rerank*`) — globally bypassed on the instance.
 - Memories (`/api/v1/memories*`).
