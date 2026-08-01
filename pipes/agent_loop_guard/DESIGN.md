@@ -568,6 +568,11 @@ on/off. When off, payloads are forwarded exactly as Open WebUI built them.
 
 **⚠️ TO VERIFY (filter + pipe interplay)**: with the filter at v2.11 the
 model sees **two** images on the first `+` upload turn (duplicate UUID),
-then one. With v2.12.1 deployed it should see one from the start —
-confirm on the instance and, if it still happens, revisit the this-turn
-hash match (see filter DESIGN "Known Limitations").
+then one. **Update (2026-08-01)**: still observed with v2.12.1 deployed —
+model reports two files on the upload turn, one afterwards. The
+re-hydration fix is confirmed (block appears only in the message where
+the file was uploaded). The remaining duplicate points to the filter's
+this-turn content-hash match failing on the instance (see filter DESIGN
+"Known Limitations"); check the filter logs (`reused this-turn upload`
+vs `persisting new file` / `_file_hash_of failed`) and add a fallback if
+needed.

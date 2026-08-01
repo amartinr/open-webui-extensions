@@ -115,14 +115,24 @@ is inserted to prevent 400 errors from strict providers.
 
 - **⚠️ TO VERIFY — model initially sees two images on `+` upload**: on a
   `+` upload the model has been observed saying "you sent two images" in
-  the first turn, then "one" in later turns. Expected root cause: the
-  deployed filter is **v2.11** (it persists the `image_url` copy as a
-  second UUID) instead of **v2.12.1** (which reuses this-turn `+`
-  uploads by content hash — see "Content-Hash Deduplication"). If it
-  still happens with v2.12.1 deployed, the this-turn hash match is
-  failing (e.g. `meta["file_hash"]` absent on the instance's files) —
-  then add diagnostic logging and revisit. **Status: needs re-deployment
-  check + verification.**
+  the first turn, then "one" in later turns. **Update (2026-08-01):**
+  still observed with v2.12.1 deployed — in the upload turn the model
+  reports two files (e.g. "home.png" + "el segundo archivo"), and in
+  later turns it "rectifies" to one. Re-hydration of the block across
+  turns is **confirmed fixed** (the model now reports the block only in
+  the message where the file was uploaded, never repeated).
+
+  The remaining "two files on the upload turn" points to the **this-turn
+  content-hash match failing** (the `image_url` base64 copy is persisted
+  as a second UUID because it did not match the `body["files"]` ref by
+  hash). Next diagnostic: in the filter logs of the upload turn, look for
+  `image_filter: reused this-turn upload ... (content hash match)` vs
+  `image_filter: no content-hash match; persisting new file (sha256=...)`
+  vs `image_filter: _file_hash_of failed for ...`. The first means the
+  "2 files" comes from elsewhere; the other two confirm the hash lookup
+  is failing (likely `meta["file_hash"]` absent on the instance's files,
+  or `Files.get_file_by_id` unavailable in the deployed version). Then
+  add a fallback and revisit.
 - **Pasted images are announced only once** (v2.12.0): the filter now
   only tags images from the **last user message** (the current turn's
   attachments). Re-hydrated history from earlier turns is stripped but
