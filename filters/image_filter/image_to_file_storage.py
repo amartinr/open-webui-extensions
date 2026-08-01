@@ -218,6 +218,9 @@ class Filter:
             body["files"] = non_images if non_images else None
 
         # ── Step 2: strip image_url from message content ────────────────────
+        announced = 0
+        stripped_historical = 0
+        last_user_idx = None
         if messages:
             # Only the LAST user message can carry a *new* attachment for
             # this turn. Re-hydrated history (stored data: URIs / image_url
@@ -247,6 +250,7 @@ class Filter:
                         continue
                     url = item.get("image_url", {}).get("url", "")
                     if announce:
+                        announced += 1
                         if _is_base64_uri(url):
                             persisted = await self._persist_base64(url, __request__, __metadata__, __user__)
                             if persisted:
@@ -256,15 +260,28 @@ class Filter:
                                 file_tags.append(_format_file_tag({"url": "(base64 stripped)", "type": "image"}, base_url))
                         else:
                             _append_file_tag(file_tags, seen, {"url": url, "type": "image"}, base_url)
-                    # else: historical re-hydration — stripped (keeps base64
-                    # out of the LLM context) but not re-announced.
+                    else:
+                        # Historical re-hydration — stripped (keeps base64
+                        # out of the LLM context) but not re-announced.
+                        stripped_historical += 1
                 msg["content"] = new_content if new_content else [{"type": "text", "text": ""}]
+
+        log.info(
+            "image_filter: announced %d image(s) from the current turn; "
+            "stripped %d historical image block(s) without re-announcing "
+            "(last user message idx=%s, user messages=%d)",
+            announced,
+            stripped_historical,
+            last_user_idx,
+            sum(1 for m in messages if m.get("role") == "user"),
+        )
 
         # ── Step 3: inject <attached_files> ─────────────────────────────────
         if file_tags and messages:
             ref = _build_attached_files(file_tags)
             if ref:
                 _prepend_to_user_message(messages, ref)
+                log.info("image_filter: injected <attached_files> with %d tag(s)", len(file_tags))
 
         # ── Step 4: notify ─────────────────────────────────────────────────
         if file_tags and __event_emitter__:

@@ -56,21 +56,21 @@ def _build_guard_message(status: str, tool: str | None, total: int, max_calls: i
 #
 # Open WebUI injects <attached_files> blocks in two places:
 #   - the image_filter inlet prepends ONE block to the LAST user message
-#     (union of all conversation images, absolute URLs);
+#     with the CURRENT turn's images only (since filter v2.12.0; before
+#     that it was the union of all conversation images, re-announced
+#     every turn);
 #   - the core's add_file_context() prepends one block per stored user
 #     message that has files (that message's own files, relative URLs).
 #
-# The filter's union block MOVES to the last user message every turn and
-# re-tags files already tagged in earlier messages' core blocks. That
-# breaks prefix caching: the last user message differs between turn N
-# (has the union block) and turn N+1 (does not), so the provider's cache
-# cannot extend past it.
-#
-# This cleanup is deterministic (a pure function of the payload) and
-# cache-safe: each file is tagged exactly once, in the earliest user
-# message where it appears. Historical per-message blocks stay byte-
-# stable between turns (as long as stored history is unchanged), so the
-# cached prefix extends through the whole history. The model still sees
+# So the payload can carry several per-message core blocks plus the
+# filter's current-turn block, with the same file tagged in more than
+# one place. This cleanup collapses duplicate tags (a simple UUID
+# match) keeping each file once, in the earliest user message where it
+# appears, and re-emits image tags in our canonical format (id +
+# absolute URL). It is deterministic (a pure function of the payload)
+# and cache-safe: historical per-message blocks stay byte-stable
+# between turns, so the cached prefix extends through the whole
+# history. The model still sees
 # every image via the historical per-message blocks; the last user
 # message only keeps genuinely new images. Multiple blocks in one
 # message collapse into one.
