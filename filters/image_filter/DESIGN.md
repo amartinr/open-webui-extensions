@@ -85,7 +85,10 @@ unchanged.
 
 For images uploaded via the `+` button, the filter detects the existing
 file ID in `body["files"]` and does not persist again — the file is
-already on disk.
+already on disk. Since **v2.12.1** it also records each such file's
+content hash (`meta["file_hash"]`) so the `image_url` copy of the same
+image in the current message reuses that file instead of persisting a
+second one (see "Content-Hash Deduplication" below).
 
 For pasted images (Ctrl+V), the filter decodes the `data:` URI **once**,
 hashes the raw bytes, and looks up an existing file owned by the user
@@ -110,6 +113,16 @@ is inserted to prevent 400 errors from strict providers.
 
 ## Known Limitations
 
+- **⚠️ TO VERIFY — model initially sees two images on `+` upload**: on a
+  `+` upload the model has been observed saying "you sent two images" in
+  the first turn, then "one" in later turns. Expected root cause: the
+  deployed filter is **v2.11** (it persists the `image_url` copy as a
+  second UUID) instead of **v2.12.1** (which reuses this-turn `+`
+  uploads by content hash — see "Content-Hash Deduplication"). If it
+  still happens with v2.12.1 deployed, the this-turn hash match is
+  failing (e.g. `meta["file_hash"]` absent on the instance's files) —
+  then add diagnostic logging and revisit. **Status: needs re-deployment
+  check + verification.**
 - **Pasted images are announced only once** (v2.12.0): the filter now
   only tags images from the **last user message** (the current turn's
   attachments). Re-hydrated history from earlier turns is stripped but
@@ -155,7 +168,7 @@ is inserted to prevent 400 errors from strict providers.
   Not implemented — would change the reference-only behaviour described
   above, and is not needed for the current deployment.
 
-## Content-Hash Deduplication (v2.10.0)
+## Content-Hash Deduplication (v2.10.0, extended v2.12.1)
 
 Implemented: option 1 of the former "Open Options" list. Pasted images
 are deduplicated by content before persisting:
@@ -179,6 +192,22 @@ are deduplicated by content before persisting:
    `Chats.insert_chat_files`, mirroring `upload_image()`); on a miss,
    the already-decoded bytes go straight to `upload_image()`, avoiding
    the second decode that `get_image_url_from_base64()` would do.
+
+**v2.12.1 — this-turn `+` uploads take priority.** A `+` upload reaches
+the filter twice in the same request: as a ref in `body["files"]` (the
+file already on disk) and as an `image_url` (base64) copy in the current
+message. Before v2.12.1 the base64 copy was persisted separately, minting
+a second UUID — the model then saw **two** file tags for one upload (and
+on later turns "rectified" to one, because the re-hydrated history only
+carries one copy). v2.12.1 fixes it by:
+
+- collecting `hash → file id` for this turn's `+` uploads (`body["files"]`,
+  via `_file_hash_of`), and
+- in `_persist_base64`, reusing that file when the decoded bytes' sha256
+  matches — before falling back to the user-wide lookup and then to
+  persisting a new file.
+
+Now a single `+` upload yields a single file tag from the first turn.
 
 Notes on the hash field:
 

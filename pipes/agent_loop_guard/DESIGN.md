@@ -547,3 +547,27 @@ on/off. When off, payloads are forwarded exactly as Open WebUI built them.
 | Message content empty after stripping | Empty text part inserted (`[{"type": "text", "text": ""}]`) to avoid 400s on strict providers |
 | `base_url` unavailable | Relative URLs kept as-is (dedup still applies) |
 | Any parsing/dedup error | Logged; payload forwarded unchanged (fail-open) |
+
+### Change log (v2.2.0 → current)
+
+- **v2.2.0** — initial cache-safe cleanup: collapse + dedup across user
+  messages, each file tagged once in the earliest message.
+- **v2.2.x (post-2.2.0 fixes)** — dedup simplified to a **UUID match** and
+  tags re-emitted in **our canonical format** (`id` + absolute
+  `/api/v1/files/{id}/content` URL) regardless of source, so the same
+  image renders identically and both `view_file` (id) and ComfyUI (URL)
+  keep working; cleanup restricted to **image tags only** (non-image
+  tags untouched); **info-level logs** added for dropped duplicates,
+  per-message and per-request summaries.
+- **Filter interplay** — the image_filter must be at **v2.12.1** for the
+  pipe's dedup to be effective on `+` uploads: v2.12.1 makes a single
+  `+` upload produce a single UUID (reusing this-turn `body["files"]` by
+  content hash), so the pipe sees one tag instead of two different UUIDs
+  it cannot collapse. See `filters/image_filter/DESIGN.md` →
+  "Content-Hash Deduplication".
+
+**⚠️ TO VERIFY (filter + pipe interplay)**: with the filter at v2.11 the
+model sees **two** images on the first `+` upload turn (duplicate UUID),
+then one. With v2.12.1 deployed it should see one from the start —
+confirm on the instance and, if it still happens, revisit the this-turn
+hash match (see filter DESIGN "Known Limitations").
