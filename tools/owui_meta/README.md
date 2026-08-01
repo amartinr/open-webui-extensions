@@ -53,6 +53,13 @@ owui_meta/
 
 Import `owui_meta.py` into Open WebUI at **Workspace → Tools → +** and attach it to a model. Then the model can call methods like `get_my_chats()`, `get_my_files()`, `search_chats("budget")`, `get_my_prompts()` — each answering with the requesting user's own data.
 
+List methods support **pagination, sorting and filtering** (client-side, since the API does not expose them):
+
+- `get_my_files(limit=50, sort_by="size" | "created_at" | "filename", sort_order="asc" | "desc", content_type="image/*", min_size=100000, max_size=1000000, filename="report")` — size in raw bytes.
+- `get_my_chats(limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc")`.
+
+The tool iterates pages transparently (bounded by `MAX_PAGES`) and returns a **summarized** result: top N items + counts, never a full dump.
+
 ## Requirements
 
 Installed automatically by Open WebUI on first load:

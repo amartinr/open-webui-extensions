@@ -101,7 +101,9 @@ async def test_get_my_chats_sends_page_size_and_summarizes():
     recorder = Recorder(api_handler)
     tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
     out = await tools.get_my_chats(limit=5, __request__=FakeRequest())
-    assert recorder.requests[0].url.params["pageSize"] == "5"
+    # transparent pagination: page_size = min(max(limit, 20), 50)
+    assert recorder.requests[0].url.params["pageSize"] == "20"
+    assert recorder.requests[0].url.params["page"] == "1"
     payload = json.loads(out)
     assert payload["count"] == 2
     assert payload["chats"][0]["id"] == CHAT_ID
@@ -151,7 +153,7 @@ async def test_get_shared_and_pinned_chats():
 
 async def test_get_my_files_includes_meta_and_total():
     tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
-    out = await tools.get_my_files(FakeRequest())
+    out = await tools.get_my_files(__request__=FakeRequest())
     payload = json.loads(out)
     assert payload["total"] == 104
     f = payload["files"][0]

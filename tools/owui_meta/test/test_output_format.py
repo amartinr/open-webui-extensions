@@ -111,9 +111,9 @@ async def test_files_table_with_raw_bytes():
             "total": 104,
         })
 
-    out = await md_tools(handler).get_my_files(FakeRequest())
-    # summary line carries counts
-    assert "**Files: 2 (104 total on server)**" in out
+    out = await md_tools(handler).get_my_files(__request__=FakeRequest())
+    # summary line carries counts (matched = returned; total = on server)
+    assert "**Files: 2 matched (104 total on server)**" in out
     # header + separator
     assert "| Filename | Type | Size (bytes) | Created | Origin chat | ID |" in out
     # raw byte sizes, no unit prefixes

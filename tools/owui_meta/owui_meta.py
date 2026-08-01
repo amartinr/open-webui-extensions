@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.4.0
+version: 0.5.0
 licence: MIT
 """
 
@@ -34,6 +34,13 @@ except Exception:  # pragma: no cover - environment-dependent
 DEFAULT_FALLBACK_BASE_URL = "http://localhost:8080"
 DEFAULT_TIMEOUT = 15
 DEFAULT_MAX_RESPONSE_CHARS = 8000
+
+# Transparent page iteration: the API caps at 50 items/page and exposes
+# ``total`` (DESIGN §8.6). ``MAX_PAGES`` bounds how many pages the tool will
+# fetch for filtering/sorting so a huge dataset cannot cost an unbounded
+# number of internal calls.
+MAX_PAGES = 5
+DEFAULT_PAGE_SIZE = 50
 
 # ── Canonical route paths (allowlist) ─────────────────────────────────
 # Trailing slashes are SIGNIFICANT in this deployment (v0.10.2):
@@ -578,7 +585,15 @@ class Tools:
 
     def _render_files(self, p: dict) -> str:
         items = p.get("files", [])
-        head = self._summary_header("Files", p.get("count", len(items)), p.get("total"))
+        count = p.get("count", len(items))
+        matched = p.get("matched", count)
+        total = p.get("total")
+        if total is not None and matched != total:
+            head = f"**Files: {matched} matched ({total} total on server)**"
+        else:
+            head = self._summary_header("Files", matched, total)
+        if count < matched:
+            head += f" (showing top {count})"
         table = self._md_table(
             ["Filename", "Type", "Size (bytes)", "Created", "Origin chat", "ID"],
             [
@@ -701,6 +716,117 @@ class Tools:
             number = default
         return max(1, min(number, cap))
 
+    @staticmethod
+    def _coerce_sort_order(value: Any) -> str:
+        try:
+            return "asc" if str(value).strip().lower() == "asc" else "desc"
+        except Exception:
+            return "desc"
+
+    @staticmethod
+    def _coerce_optional_int(value: Any) -> Optional[int]:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    async def _fetch_all_pages(self, token: str, path: str, page_size: int = DEFAULT_PAGE_SIZE,
+                               params: Optional[dict] = None,
+                               max_pages: int = MAX_PAGES) -> tuple[list, int]:
+        """Fetch a paginated listing transparently, up to ``max_pages``.
+
+        Iterates pages until the server reports everything (``total``) or a
+        short page (fewer items than ``page_size``), bounded by ``max_pages``.
+        Returns ``(all_items, total)`` where ``total`` is the server's declared
+        total when known, otherwise the number of items fetched.
+        """
+        all_items: list = []
+        server_total: Optional[int] = None
+        for page in range(1, max_pages + 1):
+            p = dict(params or {})
+            p["page"] = page
+            p["pageSize"] = page_size
+            _s, _ct, body = await self._api_get_json(token, path, p)
+            payload = json.loads(body)
+            items, total = self._extract_items(payload)
+            if isinstance(payload, dict) and "total" in payload:
+                server_total = total
+            all_items.extend(items)
+            if not items or len(items) < page_size:
+                break
+            if server_total is not None and len(all_items) >= server_total:
+                break
+        return all_items, server_total if server_total is not None else len(all_items)
+
+    @staticmethod
+    def _filter_files(items: list, content_type: Any = None, min_size: Any = None,
+                      max_size: Any = None, filename: Any = None) -> list:
+        """Client-side file filtering (DESIGN §8.6 point 3): the files API does
+        not expose these criteria, so we filter locally over fetched pages.
+        All criteria are optional and applied conjunctively.
+        """
+        min_size = Tools._coerce_optional_int(min_size)
+        max_size = Tools._coerce_optional_int(max_size)
+        out = []
+        for f in items:
+            if not isinstance(f, dict):
+                continue
+            meta = f.get("meta") or {}
+            ct = (meta.get("content_type") or "").strip().lower()
+            size = meta.get("size")
+            name = (f.get("filename") or "").strip().lower()
+            if content_type:
+                pat = str(content_type).strip().lower()
+                if not (ct == pat or (pat.endswith("/*") and ct.startswith(pat[:-1]))):
+                    continue
+            if min_size is not None and (size is None or size < min_size):
+                continue
+            if max_size is not None and (size is None or size > max_size):
+                continue
+            if filename and str(filename).strip().lower() not in name:
+                continue
+            out.append(f)
+        return out
+
+    @staticmethod
+    def _sorted_files(items: list, sort_by: Any = "created_at", sort_order: Any = "desc") -> list:
+        """Client-side file sorting: size / created_at / filename."""
+        if not items:
+            return items
+        reverse = Tools._coerce_sort_order(sort_order) != "asc"
+        key = sort_by if isinstance(sort_by, str) else ""
+        if key not in ("size", "created_at", "filename"):
+            key = "created_at"
+
+        def k(f: Any):
+            if key == "size":
+                v = (f.get("meta") or {}).get("size") if isinstance(f, dict) else None
+            elif key == "filename":
+                v = (f.get("filename") or "").lower() if isinstance(f, dict) else None
+            else:
+                v = f.get("created_at") if isinstance(f, dict) else None
+            return (v is None, v)
+
+        return sorted(items, key=k, reverse=reverse)
+
+    @staticmethod
+    def _sorted_chats(items: list, sort_by: Any = "updated_at", sort_order: Any = "desc") -> list:
+        """Client-side chat sorting: updated_at / created_at."""
+        if not items:
+            return items
+        reverse = Tools._coerce_sort_order(sort_order) != "asc"
+        key = sort_by if isinstance(sort_by, str) else ""
+        if key not in ("updated_at", "created_at"):
+            key = "updated_at"
+
+        def k(c: Any):
+            v = c.get(key) if isinstance(c, dict) else None
+            return (v is None, v)
+
+        return sorted(items, key=k, reverse=reverse)
+
     def _extract_items(self, payload: Any) -> tuple[list, int]:
         """Normalize list-shaped responses (array, {items,total}, {data})."""
         if isinstance(payload, list):
@@ -795,25 +921,39 @@ class Tools:
         models = self._summarize_models(items if isinstance(items, list) else [])
         return self._ok({"count": len(models), "models": models}, "models", output_format=output_format)
 
-    async def get_my_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_my_chats(
+        self,
+        limit: int = 10,
+        sort_by: str = "updated_at",
+        sort_order: str = "desc",
+        __request__: Any = None,
+        __user__: dict = None,
+    ) -> str:
         """List the requesting user's recent chats (id, title, dates).
 
         :param limit: how many chats to return (default 10, max 100).
+        :param sort_by: "updated_at" or "created_at" (default "updated_at").
+        :param sort_order: "asc" or "desc" (default "desc").
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_chats(limit, __request__, __user__=__user__, output_format=output_format),
+            self._get_my_chats(
+                limit, __request__, sort_by=sort_by, sort_order=sort_order,
+                __user__=__user__, output_format=output_format,
+            ),
             output_format=output_format,
         )
 
-    async def _get_my_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+    async def _get_my_chats(self, limit: Any, request: Any, sort_by: Any = "updated_at",
+                            sort_order: Any = "desc", __user__: Optional[dict] = None,
+                            output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         limit = self._coerce_limit(limit)
-        _status, _ct, body = await self._api_get_json(
-            token, _ROUTE_CHATS, {"pageSize": limit}
-        )
-        items, total = self._extract_items(json.loads(body))
-        chats = self._summarize_chats(items)
+        sort_order = self._coerce_sort_order(sort_order)
+        page_size = min(max(limit, 20), DEFAULT_PAGE_SIZE)
+        all_items, total = await self._fetch_all_pages(token, _ROUTE_CHATS, page_size=page_size)
+        sorted_items = self._sorted_chats(all_items, sort_by, sort_order)
+        chats = self._summarize_chats(sorted_items[:limit])
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
     async def get_chat(self, chat_id: str, __request__: Any = None, __user__: dict = None) -> str:
@@ -900,25 +1040,62 @@ class Tools:
         chats = self._summarize_chats(items)
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_my_files(self, __request__: Any = None, __user__: dict = None) -> str:
-        """List the requesting user's files with metadata.
+    async def get_my_files(
+        self,
+        limit: int = 50,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        content_type: str = None,
+        min_size: int = None,
+        max_size: int = None,
+        filename: str = None,
+        __request__: Any = None,
+        __user__: dict = None,
+    ) -> str:
+        """List the requesting user's files with optional sorting and filtering.
 
         Returns filename, content type, size (bytes), dates and the origin
         chat/message when the file was generated by a chat. Binary content is
         not fetched — use get_file_content() to read a specific file.
+
+        :param limit: how many files to return after sorting/filtering (default 50, max 500).
+        :param sort_by: "size", "created_at" or "filename" (default "created_at").
+        :param sort_order: "asc" or "desc" (default "desc").
+        :param content_type: filter by MIME type, e.g. "image/png" or "image/*".
+        :param min_size: minimum file size in bytes.
+        :param max_size: maximum file size in bytes.
+        :param filename: partial filename match, case-insensitive.
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_files(__request__, __user__=__user__, output_format=output_format),
+            self._get_my_files(
+                __request__,
+                limit=limit, sort_by=sort_by, sort_order=sort_order,
+                content_type=content_type, min_size=min_size, max_size=max_size,
+                filename=filename, __user__=__user__, output_format=output_format,
+            ),
             output_format=output_format,
         )
 
-    async def _get_my_files(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+    async def _get_my_files(self, request: Any, limit: Any = 50, sort_by: Any = "created_at",
+                            sort_order: Any = "desc", content_type: Any = None,
+                            min_size: Any = None, max_size: Any = None, filename: Any = None,
+                            __user__: Optional[dict] = None,
+                            output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
-        _status, _ct, body = await self._api_get_json(token, _ROUTE_FILES)
-        items, total = self._extract_items(json.loads(body))
-        files = self._summarize_files(items)
-        return self._ok({"count": len(files), "total": total, "files": files}, "files", output_format=output_format)
+        limit = self._coerce_limit(limit, default=50, cap=500)
+        sort_order = self._coerce_sort_order(sort_order)
+        page_size = min(max(limit, 20), DEFAULT_PAGE_SIZE)
+        all_items, total = await self._fetch_all_pages(token, _ROUTE_FILES, page_size=page_size)
+        filtered = self._filter_files(all_items, content_type, min_size, max_size, filename)
+        sorted_items = self._sorted_files(filtered, sort_by, sort_order)
+        files = self._summarize_files(sorted_items[:limit])
+        return self._ok({
+            "count": len(files),
+            "matched": len(filtered),
+            "total": total,
+            "files": files,
+        }, "files", output_format=output_format)
 
     async def get_file_content(self, file_id: str, __request__: Any = None, __user__: dict = None) -> str:
         """Read a file's content by id.

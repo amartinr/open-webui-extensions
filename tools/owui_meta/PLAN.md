@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** In progress — Iterations 0, 1 and 6 **done**; Iteration 2 **deferred to a future version**; Iterations 3–5 pending
+**Status:** In progress — Iterations 0, 1, 3 and 6 **done**; Iteration 2 **deferred to a future version**; Iterations 4–5 pending
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -96,19 +96,23 @@ Implements the Phase 1 MVP from DESIGN §6.1 / §8.
 
 **Tracked as future work:** see “Future versions” in this document.
 
-## Iteration 3 — Pagination, sorting and typed filters
+## Iteration 3 — Pagination, sorting and typed filters ✅ DONE (commit pending)
 
 **Commit:** `feat(owui_meta): add pagination, sorting and typed filters`
 
-Implements DESIGN §8.6 across the list/search methods:
+Implements DESIGN §8.6 across the list methods:
 
-- `page` / `page_size` parameters with sensible defaults; transparent page iteration up to a `MAX_PAGES` cap whenever the response declares `total > returned`.
-- Per-resource sorting: chats by `updated_at`/`created_at`; files by `size`/`created_at`/`filename`.
-- Typed filters, server-side first (only local filtering when the API lacks the criterion): files by `content_type`, `min_size`/`max_size` (bytes), filename fragment; chats by `text` and status (`pinned`/`archived`/`shared`).
-- Summarized output — top N items + `total` — so large datasets never saturate the context (also bounded by `max_response_chars`).
-- **Tests** (`test/test_pagination.py`): multi-page mock (total > pageSize), cap enforcement, filter application, summary shape.
+- **Transparent page iteration** (`_fetch_all_pages`): iterates pages up to `MAX_PAGES` (5) until the server's declared `total` is reached or a short page (fewer items than `page_size`) is returned; `page_size = min(max(limit, 20), 50)`.
+- **Client-side sorting** (the API does not expose sort params):
+  - Files: `size`, `created_at`, `filename` (`sort_by`, default `created_at`).
+  - Chats: `updated_at`, `created_at` (`sort_by`, default `updated_at`).
+  - `sort_order`: `asc` / `desc` (default `desc`). Invalid `sort_by` falls back to the default.
+- **Client-side typed filters** (`_filter_files`, conjunctive, all optional):
+  - Files: `content_type` (exact or `image/*` wildcard), `min_size` / `max_size` (bytes), `filename` fragment (case-insensitive).
+- **Summarized output**: lists returned to the model are summarized (top `limit` + counts) and bounded by `max_response_chars`; the Markdown header reports `matched` vs `total on server` and `(showing top N)` when truncated.
+- **Tests** (`test/test_pagination.py`): multi-page iteration (104 → 3 pages), short-page stop, MAX_PAGES cap, file sorting (size/name), chat sorting, wildcard/filter/range filters, matched count, invalid sort fallback, markdown header.
 
-**Definition of done:** a 100+ item dataset is queryable with filtering and sorting in bounded output — proven by tests.
+**Definition of done:** a 100+ item dataset is queryable with filtering and sorting in bounded output — proven by tests (73 total green).
 
 ## Iteration 4 — Status events (UX)
 
