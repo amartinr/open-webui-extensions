@@ -257,6 +257,22 @@ and gives `_file_hash_of` a `get_file_metadata_by_id` fallback. Now the
 base64 copy reuses the current upload's file id, so the filter's tag and
 the core's tag share one UUID.
 
+**v2.12.3 — deterministic convergence + diagnostics.** Two hardening
+steps after a runtime verification (2026-08-01): (1) `_find_file_by_hash`
+now prefers the **most recently created** file with the digest
+(`created_at` desc) — `get_files_by_user_id()` returns rows in arbitrary
+order, so a plain first-match could pick an OLDER identical copy while
+the core tags the current upload (the 19:23 incident); newest-first makes
+the reuse deterministic (the current upload is the newest file with that
+hash). (2) `_current_turn_file_refs` prefers `user_message_id` (the id
+`load_messages_from_db` itself uses) and logs an **info diagnostic**
+(skipped reason / stored refs found) so a future "why didn't the this-turn
+reuse fire" question is answerable from the logs; the seeding is also
+gated on the current message actually carrying an `image_url` part
+(plain-text turns skip the DB read). `_file_hash_of` falls back to
+`get_file_metadata_by_id` also when the row's `meta` lacks the key (not
+only when the row is missing).
+
 Notes on the hash field:
 
 - The table has **two** hashes — `meta["file_hash"]` (sha256 of the raw

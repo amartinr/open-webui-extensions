@@ -3,7 +3,7 @@ title: Image to File Storage
 author: pi-agent
 description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects a deduplicated <attached_files> block with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images. Pasted images are announced only in the turn they are pasted — later turns strip the re-hydrated history without re-announcing it.
 required_open_webui_version: 0.5.0
-version: 2.12.2
+version: 2.12.3
 """
 
 import base64
@@ -247,15 +247,22 @@ class Filter:
         # collapse them — the model sees "two images" for one upload
         # (observed 2026-08-01: filter reused old copy 79cb1456..., core
         # tagged the current upload 76680237...).
-        if last_user_idx is not None:
-            refs = messages[last_user_idx].get("files") or []
-            if not refs:
-                refs = await self._current_turn_file_refs(__metadata__)
-            for f in refs:
-                if _is_image_file(f) and f.get("id"):
-                    h = await self._file_hash_of(f["id"])
-                    if h:
-                        turn_hash_to_id.setdefault(h, f["id"])
+        #
+        # Only worth it when this turn actually carries an image_url copy:
+        # plain-text turns skip the DB read entirely.
+        if last_user_idx is not None and isinstance(messages[last_user_idx].get("content"), list):
+            if any(
+                _is_image_url_block(item)
+                for item in messages[last_user_idx]["content"]
+            ):
+                refs = messages[last_user_idx].get("files") or []
+                if not refs:
+                    refs = await self._current_turn_file_refs(__metadata__)
+                for f in refs:
+                    if _is_image_file(f) and f.get("id"):
+                        h = await self._file_hash_of(f["id"])
+                        if h:
+                            turn_hash_to_id.setdefault(h, f["id"])
 
         # ── Step 2: strip image_url from message content ────────────────────
         announced = 0
@@ -341,9 +348,12 @@ class Filter:
 
             fobj = await Files.get_file_by_id(file_id)
             if fobj is not None:
-                return (getattr(fobj, "meta", None) or {}).get("file_hash")
-            # Fallback for versions where get_file_by_id is unavailable or
-            # returns None: the metadata endpoint exposes the same row.
+                h = (getattr(fobj, "meta", None) or {}).get("file_hash")
+                if h:
+                    return h
+            # Fallback (also when get_file_by_id is unavailable, returns
+            # None, or the row's meta lacks the key): the metadata endpoint
+            # exposes the same row.
             meta = await Files.get_file_metadata_by_id(file_id)
             if meta is not None:
                 return (getattr(meta, "meta", None) or {}).get("file_hash")
@@ -361,17 +371,37 @@ class Filter:
         core tags the current upload's file while the filter would tag an
         older identical copy). Returns [] when unavailable (fail-soft: the
         caller falls back to the user-wide content-hash lookup).
+
+        `user_message_id` is preferred over `message_id`: it is the id the
+        middleware itself uses to load the message chain up to the current
+        user message (load_messages_from_db), while `message_id` can be a
+        different id (e.g. the assistant message in a continuation).
         """
         meta = metadata or {}
         chat_id = meta.get("chat_id")
-        message_id = meta.get("message_id") or meta.get("user_message_id")
+        message_id = meta.get("user_message_id") or meta.get("message_id")
         if not chat_id or not message_id:
+            log.info(
+                "image_filter: _current_turn_file_refs skipped — no "
+                "chat_id/message_id in metadata (chat_id=%r message_id=%r)",
+                chat_id,
+                message_id,
+            )
             return []
         try:
             from open_webui.models.chats import Chats
 
             msg = await Chats.get_message_by_id_and_message_id(chat_id, message_id)
-            return (msg or {}).get("files", []) or []
+            refs = (msg or {}).get("files", []) or []
+            log.info(
+                "image_filter: _current_turn_file_refs chat=%s msg=%s -> "
+                "%d stored file ref(s)%s",
+                chat_id,
+                message_id,
+                len(refs),
+                " (message not found in DB)" if msg is None else "",
+            )
+            return refs
         except Exception as exc:
             log.warning("_current_turn_file_refs failed: %s", exc)
             return []
@@ -443,8 +473,16 @@ class Filter:
             return None
 
     async def _find_file_by_hash(self, user_id: str, file_hash: str) -> Optional[dict]:
-        """Return the first file owned by `user_id` whose
-        `meta["file_hash"]` matches the given digest.
+        """Return the file owned by `user_id` whose `meta["file_hash"]`
+        matches the given digest — preferring the MOST RECENTLY created
+        one.
+
+        `get_files_by_user_id()` returns rows in arbitrary order, so a
+        plain first-match can pick an OLDER identical copy instead of the
+        current `+` upload (which is the newest file with that hash).
+        Newest-first makes the reuse deterministic: the current upload
+        wins over any older duplicate, matching what the core's
+        `add_file_context()` tags.
 
         Best-effort: on any error it returns None and the caller falls
         back to persisting a new file. No index exists on
@@ -457,10 +495,16 @@ class Filter:
             from open_webui.models.files import Files
 
             files = await Files.get_files_by_user_id(user_id)
+            files = sorted(
+                files,
+                key=lambda f: getattr(f, "created_at", 0) or 0,
+                reverse=True,
+            )
             for f in files:
                 if (f.meta or {}).get("file_hash") == file_hash:
                     log.info(
-                        "image_filter: content-hash dedup hit for user %s -> file %s",
+                        "image_filter: content-hash dedup hit for user %s -> file %s "
+                        "(newest match)",
                         user_id,
                         f.id,
                     )
