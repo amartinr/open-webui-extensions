@@ -167,7 +167,8 @@ to absolute (`webui.url`, fallback `request.base_url`) so downstream tools
 keep working. Disable with the `ATTACHED_FILES_CLEANUP` valve.
 
 See `DESIGN.md` §18 and `filters/image_filter/DESIGN.md` →
-"Attached-Files Accumulation" for details.
+"Attached-Files Accumulation" for details, and `EXAMPLE.md` for a
+side-by-side before/after walkthrough.
 
 ---
 
