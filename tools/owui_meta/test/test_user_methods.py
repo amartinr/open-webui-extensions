@@ -21,7 +21,7 @@ FILE_ID = "643f81c9-2bc8-44d7-b4a1-994cdb1c503b"
 def api_handler(request):
     """Mock of the Open WebUI internal API for the verified endpoint map."""
     path = request.url.path
-    if path == "/api/v1/auths":
+    if path == "/api/v1/auths/":
         return json_response({
             "id": "16dcaa6d-7122-4cd5-bc01-823064998d75",
             "name": "Abel",
@@ -34,7 +34,7 @@ def api_handler(request):
             {"id": "deepseek-v4-coding-assistant", "name": "DeepSeek V4", "owned_by": "openai",
              "info": {"big": "x" * 500}},
         ]})
-    if path == "/api/v1/chats":
+    if path == "/api/v1/chats/":
         return json_response([
             {"id": CHAT_ID, "title": "Budget planning", "created_at": 1785457944, "updated_at": 1785458000},
             {"id": "aaaa", "title": "Ideas", "created_at": 1, "updated_at": 2},
@@ -64,15 +64,15 @@ def api_handler(request):
         })
     if path == f"/api/v1/files/{FILE_ID}/content":
         return binary_response(b"hello file content", "text/plain")
-    if path == "/api/v1/prompts":
+    if path == "/api/v1/prompts/":
         return json_response([
             {"id": "pr1", "command": "/news", "name": "Get current news", "content": "Summarize today's news"},
         ])
-    if path == "/api/v1/tools":
+    if path == "/api/v1/tools/":
         return json_response([
             {"id": "tl1", "name": "Enhance Image", "meta": {"description": "Upscales an image"}},
         ])
-    if path == "/api/v1/knowledge":
+    if path == "/api/v1/knowledge/":
         return json_response({"items": [
             {"id": "kb1", "name": "Company docs", "description": "Internal wiki", "created_at": 123},
         ], "total": 1})

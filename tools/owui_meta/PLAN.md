@@ -80,6 +80,8 @@ Implements the Phase 1 MVP from DESIGN §6.1 / §8.
 - `get_chat()` returns the full history and relies on `max_response_chars` truncation — revisit summarization (top messages + total) in Iteration 3.
 - Confirm `GET /api/v1/chats/search?text=` (verified as the parameter by 422; full response format pending confirmation).
 
+**Third post-iteration fix (2026-08-01, `fix(owui_meta): use canonical trailing-slash routes (verified live)`):** live test failed with “Expected JSON … got 'text/html' (HTTP 200)” on `get_my_profile`. Root cause (verified against the v0.10.2 source + live curl): the **listing routes** (`/api/v1/auths/`, `/api/v1/chats/`, `/api/v1/files/`, `/api/v1/prompts/`, `/api/v1/tools/`, `/api/v1/knowledge/`, `/api/v1/users/`) require a **trailing slash** — without it the request falls into the SPA HTML catch-all (HTTP 200, `text/html`). Sub-resources (`/api/v1/chats/search`, `/pinned`, `/shared`, `/api/v1/chats/{id}`, `/api/v1/files/{id}/content`) and `/api/models` must **NOT** have a slash. The route constants were corrected to the canonical map, `_api_get_json` gained `allow_ndjson` (for `/api/v1/chats/all`, which returns `application/x-ndjson`), a new regression suite pins the full route map (`test/test_route_map.py`), DESIGN §5.1/§5.3/§9.8 updated, module version → 0.2.0.
+
 ## Iteration 2 — Admin-only methods with role gate
 
 **Commit:** `feat(owui_meta): add admin-only methods with role gate`

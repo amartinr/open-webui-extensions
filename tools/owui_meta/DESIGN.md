@@ -137,16 +137,16 @@ Sources: **real curl tests with a `user`-role API key** against `http://open-web
 
 | Area | Endpoint | Observed response |
 |---|---|---|
-| Profile | `GET /api/v1/auths` | Full profile: id, name, email, role, permissions |
+| Profile | `GET /api/v1/auths/` (trailing slash) | Full profile: id, name, email, role, permissions |
 | Models | `GET /api/models` | OpenAI-compatible: `{"data":[{id, name, owned_by, info…}]}` |
-| Chats | `GET /api/v1/chats` | Array of your chats `{id, title, updated_at, created_at, …}` |
+| Chats | `GET /api/v1/chats/` (trailing slash) | Array of your chats `{id, title, updated_at, created_at, …}` |
 | Chats | `GET /api/v1/chats/{id}` | Full chat with message history |
-| Chats | `GET /api/v1/chats/search?text=…` | Search (parameter confirmed: `text`, not `q`) |
-| Files | `GET /api/v1/files` | `{"items":[{id, filename, meta, …}], "total": N}` |
+| Chats | `GET /api/v1/chats/search?text=…` | Search (parameter confirmed: `text`, not `q`); **no trailing slash** |
+| Files | `GET /api/v1/files/` | `{"items":[{id, filename, meta, …}], "total": N}` |
 | Files | `GET /api/v1/files/{id}/content` | File binary (e.g. `image/png`) |
-| Workspace | `GET /api/v1/knowledge` | `{"items":[], "total":0}` |
-| Workspace | `GET /api/v1/prompts` | Array of prompts `{id, command, name, content}` |
-| Workspace | `GET /api/v1/tools` | Array of tools `{id, name, meta, access_grants…}` |
+| Workspace | `GET /api/v1/knowledge/` (trailing slash) | `{"items":[], "total":0}` |
+| Workspace | `GET /api/v1/prompts/` (trailing slash) | Array of prompts `{id, command, name, content}` |
+| Workspace | `GET /api/v1/tools/` (trailing slash) | Array of tools `{id, name, meta, access_grants…}` |
 
 ### 5.2 🔒 Blocked by role (correct behavior)
 
@@ -158,7 +158,7 @@ Sources: **real curl tests with a `user`-role API key** against `http://open-web
 
 | Case | Behavior |
 |---|---|
-| Nonexistent backend route (e.g. `GET /api/v1/models/` with trailing slash) | **SPA HTML with HTTP 200** (frontend catch-all) |
+| Nonexistent backend route OR wrong trailing slash (e.g. `GET /api/v1/auths` without slash, or `GET /api/v1/models/` with slash) | **SPA HTML with HTTP 200** (frontend catch-all). The catch-all is what absorbs a *miss*, not a redirect — so both a nonexistent route and a wrong-slash route produce HTML |
 | Registered route but method not allowed (e.g. `POST /api/v1/retrieval/query`) | **405 JSON** `{"detail":"Method Not Allowed"}` |
 | OpenAPI docs (`/openapi.json`, `/docs`, `/redoc`) | **Disabled** on this instance → returns SPA HTML |
 
@@ -416,7 +416,7 @@ Implementation notes:
 5. **OpenAPI documentation is disabled** on the instance: the endpoint map was validated against the exact tag's source code (v0.10.2), which is the authoritative source.
 6. **Router prefixes are defined in `main.py`** (`include_router(..., prefix='/api/v1/…')`), not in each router: any version upgrade must be reviewed there.
 7. **Pagination is mandatory** (files POC): observed `pageSize` max 50, `total` in the response. `GET /api/v1/files/` returned 50 items with `total: 104`; 3 pages had to be iterated to list everything. Also, `content_type` and `size` (bytes) live in each item's `meta` — type/size filtering is done on the listing, without downloading binaries.
-8. **The trailing slash matters**: `/api/v1/files` (no slash) → SPA HTML; `/api/v1/files/` (with slash) → JSON. The allowlist must fix the canonical form of each route (with or without slash) and not rely on redirects.
+8. **The trailing slash matters, and it is NOT uniform.** Verified live (2026-08-01): the **listing routes** (`/api/v1/auths/`, `/api/v1/chats/`, `/api/v1/files/`, `/api/v1/prompts/`, `/api/v1/tools/`, `/api/v1/knowledge/`, `/api/v1/users/`) require a **trailing slash** — without it they fall through to the SPA HTML catch-all (HTTP 200, `text/html`). But the **sub-resources** (`/api/v1/chats/search`, `/pinned`, `/shared`, `/api/v1/chats/{id}`, `/api/v1/files/{id}/content`) and `/api/models` must **NOT** have a trailing slash — with one they fall to the SPA catch-all too. The allowlist must fix the canonical form of each route individually, not rely on a uniform rule or redirects (FastAPI/Starlette does not 307-redirect here; the SPA catch-all absorbs the miss).
 
 ---
 

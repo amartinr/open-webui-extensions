@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.1.2
+version: 0.2.0
 licence: MIT
 """
 
@@ -35,20 +35,25 @@ DEFAULT_TIMEOUT = 15
 DEFAULT_MAX_RESPONSE_CHARS = 8000
 
 # ── Canonical route paths (allowlist) ─────────────────────────────────
-# Trailing slashes are significant: ``/api/v1/files/`` returns JSON while
-# ``/api/v1/files`` falls through to the SPA HTML catch-all (HTTP 200).
-_ROUTE_PROFILE = "/api/v1/auths"
+# Trailing slashes are SIGNIFICANT in this deployment (v0.10.2):
+#   - Listings (auths, chats, files, prompts, tools, knowledge, users)
+#     are registered with a trailing slash:  GET /api/v1/<resource>/
+#     -> WITHOUT the slash they fall into the SPA HTML catch-all (HTTP 200).
+#   - Sub-resources (search, pinned, shared, {id}, …) and /api/models are
+#     registered WITHOUT a trailing slash.
+# Verified live against the instance (2026-08-01): see PLAN.md §iteration-1.
+_ROUTE_PROFILE = "/api/v1/auths/"
 _ROUTE_MODELS = "/api/models"
-_ROUTE_CHATS = "/api/v1/chats"
+_ROUTE_CHATS = "/api/v1/chats/"
 _ROUTE_CHAT = "/api/v1/chats/{chat_id}"
 _ROUTE_CHATS_SEARCH = "/api/v1/chats/search"
 _ROUTE_CHATS_SHARED = "/api/v1/chats/shared"
 _ROUTE_CHATS_PINNED = "/api/v1/chats/pinned"
 _ROUTE_FILES = "/api/v1/files/"
 _ROUTE_FILE_CONTENT = "/api/v1/files/{file_id}/content"
-_ROUTE_PROMPTS = "/api/v1/prompts"
-_ROUTE_TOOLS = "/api/v1/tools"
-_ROUTE_KNOWLEDGE = "/api/v1/knowledge"
+_ROUTE_PROMPTS = "/api/v1/prompts/"
+_ROUTE_TOOLS = "/api/v1/tools/"
+_ROUTE_KNOWLEDGE = "/api/v1/knowledge/"
 
 # Content types that are useful as text when reading a file's content.
 _TEXT_CONTENT_TYPES = frozenset({
@@ -247,11 +252,19 @@ class Tools:
         return resp.status_code, content_type
 
     async def _api_get_json(self, token: str, path: str,
-                            params: Optional[dict] = None) -> tuple[int, str, str]:
-        """JSON GET: validates Content-Type (SPA HTML catch-all returns 200)."""
+                            params: Optional[dict] = None,
+                            allow_ndjson: bool = False) -> tuple[int, str, str]:
+        """JSON GET: validates Content-Type (SPA HTML catch-all returns 200).
+
+        ``allow_ndjson`` permits ``application/x-ndjson`` (one JSON object per
+        line, e.g. ``/api/v1/chats/all``) when the consumer handles it.
+        """
         resp = await self._fetch_with_retry(token, path, params)
         status, content_type = self._validate_status(resp)
-        if content_type != "application/json":
+        allowed = {"application/json"}
+        if allow_ndjson:
+            allowed.add("application/x-ndjson")
+        if content_type not in allowed:
             raise ToolError(
                 f"Expected JSON from the internal API but got "
                 f"'{content_type or 'no content type'}' (HTTP {status}) — the route "
