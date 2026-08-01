@@ -378,6 +378,7 @@ Implementation notes:
 - **File content → fenced block** with the content type as language hint (e.g. ` ```csv `). Binary content → a one-line note with metadata (no bytes).
 - **Chat history → heading + per-message blocks** (`**user** …` / `**assistant** …`).
 - **Errors → plain-text one-liners**, not JSON: `Error: Not authenticated: …`.
+- **Bold only on headings** — to save tokens, `**…**` is used **only for headings/sections** (`**Profile**`, `**Permissions**`, `**Chats: N**`, `**Files: N**`, message roles in `get_chat`). Keys inside hierarchies and tables are **plain** (`- Models: false`, not `- **Models**: false`).
 - **Nested objects → hierarchical bullets, never embedded JSON.** Deeply nested structures (e.g. the profile's `permissions` object, depth ~3) are rendered as an indented bullet hierarchy with humanized keys (`snake_case` → `Title Case`):
   ```markdown
   **Permissions**

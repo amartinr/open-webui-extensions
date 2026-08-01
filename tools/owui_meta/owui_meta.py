@@ -401,7 +401,7 @@ class Tools:
             for key, val in value.items():
                 label = self._humanize_key(key)
                 if isinstance(val, dict) and val:
-                    lines.append(f"{pad}- **{label}**")
+                    lines.append(f"{pad}- {label}")
                     lines.append(self._md_hierarchy(val, depth + 1))
                 elif isinstance(val, list):
                     if val and self._md_uniform_keys(val):
@@ -412,10 +412,10 @@ class Tools:
                             lines.append(pad + "  " + tl)
                     else:
                         lines.append(
-                            f"{pad}- **{label}**: " + ", ".join(self._md_scalar(x) for x in val)
+                            f"{pad}- {label}: " + ", ".join(self._md_scalar(x) for x in val)
                         )
                 else:
-                    lines.append(f"{pad}- **{label}**: {self._md_scalar(val)}")
+                    lines.append(f"{pad}- {label}: {self._md_scalar(val)}")
             return "\n".join(lines)
         if isinstance(value, list):
             if not value:
