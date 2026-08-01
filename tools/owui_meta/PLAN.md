@@ -96,7 +96,7 @@ Implements the Phase 1 MVP from DESIGN §6.1 / §8.
 
 **Tracked as future work:** see “Future versions” in this document.
 
-## Iteration 3 — Pagination, sorting and typed filters ✅ DONE (commit pending)
+## Iteration 3 — Pagination, sorting and typed filters ✅ DONE (commit `33af0d0`)
 
 **Commit:** `feat(owui_meta): add pagination, sorting and typed filters`
 
