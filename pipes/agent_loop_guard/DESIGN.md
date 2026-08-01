@@ -570,14 +570,15 @@ on/off. When off, payloads are forwarded exactly as Open WebUI built them.
   two images for one `+` upload" incident even if the filter's this-turn
   reuse fails (hash metadata missing, re-encoded copy). Non-image tags
   never participate; a resolution failure degrades to UUID-only dedup.
-- **Filter interplay** — the image_filter must be at **v2.12.1** for the
-  pipe's *UUID* dedup to be effective on `+` uploads: v2.12.1 makes a
-  single `+` upload produce a single UUID (reusing this-turn `body["files"]`
-  by content hash), so the pipe sees one tag instead of two different UUIDs
-  it cannot collapse. v2.12.2 extends that reuse to the **stored current
-  message** (native FC path — see `filters/image_filter/DESIGN.md` →
-  "Content-Hash Deduplication"), converging filter and core on one UUID;
-  the pipe's v2.3.0 content-hash dedup remains as the safety net.
+- **Filter interplay** — the image_filter must be at **v2.12.3** for
+  deterministic convergence on `+` uploads. v2.12.1 made a single `+`
+  upload produce a single UUID via `body["files"]`; v2.12.2 extended the
+  reuse to the **stored current message** (native FC path — the
+  middleware pops `files` off the payload message before filter inlets);
+  v2.12.3 made the fallback deterministic (newest file with the digest
+  wins) and added diagnostics. See
+  `filters/image_filter/DESIGN.md` → "Content-Hash Deduplication". The
+  pipe's v2.3.0 content-hash dedup remains as the safety net.
 
 **⚠️ TO VERIFY (filter + pipe interplay)**: with the filter at v2.11 the
 model sees **two** images on the first `+` upload turn (duplicate UUID),
@@ -589,4 +590,10 @@ a single `+`-upload turn confirmed the mechanism — the filter reused an
 `body["files"]` (the middleware pops `files` off the payload message
 before filter inlets). Fixed in the filter (v2.12.2: seed from the
 stored current message's `files`) and backstopped in the pipe (v2.3.0:
-content-hash dedup).
+content-hash dedup). **Confirmed end-to-end (2026-08-01, 22:21, v2.12.3
++ pipe):** the seeding fires — `_current_turn_file_refs ... -> 1 stored
+file ref(s)` + `reused this-turn upload 7f1d4ae9... (content hash match)`
+— the filter's tag and the core's tag share one UUID, and the pipe logs
+`dropping duplicate tag id:7f1d4ae9...` + `kept 1 (1 dropped as
+duplicates)`. Model sees one image; the tool-iteration turn keeps the
+single absolute-URL tag.

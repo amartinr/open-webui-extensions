@@ -143,6 +143,24 @@ is inserted to prevent 400 errors from strict providers.
   metadata missing, re-encoded copy) two different UUIDs with identical
   bytes collapse before the provider. See
   `pipes/agent_loop_guard/DESIGN.md` §18.
+
+  **Confirmed end-to-end on the deployed instance (2026-08-01, 22:21,
+  v2.12.3)**: the upload turn now logs
+
+  ```
+  image_filter: _current_turn_file_refs chat=... msg=... -> 1 stored file ref(s)
+  image_filter: reused this-turn upload 7f1d4ae9-... (content hash match)
+  ...
+  attached_files: dropping duplicate tag id:7f1d4ae9-... (already tagged earlier in this request)
+  attached_files: ... kept 1 (1 dropped as duplicates); collapsed to 1 block(s)
+  ```
+
+  The seeding (**step 1**) fires and reuses the CURRENT upload's file id,
+  so the filter's tag and the core's `add_file_context()` tag share one
+  UUID; the pipe then collapses the two blocks into a single tag. The
+  model sees **one** image, and the tool-iteration turn keeps that single
+  tag with its absolute URL — the downstream service consumes it. The
+  19:23 "two images" symptom is gone.
 - **Pasted images are announced only once** (v2.12.0): the filter now
   only tags images from the **last user message** (the current turn's
   attachments). Re-hydrated history from earlier turns is stripped but
@@ -161,15 +179,19 @@ is inserted to prevent 400 errors from strict providers.
   could still write two files — worst case equals the pre-dedup
   behavior, it never reuses another user's file.
 - **A `+` upload is announced once, sharing the core's UUID (fixed
-  v2.12.2)**: with native function calling the upload reaches the filter
-  only as a base64 `image_url` copy (the middleware pops `files` off the
-  payload message before filter inlets). v2.12.2 seeds the this-turn hash
-  map from the **stored current user message's `files`** (the same list
-  the core's `add_file_context()` reads), so the filter reuses the
-  current upload's file id and both sources tag one UUID. The pipe's
-  content-hash backstop (v2.3.0) additionally collapses two different
-  UUIDs with identical bytes, guaranteeing one tag per image even if the
-  hash lookup fails.
+  v2.12.2, hardened v2.12.3, confirmed 2026-08-01)**: with native
+  function calling the upload reaches the filter only as a base64
+  `image_url` copy (the middleware pops `files` off the payload message
+  before filter inlets). v2.12.2 seeds the this-turn hash map from the
+  **stored current user message's `files`** (the same list the core's
+  `add_file_context()` reads), so the filter reuses the current upload's
+  file id and both sources tag one UUID. v2.12.3 makes the user-wide
+  fallback deterministic (newest file with the digest wins). Runtime logs
+  (2026-08-01) confirm the seeding fires (`reused this-turn upload ...
+  (content hash match)`) and the pipe collapses filter+core blocks to one
+  tag. The pipe's content-hash backstop (v2.3.0) additionally collapses
+  two different UUIDs with identical bytes, guaranteeing one tag per
+  image even if the hash lookup fails.
 - **Core `add_file_context()` blocks remain**: with native function
   calling, the core still prepends its own `<attached_files>` block per
   stored user message *after* the filter runs (from stored
@@ -271,7 +293,11 @@ reuse fire" question is answerable from the logs; the seeding is also
 gated on the current message actually carrying an `image_url` part
 (plain-text turns skip the DB read). `_file_hash_of` falls back to
 `get_file_metadata_by_id` also when the row's `meta` lacks the key (not
-only when the row is missing).
+only when the row is missing). **Runtime confirmation (2026-08-01,
+22:21):** the deployed v2.12.3 fires the seeding path —
+`_current_turn_file_refs -> 1 stored file ref(s)` then `reused this-turn
+upload ... (content hash match)` — so step 1 (not just the newest-first
+step 2) converges on the current upload's UUID.
 
 Notes on the hash field:
 

@@ -178,7 +178,11 @@ Since filter v2.12.0, pasted images are announced only in the turn they
 are pasted (the filter no longer re-announces re-hydrated history), so the
 "moving union block" scenario no longer occurs — the pipe's remaining job
 is to collapse the core's per-message blocks with the filter's current-
-turn block and deduplicate by UUID.
+turn block and deduplicate by UUID. With the filter at **v2.12.3** the
+filter and the core converge on the current upload's UUID (confirmed in
+runtime logs: `reused this-turn upload ... (content hash match)`, pipe
+`kept 1 (1 dropped)`), so the UUID dedup collapses the pair; the
+content-hash backstop (v2.3.0) remains for the fallback path.
 
 See `DESIGN.md` §18 and `filters/image_filter/DESIGN.md` →
 "Attached-Files Accumulation" for details, and `EXAMPLE.md` for a
