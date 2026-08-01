@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.2.0
+version: 0.3.0
 licence: MIT
 """
 
@@ -14,7 +14,8 @@ import json
 import logging
 import os
 import re
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Any, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, Field
@@ -111,6 +112,14 @@ class Tools:
             ),
             ge=500,
             le=100_000,
+        )
+        output_format: Literal["markdown", "json"] = Field(
+            "markdown",
+            description=(
+                "Format of the response returned to the model: 'markdown' (default, "
+                "tables/bullets — easier for models to read) or 'json' (structured "
+                "objects)."
+            ),
         )
 
     def __init__(self):
@@ -289,11 +298,220 @@ class Tools:
         note = f"\n… [truncated from {len(text)} to {max_chars} characters]"
         return text[: max(0, max_chars - len(note))] + note
 
-    def _ok(self, payload: Any) -> str:
-        return self._truncate(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+    def _ok(self, payload: Any, kind: str = "generic") -> str:
+        """Serialize a successful result in the configured output format.
+
+        ``kind`` selects the Markdown renderer (tables for lists, bullets for
+        details, fenced blocks for content). In ``json`` mode every kind is
+        the same structured dump.
+        """
+        if self.valves.output_format == "json":
+            return self._truncate(
+                json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+            )
+        return self._truncate(self._render(kind, payload))
 
     def _error(self, message: str) -> str:
-        return json.dumps({"error": message}, ensure_ascii=False, indent=2)
+        """Serialize an error: plain-text one-liner in markdown, JSON object in json."""
+        if self.valves.output_format == "json":
+            return json.dumps({"error": message}, ensure_ascii=False, indent=2)
+        return f"Error: {message}"
+
+    # ──────────────────────────────────────────────
+    #  Markdown renderers (DESIGN §8.8)
+    # ──────────────────────────────────────────────
+
+    @staticmethod
+    def _esc_md(value: Any) -> str:
+        """Escape a cell for a Markdown table (pipe + newlines)."""
+        return str(value).replace("|", "\\|").replace("\n", " ").strip()
+
+    @staticmethod
+    def _fmt_ts(epoch: Any) -> str:
+        """Render an epoch timestamp as a readable UTC date/time."""
+        if isinstance(epoch, (int, float)):
+            return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        return "—"
+
+    @staticmethod
+    def _summary_header(label: str, count: int, total: Any = None) -> str:
+        """Header line: count, plus total when the server reports more."""
+        if total is not None and total != count:
+            return f"**{label}: {count} ({total} total on server)**"
+        return f"**{label}: {count}**"
+
+    def _md_table(self, headers: list[str], rows: list[list[Any]]) -> str:
+        if not rows:
+            return "(none)"
+        lines = ["| " + " | ".join(headers) + " |"]
+        lines.append("|" + "|".join("---" for _ in headers) + "|")
+        for row in rows:
+            lines.append("| " + " | ".join(self._esc_md(c) for c in row) + " |")
+        return "\n".join(lines)
+
+    def _render(self, kind: str, payload: Any) -> str:
+        if kind == "profile":
+            return self._render_profile(payload)
+        if kind == "models":
+            return self._render_models(payload)
+        if kind == "chats":
+            return self._render_chats(payload)
+        if kind == "chat":
+            return self._render_chat(payload)
+        if kind == "files":
+            return self._render_files(payload)
+        if kind == "file_text":
+            return self._render_file_text(payload)
+        if kind == "file_binary":
+            return self._render_file_binary(payload)
+        if kind == "prompts":
+            return self._render_prompts(payload)
+        if kind == "tools":
+            return self._render_tools(payload)
+        if kind == "knowledge":
+            return self._render_knowledge(payload)
+        # Unknown kind: structured fallback (defensive).
+        return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+
+    def _render_profile(self, p: dict) -> str:
+        lines = ["**Profile**", ""]
+        for key, label in (("name", "Name"), ("email", "Email"), ("role", "Role"), ("id", "ID")):
+            value = p.get(key)
+            if value is not None:
+                lines.append(f"- {label}: {value}")
+        perms = p.get("permissions")
+        if perms:
+            lines.append(f"- Permissions: {json.dumps(perms, ensure_ascii=False)}")
+        return "\n".join(lines)
+
+    def _render_models(self, p: dict) -> str:
+        items = p.get("models", [])
+        head = self._summary_header("Models", p.get("count", len(items)))
+        table = self._md_table(
+            ["ID", "Name", "Owned by"],
+            [[m.get("id"), m.get("name"), m.get("owned_by")] for m in items],
+        )
+        return head + "\n\n" + table
+
+    def _render_chats(self, p: dict) -> str:
+        items = p.get("chats", [])
+        count = p.get("count", len(items))
+        query = p.get("query")
+        head = (
+            f"**Search results for '{query}': {count}**"
+            if query
+            else self._summary_header("Chats", count, p.get("total"))
+        )
+        table = self._md_table(
+            ["Title", "Updated", "ID"],
+            [[m.get("title"), self._fmt_ts(m.get("updated_at")), m.get("id")] for m in items],
+        )
+        return head + "\n\n" + table
+
+    def _render_chat(self, p: dict) -> str:
+        lines = [
+            f"**Chat: {p.get('title', '(untitled)')}** (id: {p.get('id', '')})",
+            "",
+        ]
+        for message in p.get("messages", []):
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if content is None:
+                continue
+            role = message.get("role", "message")
+            lines.append(f"**{role}**")
+            lines.append(str(content))
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    def _render_files(self, p: dict) -> str:
+        items = p.get("files", [])
+        head = self._summary_header("Files", p.get("count", len(items)), p.get("total"))
+        table = self._md_table(
+            ["Filename", "Type", "Size (bytes)", "Created", "Origin chat", "ID"],
+            [
+                [
+                    f.get("filename"),
+                    f.get("content_type"),
+                    f.get("size"),
+                    self._fmt_ts(f.get("created_at")),
+                    f.get("origin_chat_id") or "—",
+                    f.get("id"),
+                ]
+                for f in items
+            ],
+        )
+        return head + "\n\n" + table
+
+    _LANG_HINTS = {
+        "application/json": "json",
+        "application/xml": "xml",
+        "application/x-yaml": "yaml",
+        "application/javascript": "javascript",
+        "application/x-sh": "sh",
+        "application/csv": "csv",
+        "application/sql": "sql",
+        "application/x-httpd-php": "php",
+        "text/plain": "text",
+        "text/csv": "csv",
+        "text/markdown": "markdown",
+        "text/html": "html",
+        "text/yaml": "yaml",
+        "text/xml": "xml",
+        "text/css": "css",
+        "text/javascript": "javascript",
+    }
+
+    def _lang_hint(self, ct: str) -> str:
+        if ct in self._LANG_HINTS:
+            return self._LANG_HINTS[ct]
+        if ct.startswith("text/"):
+            sub = ct.split("/", 1)[1].strip()
+            if re.fullmatch(r"[A-Za-z0-9_+.-]+", sub):
+                return sub
+        return "text"
+
+    def _render_file_text(self, p: dict) -> str:
+        ct = p.get("content_type", "text")
+        lang = self._lang_hint(ct)
+        return (
+            f"**File: {p.get('file_id')}** ({ct}, {p.get('size')} bytes)\n\n"
+            f"```{lang}\n{p.get('content', '')}\n```"
+        )
+
+    def _render_file_binary(self, p: dict) -> str:
+        return (
+            f"**File: {p.get('file_id')}** ({p.get('content_type')}, {p.get('size')} bytes)\n\n"
+            f"{p.get('note', 'Binary content not returned inline.')}"
+        )
+
+    def _render_prompts(self, p: dict) -> str:
+        items = p.get("prompts", [])
+        head = self._summary_header("Prompts", p.get("count", len(items)))
+        table = self._md_table(
+            ["Command", "Name", "ID"],
+            [[f.get("command"), f.get("name"), f.get("id")] for f in items],
+        )
+        return head + "\n\n" + table
+
+    def _render_tools(self, p: dict) -> str:
+        items = p.get("tools", [])
+        head = self._summary_header("Tools", p.get("count", len(items)))
+        table = self._md_table(
+            ["Name", "Description", "ID"],
+            [[t.get("name"), t.get("description"), t.get("id")] for t in items],
+        )
+        return head + "\n\n" + table
+
+    def _render_knowledge(self, p: dict) -> str:
+        items = p.get("knowledge", [])
+        head = self._summary_header("Knowledge bases", p.get("count", len(items)), p.get("total"))
+        table = self._md_table(
+            ["Name", "Description", "ID"],
+            [[k.get("name"), k.get("description"), k.get("id")] for k in items],
+        )
+        return head + "\n\n" + table
 
     async def _run(self, coro: Any) -> str:
         """Execute a private implementation, converting failures to safe JSON."""
@@ -400,7 +618,7 @@ class Tools:
     async def _get_my_profile(self, request: Any) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_PROFILE)
-        return self._ok(json.loads(body))
+        return self._ok(json.loads(body), "profile")
 
     async def get_models(self, __request__: Any = None) -> str:
         """List the models available to the requesting user (id, name, owner).
@@ -415,7 +633,7 @@ class Tools:
         payload = json.loads(body)
         items = payload.get("data") if isinstance(payload, dict) else payload
         models = self._summarize_models(items if isinstance(items, list) else [])
-        return self._ok({"count": len(models), "models": models})
+        return self._ok({"count": len(models), "models": models}, "models")
 
     async def get_my_chats(self, limit: int = 10, __request__: Any = None) -> str:
         """List the requesting user's recent chats (id, title, dates).
@@ -432,7 +650,7 @@ class Tools:
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"count": len(chats), "total": total, "chats": chats})
+        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats")
 
     async def get_chat(self, chat_id: str, __request__: Any = None) -> str:
         """Get the full content of one chat (all its messages) by id.
@@ -447,7 +665,7 @@ class Tools:
         _status, _ct, body = await self._api_get_json(
             token, _ROUTE_CHAT.format(chat_id=chat_id)
         )
-        return self._ok(json.loads(body))
+        return self._ok(json.loads(body), "chat")
 
     async def search_chats(self, text: str, __request__: Any = None) -> str:
         """Search the requesting user's chats for a text fragment.
@@ -466,7 +684,7 @@ class Tools:
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"query": text, "count": len(chats), "total": total, "chats": chats})
+        return self._ok({"query": text, "count": len(chats), "total": total, "chats": chats}, "chats")
 
     async def get_shared_chats(self, limit: int = 10, __request__: Any = None) -> str:
         """List chats the requesting user has shared with others.
@@ -483,7 +701,7 @@ class Tools:
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"count": len(chats), "total": total, "chats": chats})
+        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats")
 
     async def get_pinned_chats(self, limit: int = 10, __request__: Any = None) -> str:
         """List chats the requesting user has pinned.
@@ -500,7 +718,7 @@ class Tools:
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"count": len(chats), "total": total, "chats": chats})
+        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats")
 
     async def get_my_files(self, __request__: Any = None) -> str:
         """List the requesting user's files with metadata.
@@ -516,7 +734,7 @@ class Tools:
         _status, _ct, body = await self._api_get_json(token, _ROUTE_FILES)
         items, total = self._extract_items(json.loads(body))
         files = self._summarize_files(items)
-        return self._ok({"count": len(files), "total": total, "files": files})
+        return self._ok({"count": len(files), "total": total, "files": files}, "files")
 
     async def get_file_content(self, file_id: str, __request__: Any = None) -> str:
         """Read a file's content by id.
@@ -541,14 +759,14 @@ class Tools:
                 "content_type": ct,
                 "size": len(body),
                 "content": text,
-            })
+            }, "file_text")
         return self._ok({
             "file_id": file_id,
             "content_type": ct,
             "size": len(body),
             "note": f"Binary content ({ct}) is not returned inline. Use get_my_files() "
                     "for metadata (size, dates, origin).",
-        })
+        }, "file_binary")
 
     async def get_my_prompts(self, __request__: Any = None) -> str:
         """List the requesting user's custom prompts (command, name, content)."""
@@ -563,7 +781,7 @@ class Tools:
             for item in items
             if isinstance(item, dict)
         ]
-        return self._ok({"count": len(prompts), "prompts": prompts})
+        return self._ok({"count": len(prompts), "prompts": prompts}, "prompts")
 
     async def get_my_tools(self, __request__: Any = None) -> str:
         """List the tools available to the requesting user (id, name, description)."""
@@ -583,7 +801,7 @@ class Tools:
                 "name": item.get("name"),
                 "description": meta.get("description"),
             })
-        return self._ok({"count": len(tools), "tools": tools})
+        return self._ok({"count": len(tools), "tools": tools}, "tools")
 
     async def get_knowledge_bases(self, __request__: Any = None) -> str:
         """List the knowledge bases available to the requesting user (id, name, description)."""
@@ -598,4 +816,4 @@ class Tools:
             for item in items
             if isinstance(item, dict)
         ]
-        return self._ok({"count": len(knowledge), "total": total, "knowledge": knowledge})
+        return self._ok({"count": len(knowledge), "total": total, "knowledge": knowledge}, "knowledge")

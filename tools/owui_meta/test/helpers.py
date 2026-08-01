@@ -71,15 +71,18 @@ class Recorder:
         return self.handler(request)
 
 
-def make_tools(handler, *, fallback_base_url="http://localhost:8080", base_url=None):
+def make_tools(handler, *, fallback_base_url="http://localhost:8080", base_url=None,
+               output_format="markdown"):
     """Build a Tools instance wired to a mocked transport.
 
     Deterministic base-URL resolution: the real admin config store is never
     touched (``owui_meta.Config = None``). Tests control WEBUI_URL via
-    monkeypatch when they need the env-var resolution path.
+    monkeypatch when they need the env-var resolution path. ``output_format``
+    lets a test opt into the structured JSON view (the default is markdown).
     """
     tools = owui_meta.Tools()
     tools.valves.fallback_base_url = fallback_base_url
+    tools.valves.output_format = output_format
     tools._transport = httpx.MockTransport(handler)
     tools._base_url_override = base_url
     owui_meta.Config = None

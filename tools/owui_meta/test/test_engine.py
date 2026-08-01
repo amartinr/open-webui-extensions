@@ -36,7 +36,7 @@ async def test_token_from_http_authorization_credentials_object():
     request = FakeRequest(token=bearer_credentials("sk-real-session-token"))
     out = await tools.get_my_profile(request)
     assert seen["auth"] == "Bearer sk-real-session-token"
-    assert '"Abel"' in out
+    assert "Abel" in out
 
 
 async def test_token_forwarded_as_bearer_header():
@@ -51,7 +51,7 @@ async def test_token_forwarded_as_bearer_header():
     out = await tools.get_my_profile(FakeRequest(token="sk-test-abc"))
     assert seen["auth"] == "Bearer sk-test-abc"
     assert "application/json" in (seen["accept"] or "")
-    assert '"Abel"' in out
+    assert "Abel" in out
 
 
 async def test_missing_token_returns_clear_error_without_network_call():
@@ -61,7 +61,7 @@ async def test_missing_token_returns_clear_error_without_network_call():
     tools = make_tools(Recorder(handler), base_url="http://open-webui.private")
     out = await tools.get_my_profile(FakeRequest(token=None))
     assert "No authentication token available" in out
-    assert "error" in out
+    assert "error" in out.lower()
 
 
 async def test_token_never_appears_in_output():
@@ -107,11 +107,28 @@ async def test_truncation_applies_to_output():
     def handler(request):
         return json_response({"blob": "x" * 5000})
 
-    tools = make_tools(handler, base_url="http://open-webui.private")
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
     tools.valves.max_response_chars = 500
     out = await tools.get_my_profile(FakeRequest())
     assert "truncated" in out
     assert len(out) <= 500 + 5  # marker keeps the total at max_chars
+
+
+async def test_truncation_applies_to_markdown():
+    # A long chat history is rendered as Markdown; truncation still applies.
+    long_chat = {"id": "c1", "title": "Big", "messages": [
+        {"role": "user", "content": "y" * 3000},
+        {"role": "assistant", "content": "z" * 3000},
+    ]}
+
+    def handler(request):
+        return json_response(long_chat)
+
+    tools = make_tools(handler, base_url="http://open-webui.private")
+    tools.valves.max_response_chars = 500
+    out = await tools.get_chat("c1", __request__=FakeRequest())
+    assert "truncated" in out
+    assert len(out) <= 500 + 5
 
 
 async def test_base_url_from_env_var(monkeypatch):
@@ -122,7 +139,7 @@ async def test_base_url_from_env_var(monkeypatch):
     monkeypatch.setenv("WEBUI_URL", "http://env.example")
     tools = make_tools(handler)
     out = await tools.get_my_profile(FakeRequest())
-    assert '"u1"' in out
+    assert "u1" in out
 
 
 class FakeConfig:
@@ -148,7 +165,7 @@ async def test_base_url_from_admin_config(monkeypatch):
 
     owui_meta.Config = FakeConfig
     out = await tools.get_my_profile(FakeRequest())
-    assert '"u1"' in out
+    assert "u1" in out
 
 
 async def test_base_url_from_admin_config_ignores_non_string(monkeypatch):
@@ -165,7 +182,7 @@ async def test_base_url_from_admin_config_ignores_non_string(monkeypatch):
     owui_meta.Config = FakeConfig
     FakeConfig.value = {"nested": True}
     out = await tools.get_my_profile(FakeRequest())
-    assert '"u1"' in out
+    assert "u1" in out
 
 
 async def test_base_url_from_admin_config_errors_fall_through(monkeypatch):
@@ -184,7 +201,7 @@ async def test_base_url_from_admin_config_errors_fall_through(monkeypatch):
 
     owui_meta.Config = BrokenConfig
     out = await tools.get_my_profile(FakeRequest())
-    assert '"u1"' in out
+    assert "u1" in out
 
 
 async def test_base_url_from_valve_when_env_unset(monkeypatch):
@@ -195,7 +212,7 @@ async def test_base_url_from_valve_when_env_unset(monkeypatch):
     monkeypatch.delenv("WEBUI_URL", raising=False)
     tools = make_tools(handler, fallback_base_url="http://localhost:9000")
     out = await tools.get_my_profile(FakeRequest())
-    assert '"u1"' in out
+    assert "u1" in out
 
 
 async def test_retry_with_fallback_on_transport_error(monkeypatch):
@@ -208,7 +225,7 @@ async def test_retry_with_fallback_on_transport_error(monkeypatch):
         return json_response({"ok": True})
 
     monkeypatch.setenv("WEBUI_URL", "http://unreachable.invalid")
-    tools = make_tools(handler, fallback_base_url="http://localhost:8080")
+    tools = make_tools(handler, fallback_base_url="http://localhost:8080", output_format="json")
     out = await tools.get_my_profile(FakeRequest())
     assert calls == ["unreachable.invalid", "localhost"]
     assert '"ok"' in out

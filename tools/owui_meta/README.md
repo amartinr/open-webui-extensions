@@ -17,6 +17,25 @@ A server-side Open WebUI tool that lets the model query the platform's **own int
 - **Truncation** — responses are capped before reaching the model context.
 - **No token logging** — the credential never appears in logs or tool output.
 
+## Output format
+
+The tool returns **Markdown by default** (`output_format` valve, default `markdown`):
+
+- Lists → **tables** with a summary line (`**Files: 2 (104 total on server)**`), **IDs always present** so the model can call follow-up methods.
+- Raw numeric values passed through unformatted — byte sizes as `8796`, never `8.8 KB`; readable UTC dates.
+- Profile → flat bullets; chat → heading + per-message blocks; file text → fenced block; binary → metadata note; errors → plain-text `Error: …`.
+- Set the valve to `json` for models that prefer structured objects.
+
+Example of what the model receives for `get_my_chats()`:
+
+```markdown
+**Chats: 2**
+
+| Title | Updated | ID |
+|---|---|---|
+| Budget planning | 2026-07-31 00:33 | b5d844f0-85c5-4cdc-8cf3-4f2366bc249e |
+```
+
 ## Structure
 
 ```

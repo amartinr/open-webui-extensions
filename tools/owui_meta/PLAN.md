@@ -127,6 +127,20 @@ Implements DESIGN §8.6 across the list/search methods:
 
 **Definition of done:** live suite passes against the instance (or documents concrete failures as follow-ups); README complete.
 
+## Iteration 6 — Markdown-first output (pulled forward per user request) ✅ DONE (commit `a2f1d2b`)
+
+**Commit:** `feat(owui_meta): return markdown-first output for the model (DESIGN §8.8)`
+
+Implements DESIGN §8.8 (decision 2026-08-01), pulled ahead of Iterations 2–5 at the user's request because the live agent output revealed the tool was still returning JSON.
+
+- New valve `output_format: "markdown" | "json"` (default `markdown`; admin-set, no credential implications).
+- Markdown renderers per resource: lists → tables, profile → bullets, chat → heading + per-message blocks, file text → fenced block with language hint, file binary → metadata note, errors → plain-text `Error: …` one-liners.
+- **Raw numeric values** (byte sizes passed through unformatted — `8796`, no `KB` prefix), readable UTC dates, **IDs always present** in tables for follow-up calls.
+- `_error` returns `Error: <message>` in markdown / `{"error": …}` in json; `_ok` dispatches by kind.
+- Tests: `test/test_output_format.py` (markdown rendering, raw bytes, no token, json mode still works); existing suites updated to opt into `output_format="json"` where they parse structured output.
+
+**Definition of done:** the tool returns readable Markdown by default (tables/bullets), JSON remains available via valve — 54 tests green.
+
 ---
 
 ## 4. Out of scope (per DESIGN §2)
