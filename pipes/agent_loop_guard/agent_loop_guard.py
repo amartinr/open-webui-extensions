@@ -111,6 +111,19 @@ def _parse_file_tags(text: str) -> list[dict]:
     return tags
 
 
+def _count_blocks_with_file_tags(text: str) -> int:
+    """Number of `<attached_files>` blocks in `text` that contain a `<file>` tag.
+
+    Blocks without any `<file>` tag are ignored by the parser (defensive),
+    so they are not counted as collapsible blocks.
+    """
+    count = 0
+    for block in _BLOCK_RE.finditer(text or ""):
+        if _FILE_TAG_RE.search(block.group(1)):
+            count += 1
+    return count
+
+
 def _is_image_attrs(attrs) -> bool:
     """True when the tag describes an image (by `type` or `content_type`).
 
@@ -228,19 +241,25 @@ def _dedupe_tags(tags: list[dict], seen: set[str]) -> list[dict]:
     """Keep tags whose canonical key has not been seen before.
 
     Placeholder tags (key "") are always kept and never added to `seen`.
+    Each dropped duplicate is logged at info level for debuggability.
     """
     kept = []
     for tag in tags:
         key = _file_dedup_key(tag)
         if key:
             if key in seen:
+                log.info(
+                    "attached_files: dropping duplicate tag %s "
+                    "(already tagged earlier in this request)",
+                    key,
+                )
                 continue
             seen.add(key)
         kept.append(tag)
     return kept
 
 
-def _cleanup_attached_files(messages: list, base_url: str = "") -> None:
+def _cleanup_attached_files(messages: list, base_url: str = "") -> dict:
     """Collapse and deduplicate `<attached_files>` blocks across user messages.
 
     Pure function of the payload (deterministic → cache-safe). Each file is
@@ -249,18 +268,41 @@ def _cleanup_attached_files(messages: list, base_url: str = "") -> None:
     normalized to absolute when `base_url` is available. Mutates `messages`
     in place (the same dicts survive the middleware's shallow copies).
     Fail-open by design: callers wrap in try/except and forward unchanged.
+
+    Returns a stats dict (for logging):
+    `{"user_messages", "blocks_found", "blocks_kept", "tags_kept",
+    "tags_dropped", "image_tags_kept"}`.
     """
     seen: set[str] = set()
+    stats = {
+        "user_messages": 0,
+        "blocks_found": 0,
+        "blocks_kept": 0,
+        "tags_kept": 0,
+        "tags_dropped": 0,
+        "image_tags_kept": 0,
+    }
+
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
+        stats["user_messages"] += 1
 
         content = message.get("content")
         if isinstance(content, str):
+            blocks_found = _count_blocks_with_file_tags(content)
             tags = _parse_file_tags(content)
             if not tags:
                 continue
             kept = _dedupe_tags(tags, seen)
+            dropped = len(tags) - len(kept)
+            stats["blocks_found"] += blocks_found
+            stats["tags_kept"] += len(kept)
+            stats["tags_dropped"] += dropped
+            stats["image_tags_kept"] += sum(
+                1 for t in kept if _is_image_attrs(t["attrs"])
+            )
+
             cleaned = re.sub(r"^\n+", "", _BLOCK_RE.sub("", content))
             block = _build_block(kept, base_url)
             if block:
@@ -269,6 +311,20 @@ def _cleanup_attached_files(messages: list, base_url: str = "") -> None:
                 message["content"] = cleaned
             else:
                 message["content"] = [{"type": "text", "text": ""}]
+            blocks_kept = 1 if block else 0
+            stats["blocks_kept"] += blocks_kept
+            log.info(
+                "attached_files: user message %d/%d — found %d block(s), "
+                "%d tag(s); kept %d (%d dropped as duplicates); "
+                "collapsed to %d block(s)",
+                stats["user_messages"],
+                len(messages),
+                blocks_found,
+                len(tags),
+                len(kept),
+                dropped,
+                blocks_kept,
+            )
 
         elif isinstance(content, list):
             tags = []
@@ -277,7 +333,19 @@ def _cleanup_attached_files(messages: list, base_url: str = "") -> None:
                     tags.extend(_parse_file_tags(part.get("text", "")))
             if not tags:
                 continue
+            blocks_found = sum(
+                _count_blocks_with_file_tags(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
             kept = _dedupe_tags(tags, seen)
+            dropped = len(tags) - len(kept)
+            stats["blocks_found"] += blocks_found
+            stats["tags_kept"] += len(kept)
+            stats["tags_dropped"] += dropped
+            stats["image_tags_kept"] += sum(
+                1 for t in kept if _is_image_attrs(t["attrs"])
+            )
 
             new_content = []
             for part in content:
@@ -294,6 +362,33 @@ def _cleanup_attached_files(messages: list, base_url: str = "") -> None:
             if block:
                 new_content.insert(0, {"type": "text", "text": block})
             message["content"] = new_content if new_content else [{"type": "text", "text": ""}]
+            blocks_kept = 1 if block else 0
+            stats["blocks_kept"] += blocks_kept
+            log.info(
+                "attached_files: user message %d/%d — found %d block(s), "
+                "%d tag(s); kept %d (%d dropped as duplicates); "
+                "collapsed to %d block(s)",
+                stats["user_messages"],
+                len(messages),
+                blocks_found,
+                len(tags),
+                len(kept),
+                dropped,
+                blocks_kept,
+            )
+
+    log.info(
+        "attached_files: cleanup done — %d user message(s) scanned, "
+        "blocks %d → %d, image tag(s) kept %d, duplicate(s) dropped %d "
+        "(base_url=%s)",
+        stats["user_messages"],
+        stats["blocks_found"],
+        stats["blocks_kept"],
+        stats["image_tags_kept"],
+        stats["tags_dropped"],
+        base_url or "none",
+    )
+    return stats
 
 
 class Pipe:
