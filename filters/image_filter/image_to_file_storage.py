@@ -3,7 +3,7 @@ title: Image to File Storage
 author: pi-agent
 description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects a deduplicated <attached_files> block with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images. Pasted images are announced only in the turn they are pasted — later turns strip the re-hydrated history without re-announcing it.
 required_open_webui_version: 0.5.0
-version: 2.12.0
+version: 2.12.1
 """
 
 import base64
@@ -208,11 +208,19 @@ class Filter:
 
         # ── Step 1: handle body["files"] ────────────────────────────────────
         files: Optional[list] = body.get("files")
+        # hash -> file id of images uploaded via `+` THIS turn, so pasted /
+        # re-encoded copies of the same image reuse that file instead of
+        # minting a duplicate UUID (the "model saw 2 images" bug).
+        turn_hash_to_id: dict[str, str] = {}
         if isinstance(files, list):
             non_images = []
             for f in files:
                 if _is_image_file(f):
                     _append_file_tag(file_tags, seen, f, base_url)
+                    if f.get("id"):
+                        h = await self._file_hash_of(f["id"])
+                        if h:
+                            turn_hash_to_id[h] = f["id"]
                 else:
                     non_images.append(f)
             body["files"] = non_images if non_images else None
@@ -252,7 +260,10 @@ class Filter:
                     if announce:
                         announced += 1
                         if _is_base64_uri(url):
-                            persisted = await self._persist_base64(url, __request__, __metadata__, __user__)
+                            persisted = await self._persist_base64(
+                                url, __request__, __metadata__, __user__,
+                                known_hashes=turn_hash_to_id,
+                            )
                             if persisted:
                                 purl, fid = persisted
                                 _append_file_tag(file_tags, seen, {"id": fid, "url": purl, "type": "image"}, base_url)
@@ -295,8 +306,22 @@ class Filter:
 
         return body
 
+    async def _file_hash_of(self, file_id: str) -> Optional[str]:
+        """Best-effort: return the stored sha256 (`meta["file_hash"]`) of a
+        file id, or None. Used to match this turn's `+` uploads against
+        the `image_url` copies so the same file is reused instead of
+        persisting a duplicate."""
+        try:
+            from open_webui.models.files import Files
+
+            fobj = await Files.get_file_by_id(file_id)
+            return (getattr(fobj, "meta", None) or {}).get("file_hash")
+        except Exception as exc:
+            log.warning("_file_hash_of failed for %s: %s", file_id, exc)
+        return None
+
     # ------------------------------------------------------------------
-    async def _persist_base64(self, url: str, request, metadata, user) -> Optional[tuple[str, str]]:
+    async def _persist_base64(self, url: str, request, metadata, user, known_hashes: Optional[dict] = None) -> Optional[tuple[str, str]]:
         """Persist a pasted image, reusing an existing file when the same
         content is already stored for this user.
 
@@ -318,6 +343,22 @@ class Filter:
             return None
 
         try:
+            # 1) Reuse a file uploaded via `+` THIS TURN with the same
+            #    content (body["files"] refs) — avoids the duplicate-UUID
+            #    bug that made the model see two images for one upload.
+            if known_hashes and file_hash in known_hashes:
+                fid = known_hashes[file_hash]
+                await self._link_file_to_message(fid, metadata, user_model)
+                log.info(
+                    "image_filter: reused this-turn upload %s (content hash match)",
+                    fid,
+                )
+                return (
+                    request.app.url_path_for("get_file_content_by_id", id=fid),
+                    fid,
+                )
+
+            # 2) Reuse any earlier file owned by the user with the same hash.
             existing = await self._find_file_by_hash(user_model.id, file_hash)
             if existing and existing.get("id"):
                 await self._link_file_to_message(existing["id"], metadata, user_model)
@@ -326,6 +367,12 @@ class Filter:
                     existing["id"],
                 )
 
+            # 3) Miss: persist a new file.
+            log.info(
+                "image_filter: no content-hash match; persisting new file "
+                "(sha256=%s...)",
+                file_hash[:12],
+            )
             from open_webui.routers.images import upload_image
 
             meta = {
@@ -356,7 +403,18 @@ class Filter:
             files = await Files.get_files_by_user_id(user_id)
             for f in files:
                 if (f.meta or {}).get("file_hash") == file_hash:
+                    log.info(
+                        "image_filter: content-hash dedup hit for user %s -> file %s",
+                        user_id,
+                        f.id,
+                    )
                     return {"id": f.id}
+            log.info(
+                "image_filter: content-hash dedup miss for user %s (sha256=%s...) — "
+                "no stored meta['file_hash'] matched; persisting duplicate",
+                user_id,
+                file_hash[:12],
+            )
         except Exception as exc:
             log.warning("_find_file_by_hash failed: %s", exc)
         return None
