@@ -118,7 +118,7 @@ class Filter:
                 {
                     "type": "status",
                     "data": {
-                        "description": f"🤔 Reasoning effort ({effort})",
+                        "description": f"🧠 Reasoning effort ({effort})",
                         "done": True,
                         "hidden": False,
                     },
