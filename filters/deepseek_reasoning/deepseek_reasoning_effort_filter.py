@@ -1,9 +1,9 @@
 """
 title: DeepSeek Reasoning Effort Selector
 author: pi-agent
-description: Toggleable filter that lets users select "high" or "max" reasoning effort for DeepSeek models. Shows a chip in the chat input bar; click to open the effort selector.
+description: Toggleable filter that lets users select "low", "high" or "max" reasoning effort for DeepSeek models. Shows a chip in the chat input bar; click to open the effort selector.
 required_open_webui_version: 0.9.0
-version: 1.0.6
+version: 1.1.0
 """
 
 from pydantic import BaseModel, Field
@@ -17,13 +17,14 @@ class Filter:
             default=1,
             description="Filter execution order. Run after Thinking Default Off (priority 0).",
         )
-        default_effort: Literal["high", "max"] = Field(
-            default="high",
+        default_effort: Literal["low", "high", "max"] = Field(
+            default="low",
             description="Default reasoning effort when the user hasn't picked one yet.",
             json_schema_extra={
                 "input": {
                     "type": "select",
                     "options": [
+                        {"value": "low", "label": "low"},
                         {"value": "high", "label": "high"},
                         {"value": "max", "label": "max"},
                     ],
@@ -40,8 +41,8 @@ class Filter:
 
     # User Valves (per-chat configurable by any user)
     class UserValves(BaseModel):
-        reasoning_effort: Literal["high", "max"] = Field(
-            default="high",
+        reasoning_effort: Literal["low", "high", "max"] = Field(
+            default="low",
             description="Reasoning depth for this chat.",
         )
 

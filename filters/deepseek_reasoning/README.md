@@ -34,6 +34,7 @@ Request → Filter 0 (Thinking Default Off)
 | User action | Filter 0 runs? | Filter 1 runs? | Result |
 |---|---|---|---|
 | No chip activated | ✅ Always | ❌ No | Thinking OFF (fast, cheap) |
+| Chip activated, effort = "low" | ✅ Always | ✅ Yes | Thinking ON + effort LOW |
 | Chip activated, effort = "high" | ✅ Always | ✅ Yes | Thinking ON + effort HIGH |
 | Chip activated, effort = "max" | ✅ Always | ✅ Yes | Thinking ON + effort MAX |
 
@@ -42,9 +43,9 @@ Request → Filter 0 (Thinking Default Off)
 ## Filter 1: DeepSeek Reasoning Effort Selector
 
 A **toggleable** filter that lets users control the reasoning depth
-(`high` or `max`) when chatting with DeepSeek models. A chip appears in the
-chat input bar; clicking it opens a modal where the user picks the reasoning
-effort.
+(`low`, `high` or `max`) when chatting with DeepSeek models. A chip appears in
+the chat input bar; clicking it opens a modal where the user picks the
+reasoning effort.
 
 ### Injection Logic
 
@@ -55,21 +56,21 @@ effort.
    Completions parameter.
 5. **Effort** resolved in this order:
    - User's per-chat choice (`UserValves.reasoning_effort`), if set.
-   - Admin's `default_effort` Valve (default: `"high"`).
+   - Admin's `default_effort` Valve (default: `"low"`).
 
 ### Admin Valves
 
 | Valve | Type | Default | Description |
 |---|---|---|---|
 | `priority` | `int` | `1` | Execution order. Should run **after** Filter 0 (priority 0). |
-| `default_effort` | `"high"` / `"max"` | `"high"` | Default reasoning depth when the user hasn't set a preference. |
+| `default_effort` | `"low"` / `"high"` / `"max"` | `"low"` | Default reasoning depth when the user hasn't set a preference. |
 | `model_pattern` | `str` | `"deepseek"` | Case-insensitive substring match against the model name. Only matching models get the injected parameters. |
 
 ### User Valves (per-chat)
 
 | Valve | Type | Default | Description |
 |---|---|---|---|
-| `reasoning_effort` | `"high"` / `"max"` | `"high"` | Reasoning depth for this chat. |
+| `reasoning_effort` | `"low"` / `"high"` / `"max"` | `"low"` | Reasoning depth for this chat. |
 
 ---
 
@@ -102,6 +103,23 @@ defines no `UserValves` class. It simply does its job silently on every request.
    when they select a model it's attached to).
 4. **Do NOT set** `reasoning_effort` or `thinking` in the model's workspace
    advanced options — the filters handle these.
+
+## Effort mapping (per DeepSeek API docs)
+
+DeepSeek V4 accepts `low`, `high` and `max`, but maps them per model — `low`
+is not a true lower tier on `deepseek-v4-pro` (it is mapped up to `high`
+internally). On `deepseek-v4-flash` all three levels map 1:1.
+
+| Requested effort | deepseek-v4-flash | deepseek-v4-pro |
+|---|---|---|
+| `low` | low | high |
+| `high` | high | high |
+| `max` | max | max |
+
+We still expose `low` on every model for a consistent user experience; the
+API silently maps it where unsupported.
+
+---
 
 ## Design Notes
 
