@@ -1,9 +1,9 @@
 """
 title: DeepSeek Reasoning Effort Selector
 author: pi-agent
-description: Toggleable filter that lets users select "low", "high" or "max" reasoning effort for DeepSeek models. Shows a chip in the chat input bar; click to open the effort selector.
+description: Toggleable filter that lets users select "low", "high" or "max" reasoning effort for DeepSeek models. Shows a chip in the chat input bar; click to open the effort selector. When the user leaves the effort unset, the admin's default applies.
 required_open_webui_version: 0.9.0
-version: 1.1.0
+version: 1.2.0
 """
 
 from pydantic import BaseModel, Field
@@ -41,9 +41,28 @@ class Filter:
 
     # User Valves (per-chat configurable by any user)
     class UserValves(BaseModel):
-        reasoning_effort: Literal["low", "high", "max"] = Field(
-            default="low",
-            description="Reasoning depth for this chat.",
+        # NOTE: this is a plain str with a select input, NOT a Literal.
+        # The default "" is the "unset" state: Open WebUI only persists
+        # valves the user explicitly set to Custom (the modal shows unset
+        # fields as "Default" and omits them from the saved dict), so the
+        # pydantic default is what unset users get. "" must therefore be
+        # a legal value (a Literal would reject it and break the filter).
+        reasoning_effort: str = Field(
+            default="",
+            description=(
+                "Reasoning depth for this chat. Leave unset (Default) to "
+                "follow the admin's default_effort."
+            ),
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "low", "label": "low"},
+                        {"value": "high", "label": "high"},
+                        {"value": "max", "label": "max"},
+                    ],
+                }
+            },
         )
 
     def __init__(self):
@@ -67,13 +86,20 @@ class Filter:
         if self.valves.model_pattern.lower() not in model.lower():
             return body
 
-        # Resolve reasoning effort
+        # Resolve reasoning effort. The admin's default_effort is the
+        # baseline; the user's per-chat choice only overrides it when set
+        # explicitly (Open WebUI stores user valves as a partial dict, so an
+        # unset field materializes to the UserValves default "").
         effort: str = self.valves.default_effort
 
         if __user__ and __user__.get("valves"):
             uv = __user__["valves"]
-            # Prefer the user's per-chat choice when available
-            effort = getattr(uv, "reasoning_effort", effort)
+            if isinstance(uv, dict):
+                user_effort = uv.get("reasoning_effort", "")
+            else:
+                user_effort = getattr(uv, "reasoning_effort", "")
+            if user_effort in ("low", "high", "max"):
+                effort = user_effort
 
         # Strip any pre-existing values (e.g. from DeepSeek Thinking Default
         # Off filter, workspace params, or Open WebUI) so this filter's values

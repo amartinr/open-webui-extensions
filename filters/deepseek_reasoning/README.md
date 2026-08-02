@@ -55,8 +55,10 @@ reasoning effort.
 4. **Injects `reasoning_effort`** at top level — it's a standard OpenAI Chat
    Completions parameter.
 5. **Effort** resolved in this order:
-   - User's per-chat choice (`UserValves.reasoning_effort`), if set.
-   - Admin's `default_effort` Valve (default: `"low"`).
+   - User's per-chat choice (`UserValves.reasoning_effort`), **only if set
+     explicitly** (`low`/`high`/`max`).
+   - Admin's `default_effort` Valve (default: `"low"`) — used whenever the
+     user leaves the valve unset (the modal's "Default" state).
 
 ### Admin Valves
 
@@ -70,7 +72,7 @@ reasoning effort.
 
 | Valve | Type | Default | Description |
 |---|---|---|---|
-| `reasoning_effort` | `"low"` / `"high"` / `"max"` | `"low"` | Reasoning depth for this chat. |
+| `reasoning_effort` | `""` (unset) / `"low"` / `"high"` / `"max"` | `""` (unset) | Reasoning depth for this chat. Unset → follows the admin's `default_effort`. |
 
 ---
 
@@ -122,6 +124,15 @@ API silently maps it where unsupported.
 ---
 
 ## Design Notes
+
+- **Admin wins unless the user opts in.** `reasoning_effort` defaults to
+  unset (`""`). Open WebUI's user-valves modal shows unset fields as
+  "Default" and only persists fields the user explicitly set to "Custom",
+  so an unset valve materializes to `""` — which the filter treats as
+  "follow the admin". Only an explicit `low`/`high`/`max` choice overrides
+  the admin's `default_effort`. This is why the user valve is a plain `str`
+  with a select input rather than a `Literal`: a `Literal` default of `""`
+  would reject the empty value and break requests after a save.
 
 - **Override, don't merge.** Both filters strip pre-existing values before
   injecting their own. Filter 1 removes `thinking` that Filter 0 may have
