@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.6.0
+version: 0.6.1
 licence: MIT
 """
 
@@ -956,7 +956,22 @@ class Tools:
     async def _get_my_profile(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_PROFILE)
-        return self._ok(json.loads(body), "profile", output_format=output_format)
+        raw = json.loads(body)
+        # SECURITY: GET /api/v1/auths/ (get_session_user, v0.10.2) ECHOES the
+        # request token back in the body (token/token_type/expires_at) to
+        # support the frontend's session refresh. The tool must NEVER
+        # serialize that raw body — in json mode it would leak the user's
+        # session credential into the model context. Field whitelist only;
+        # the token fields are never included.
+        profile = {
+            k: raw.get(k)
+            for k in (
+                "id", "email", "name", "role", "profile_image_url",
+                "permissions", "created_at", "updated_at", "last_active_at",
+            )
+            if k in raw
+        }
+        return self._ok(profile, "profile", output_format=output_format)
 
     async def get_models(self, __request__: Any = None, __user__: dict = None) -> str:
         """List the models available to the requesting user (id, name, owner).

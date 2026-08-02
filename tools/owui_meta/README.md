@@ -15,7 +15,7 @@ A server-side Open WebUI tool that lets the model query the platform's **own int
 - **`Content-Type` validation** — the SPA HTML catch-all returns HTTP 200, so only JSON (or explicitly allowed binary types) is trusted.
 - **Mapped errors** — 401/403/404/5xx become readable messages; 404 never reveals whether a resource exists.
 - **Truncation** — responses are capped before reaching the model context.
-- **No token logging** — the credential never appears in logs or tool output.
+- **No token logging** — the credential never appears in logs or tool output. (`GET /api/v1/auths/` echoes the request token in its body; the tool field-whitelists the profile so the token never reaches the model, in any output format.)
 
 ## Output format
 

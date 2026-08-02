@@ -138,7 +138,7 @@ Sources: **real curl tests with a `user`-role API key** against `http://open-web
 
 | Area | Endpoint | Observed response |
 |---|---|---|
-| Profile | `GET /api/v1/auths/` (trailing slash) | Full profile: id, name, email, role, permissions |
+| Profile | `GET /api/v1/auths/` (trailing slash) | Full profile: id, name, email, role, permissions. **⚠️ The body ALSO echoes the request token** (`token`/`token_type`/`expires_at` — `get_session_user` supports the frontend's session refresh); the tool **field-whitelists** the profile and the token never reaches the model (§7.2) |
 | Models | `GET /api/models` | OpenAI-compatible: `{"data":[{id, name, owned_by, info…}]}` |
 | Chats | `GET /api/v1/chats/` (trailing slash) | Array of your chats `{id, title, updated_at, created_at, …}` |
 | Chats | `GET /api/v1/chats/{id}` | Full chat with message history |
@@ -232,6 +232,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 - **Response truncation**: size limit for the response returned to the model (prevents injecting megabytes into the context).
 - **Timeout**: configurable (default 15 s).
 - **No token logging**: the token must never appear in logs or in messages returned to the model.
+- **Profile field whitelist (security fix 2026-08-01)**: `GET /api/v1/auths/` **echoes the request token** in its body (v0.10.2 `get_session_user` returns `token`/`token_type`/`expires_at` for the frontend's session refresh). The tool never serializes the raw profile body — `_get_my_profile` builds an explicit field whitelist (`id`, `email`, `name`, `role`, `profile_image_url`, `permissions`, timestamps) and the token fields are never included, in **either** output format.
 
 ### 7.3 User isolation (verified in tests)
 - `GET /api/v1/chats/11111111-…-1111` (nonexistent UUID) → **401 "We could not find what you're looking for"**: no existence leak.

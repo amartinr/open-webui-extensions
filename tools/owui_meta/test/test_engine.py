@@ -22,6 +22,41 @@ from helpers import (
 )
 
 
+async def test_profile_token_echo_never_reaches_model():
+    # REGRESSION (security): v0.10.2 GET /api/v1/auths/ (get_session_user)
+    # ECHOES the request token back in the body (token/token_type/expires_at)
+    # to support the frontend session refresh. The tool must strip it before
+    # serialization — in BOTH output formats. json mode used to dump the raw
+    # body, leaking the user's session credential into the model context.
+    secret = "sk-user-secret-token"
+    body = {
+        "token": secret, "token_type": "Bearer", "expires_at": 9999999999,
+        "id": "u1", "email": "a@b.c", "name": "Abel", "role": "user",
+        "permissions": {"chat": {"controls": True}},
+    }
+
+    def handler(request):
+        return json_response(body)
+
+    # markdown mode
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    out = await tools.get_my_profile(FakeRequest(token=secret))
+    assert secret not in out
+    assert "expires_at" not in out
+
+    # json mode (the raw body would previously be dumped verbatim)
+    import json
+
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    out = await tools.get_my_profile(FakeRequest(token=secret))
+    assert secret not in out
+    payload = json.loads(out)
+    assert payload["name"] == "Abel"
+    assert "token" not in payload
+    assert "token_type" not in payload
+    assert "expires_at" not in payload
+
+
 async def test_token_from_http_authorization_credentials_object():
     # Regression: v0.10.2 AuthTokenMiddleware stores an
     # HTTPAuthorizationCredentials OBJECT in request.state.token, not a
@@ -105,7 +140,11 @@ async def test_http_error_mapping(status, expected):
 
 async def test_truncation_applies_to_output():
     def handler(request):
-        return json_response({"blob": "x" * 5000})
+        # profile body with a large whitelisted field (permissions)
+        return json_response({
+            "id": "u1", "name": "Abel", "role": "user",
+            "permissions": {"chat": {"controls": True, "blob": "x" * 5000}},
+        })
 
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
     tools.valves.max_response_chars = 500
@@ -222,13 +261,13 @@ async def test_retry_with_fallback_on_transport_error(monkeypatch):
         calls.append(request.url.host)
         if request.url.host == "unreachable.invalid":
             raise httpx.ConnectError("connection refused", request=request)
-        return json_response({"ok": True})
+        return json_response({"id": "u1", "name": "Abel"})
 
     monkeypatch.setenv("WEBUI_URL", "http://unreachable.invalid")
     tools = make_tools(handler, fallback_base_url="http://localhost:8080", output_format="json")
     out = await tools.get_my_profile(FakeRequest())
     assert calls == ["unreachable.invalid", "localhost"]
-    assert '"ok"' in out
+    assert "Abel" in out
 
 
 async def test_no_retry_when_fallback_equals_primary():
