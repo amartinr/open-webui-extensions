@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.5.0
+version: 0.6.0
 licence: MIT
 """
 
@@ -44,12 +44,14 @@ DEFAULT_PAGE_SIZE = 50
 
 # ── Canonical route paths (allowlist) ─────────────────────────────────
 # Trailing slashes are SIGNIFICANT in this deployment (v0.10.2):
-#   - Listings (auths, chats, files, prompts, tools, knowledge, users)
-#     are registered with a trailing slash:  GET /api/v1/<resource>/
+#   - Listings (auths, chats, files, prompts, tools, knowledge, skills,
+#     users) are registered with a trailing slash:  GET /api/v1/<resource>/
 #     -> WITHOUT the slash they fall into the SPA HTML catch-all (HTTP 200).
-#   - Sub-resources (search, pinned, shared, {id}, …) and /api/models are
-#     registered WITHOUT a trailing slash.
+#   - Sub-resources (search, pinned, shared, id/{id}, {id}, …) and
+#     /api/models are registered WITHOUT a trailing slash.
 # Verified live against the instance (2026-08-01): see PLAN.md §iteration-1.
+# Skills verified 2026-08-01: /api/v1/skills/ -> 401 JSON (real route),
+# /api/v1/skills -> 200 text/html (SPA catch-all).
 _ROUTE_PROFILE = "/api/v1/auths/"
 _ROUTE_MODELS = "/api/models"
 _ROUTE_CHATS = "/api/v1/chats/"
@@ -62,6 +64,8 @@ _ROUTE_FILE_CONTENT = "/api/v1/files/{file_id}/content"
 _ROUTE_PROMPTS = "/api/v1/prompts/"
 _ROUTE_TOOLS = "/api/v1/tools/"
 _ROUTE_KNOWLEDGE = "/api/v1/knowledge/"
+_ROUTE_SKILLS = "/api/v1/skills/"
+_ROUTE_SKILL = "/api/v1/skills/id/{skill_id}"
 
 # Content types that are useful as text when reading a file's content.
 _TEXT_CONTENT_TYPES = frozenset({
@@ -523,6 +527,10 @@ class Tools:
             return self._render_tools(payload)
         if kind == "knowledge":
             return self._render_knowledge(payload)
+        if kind == "skills":
+            return self._render_skills(payload)
+        if kind == "skill":
+            return self._render_skill(payload)
         # Unknown kind: structured fallback (defensive).
         return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
 
@@ -678,6 +686,47 @@ class Tools:
             [[k.get("name"), k.get("description"), k.get("id")] for k in items],
         )
         return head + "\n\n" + table
+
+    def _render_skills(self, p: dict) -> str:
+        items = p.get("skills", [])
+        head = self._summary_header("Skills", p.get("count", len(items)))
+        table = self._md_table(
+            ["Name", "Description", "Active", "ID"],
+            [
+                [s.get("name"), s.get("description"), self._md_scalar(s.get("is_active")), s.get("id")]
+                for s in items
+            ],
+        )
+        return head + "\n\n" + table
+
+    def _render_skill(self, p: dict) -> str:
+        lines = [
+            f"**Skill: {p.get('name', '(untitled)')}** (id: {p.get('id', '')})",
+            "",
+        ]
+        for key, label, fmt in (
+            ("description", "Description", None),
+            ("is_active", "Active", self._md_scalar),
+            ("created_at", "Created", self._fmt_ts),
+            ("updated_at", "Updated", self._fmt_ts),
+        ):
+            value = p.get(key)
+            if value is None:
+                continue
+            shown = fmt(value) if fmt else value
+            lines.append(f"- {label}: {shown}")
+        content = p.get("content")
+        if content:
+            lines.append("")
+            lines.append("**Content**")
+            lines.append("")
+            lines.append(f"```text\n{content}\n```")
+        meta = p.get("meta")
+        if isinstance(meta, dict) and meta:
+            lines.append("")
+            lines.append("**Meta**")
+            lines.append(self._md_hierarchy(meta))
+        return "\n".join(lines)
 
     async def _run(self, coro: Any, output_format: Optional[str] = None) -> str:
         """Execute a private implementation, converting failures to safe output."""
@@ -859,6 +908,13 @@ class Tools:
     def _summarize_models(self, items: list) -> list[dict]:
         return [
             {"id": item.get("id"), "name": item.get("name"), "owned_by": item.get("owned_by")}
+            for item in items
+            if isinstance(item, dict)
+        ]
+
+    def _summarize_skills(self, items: list) -> list[dict]:
+        return [
+            {k: item.get(k) for k in ("id", "name", "description", "is_active", "created_at", "updated_at")}
             for item in items
             if isinstance(item, dict)
         ]
@@ -1194,3 +1250,41 @@ class Tools:
             if isinstance(item, dict)
         ]
         return self._ok({"count": len(knowledge), "total": total, "knowledge": knowledge}, "knowledge", output_format=output_format)
+
+    async def get_my_skills(self, __request__: Any = None, __user__: dict = None) -> str:
+        """List the skills available to the requesting user (id, name, description, active state).
+
+        Skills are workspace resources like tools and prompts: the list includes
+        the user's own skills and skills shared with them via access grants.
+        The skill's content (its instructions) is not included here to keep the
+        listing light — use get_skill() for the full detail.
+        """
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_my_skills(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
+
+    async def _get_my_skills(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+        token = self._require_token(request)
+        _status, _ct, body = await self._api_get_json(token, _ROUTE_SKILLS)
+        items, _total = self._extract_items(json.loads(body))
+        skills = self._summarize_skills(items)
+        return self._ok({"count": len(skills), "skills": skills}, "skills", output_format=output_format)
+
+    async def get_skill(self, skill_id: str, __request__: Any = None, __user__: dict = None) -> str:
+        """Get one skill's full detail by id, including its content (the skill's instructions).
+
+        :param skill_id: the skill's id (letters, digits, '-' and '_').
+        """
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_skill(skill_id, __request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+        )
+
+    async def _get_skill(self, skill_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+        token = self._require_token(request)
+        skill_id = self._require_id(skill_id, "skill_id")
+        _status, _ct, body = await self._api_get_json(token, _ROUTE_SKILL.format(skill_id=skill_id))
+        return self._ok(json.loads(body), "skill", output_format=output_format)

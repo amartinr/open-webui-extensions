@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** In progress — Iterations 0, 1, 3 and 6 **done**; Iteration 2 **deferred to a future version**; Iterations 4–5 pending
+**Status:** In progress — Iterations 0, 1, 3, 6 and 7 **done**; Iteration 2 **deferred to a future version**; Iterations 4–5 pending
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -156,6 +156,21 @@ Implements DESIGN §8.8 (decision 2026-08-01), pulled ahead of Iterations 2–5 
 - DESIGN §8.8 and README updated to document all refinements.
 
 **Definition of done:** the tool returns readable Markdown by default (tables/bullets), JSON remains available via valve — 56 tests green.
+
+## Iteration 7 — Skills endpoints (query-only) ✅ DONE
+
+**Commit:** `feat(owui_meta): add skills endpoints (get_my_skills, get_skill)`
+
+Implements DESIGN §6.1 for skills — the workspace resource family (tools/prompts) was missing it.
+
+- `_ROUTE_SKILLS = "/api/v1/skills/"` (listing, **trailing slash** — verified live 2026-08-01: `/api/v1/skills/` → 401 JSON, `/api/v1/skills` → 200 SPA HTML) and `_ROUTE_SKILL = "/api/v1/skills/id/{skill_id}"` (sub-resource, **no** trailing slash).
+- `get_my_skills()` — lists the user's skills (own + shared via access grants): name, description, active state, id. The skill's `content` (its instructions) is **not** dumped in the listing (kept light; use `get_skill()` for the full detail).
+- `get_skill(skill_id)` — full detail of one skill including `content` (fenced block in markdown) and `meta` (hierarchy), with the standard `_ID_RE` validation (no path smuggling).
+- **Query-only scope (user decision 2026-08-01):** `/api/v1/skills/export` is a GET but is **not** exposed — v1 has no export/import (DESIGN §2/§6.3, PLAN §8).
+- **Tests:** route map (slash map for skills), user methods (summarization without content, full detail, invalid id rejected without request), output format (skills table, single skill detail, raw bools, readable dates).
+- **Docs:** DESIGN §5.1/§6.1, README, this plan.
+
+**Definition of done:** skills are queryable like any other workspace resource — 78 tests green (73 → 78).
 
 ---
 

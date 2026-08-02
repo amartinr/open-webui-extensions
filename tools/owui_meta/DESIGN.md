@@ -148,6 +148,8 @@ Sources: **real curl tests with a `user`-role API key** against `http://open-web
 | Workspace | `GET /api/v1/knowledge/` (trailing slash) | `{"items":[], "total":0}` |
 | Workspace | `GET /api/v1/prompts/` (trailing slash) | Array of prompts `{id, command, name, content}` |
 | Workspace | `GET /api/v1/tools/` (trailing slash) | Array of tools `{id, name, meta, access_grants…}` |
+| Workspace | `GET /api/v1/skills/` (trailing slash) | Array of skills `{id, name, description, content, meta, is_active, …}` |
+| Workspace | `GET /api/v1/skills/id/{id}` (no trailing slash) | Full skill incl. `content` |
 
 ### 5.2 🔒 Blocked by role (correct behavior)
 
@@ -192,6 +194,8 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `get_my_prompts()` | `GET /api/v1/prompts` |
 | `get_my_tools()` | `GET /api/v1/tools` |
 | `get_knowledge_bases()` | `GET /api/v1/knowledge` |
+| `get_my_skills()` | `GET /api/v1/skills` |
+| `get_skill(skill_id)` | `GET /api/v1/skills/id/{skill_id}` |
 
 ### 6.2 Admin only (role `admin`, with `__user__.role == 'admin'` check)
 

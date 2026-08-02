@@ -212,6 +212,49 @@ async def test_models_prompts_tools_knowledge_tables():
     assert "**Knowledge bases: 1**" in kb and "| Docs |" in kb
 
 
+async def test_skills_list_table():
+    def handler(request):
+        return json_response([
+            {"id": "sk1", "name": "RAG summarizer", "description": "Summarizes documents",
+             "is_active": True, "content": "x" * 100, "meta": {}, "created_at": 1, "updated_at": 2},
+            {"id": "sk2", "name": "Meeting notes", "description": None, "is_active": False,
+             "content": "y" * 100, "meta": {}, "created_at": 3, "updated_at": 4},
+        ])
+
+    out = await md_tools(handler).get_my_skills(FakeRequest())
+    assert "**Skills: 2**" in out
+    assert "| Name | Description | Active | ID |" in out
+    assert "| RAG summarizer | Summarizes documents | true | sk1 |" in out
+    assert "| Meeting notes | None | false | sk2 |" in out
+    # the listing does not dump the skill's content (its instructions)
+    assert "x" * 100 not in out
+
+
+async def test_single_skill_detail_with_content():
+    def handler(request):
+        return json_response({
+            "id": "sk1", "name": "RAG summarizer", "description": "Summarizes documents",
+            "is_active": True, "content": "You summarize documents concisely.",
+            "meta": {"model": "deepseek"}, "created_at": 1785457944, "updated_at": 1785458000,
+        })
+
+    out = await md_tools(handler).get_skill("sk1", __request__=FakeRequest())
+    assert "**Skill: RAG summarizer** (id: sk1)" in out
+    assert "- Description: Summarizes documents" in out
+    assert "- Active: true" in out
+    # readable UTC dates, not epoch ints
+    assert "- Created: 2026-07-31 00:32" in out
+    assert "- Updated: 2026-07-31 00:33" in out
+    assert "1785458000" not in out
+    # content in a fenced block, meta as hierarchy — never embedded JSON
+    assert "**Content**" in out
+    assert "```text" in out
+    assert "You summarize documents concisely." in out
+    assert "**Meta**" in out
+    assert "- Model: deepseek" in out
+    assert "{" not in out
+
+
 async def test_error_is_plain_text_not_json():
     def handler(request):
         return json_response({"detail": "nope"}, status=403)

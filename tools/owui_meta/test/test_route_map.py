@@ -26,6 +26,7 @@ from helpers import FakeRequest, json_response, make_tools
 
 CHAT_ID = "b5d844f0-85c5-4cdc-8cf3-4f2366bc249e"
 FILE_ID = "643f81c9-2bc8-44d7-b4a1-994cdb1c503b"
+SKILL_ID = "meeting-notes"
 
 
 def generic_handler(expected_paths, fallback=None):
@@ -74,6 +75,7 @@ WITH_SLASH = {
     "/api/v1/prompts/",
     "/api/v1/tools/",
     "/api/v1/knowledge/",
+    "/api/v1/skills/",
 }
 WITHOUT_SLASH = {
     "/api/models",
@@ -82,6 +84,7 @@ WITHOUT_SLASH = {
     "/api/v1/chats/shared",
     f"/api/v1/chats/{CHAT_ID}",
     f"/api/v1/files/{FILE_ID}/content",
+    f"/api/v1/skills/id/{SKILL_ID}",
 }
 
 
@@ -98,6 +101,7 @@ async def test_listing_routes_have_trailing_slash():
         ("get_my_prompts", (), "/api/v1/prompts/"),
         ("get_my_tools", (), "/api/v1/tools/"),
         ("get_knowledge_bases", (), "/api/v1/knowledge/"),
+        ("get_my_skills", (), "/api/v1/skills/"),
     ]
     for method, args, route in cases:
         seen = await _run_and_record(method, args, route)
@@ -114,6 +118,7 @@ async def test_subresource_routes_without_trailing_slash():
         ("get_shared_chats", (), "/api/v1/chats/shared"),
         ("get_chat", (CHAT_ID,), f"/api/v1/chats/{CHAT_ID}"),
         ("get_file_content", (FILE_ID,), f"/api/v1/files/{FILE_ID}/content"),
+        ("get_skill", (SKILL_ID,), f"/api/v1/skills/id/{SKILL_ID}"),
     ]
     for method, args, route in cases:
         seen = await _run_and_record(method, args, route)
@@ -130,6 +135,7 @@ async def test_no_slash_variants_are_never_used():
         ("get_my_prompts", (), "/api/v1/prompts/", "/api/v1/prompts"),
         ("get_my_tools", (), "/api/v1/tools/", "/api/v1/tools"),
         ("get_knowledge_bases", (), "/api/v1/knowledge/", "/api/v1/knowledge"),
+        ("get_my_skills", (), "/api/v1/skills/", "/api/v1/skills"),
     ]
     for method, args, canonical, forbidden in cases:
         seen = await _run_and_record(method, args, canonical)

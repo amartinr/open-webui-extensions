@@ -76,6 +76,20 @@ def api_handler(request):
         return json_response({"items": [
             {"id": "kb1", "name": "Company docs", "description": "Internal wiki", "created_at": 123},
         ], "total": 1})
+    if path == "/api/v1/skills/":
+        return json_response([
+            {"id": "sk1", "name": "RAG summarizer", "description": "Summarizes documents",
+             "is_active": True, "content": "You summarize documents.", "meta": {},
+             "created_at": 1, "updated_at": 2},
+            {"id": "sk2", "name": "Meeting notes", "description": None, "is_active": False,
+             "content": "You take meeting notes.", "meta": {}, "created_at": 3, "updated_at": 4},
+        ])
+    if path == "/api/v1/skills/id/sk1":
+        return json_response({
+            "id": "sk1", "name": "RAG summarizer", "description": "Summarizes documents",
+            "is_active": True, "content": "You summarize documents.",
+            "meta": {"model": "deepseek"}, "created_at": 1, "updated_at": 2, "write_access": True,
+        })
     return json_response({"unexpected": path}, status=404)
 
 
@@ -204,6 +218,35 @@ async def test_get_knowledge_bases():
     payload = json.loads(out)
     assert payload["total"] == 1
     assert payload["knowledge"][0]["name"] == "Company docs"
+
+
+async def test_get_my_skills_summarizes_without_content():
+    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    out = await tools.get_my_skills(FakeRequest())
+    payload = json.loads(out)
+    assert payload["count"] == 2
+    s = payload["skills"][0]
+    assert s["name"] == "RAG summarizer"
+    assert s["is_active"] is True
+    # the listing stays light: the skill's content (its instructions) is not dumped
+    assert "content" not in json.dumps(payload)
+
+
+async def test_get_skill_returns_full_detail():
+    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    out = await tools.get_skill("sk1", __request__=FakeRequest())
+    payload = json.loads(out)
+    assert payload["id"] == "sk1"
+    assert payload["content"] == "You summarize documents."
+    assert payload["write_access"] is True
+
+
+async def test_get_skill_invalid_id_rejected_without_request():
+    recorder = Recorder(api_handler)
+    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    out = await tools.get_skill("../../etc/passwd", __request__=FakeRequest())
+    assert "Invalid skill_id" in out
+    assert recorder.requests == []
 
 
 async def test_methods_work_without_request_object_when_token_present():

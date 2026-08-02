@@ -51,7 +51,7 @@ owui_meta/
 
 ## Usage
 
-Import `owui_meta.py` into Open WebUI at **Workspace → Tools → +** and attach it to a model. Then the model can call methods like `get_my_chats()`, `get_my_files()`, `search_chats("budget")`, `get_my_prompts()` — each answering with the requesting user's own data.
+Import `owui_meta.py` into Open WebUI at **Workspace → Tools → +** and attach it to a model. Then the model can call methods like `get_my_chats()`, `get_my_files()`, `search_chats("budget")`, `get_my_prompts()`, `get_my_skills()` — each answering with the requesting user's own data.
 
 List methods support **pagination, sorting and filtering** (client-side, since the API does not expose them):
 
