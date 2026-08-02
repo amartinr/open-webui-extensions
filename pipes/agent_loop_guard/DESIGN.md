@@ -378,7 +378,7 @@ counter so the user knows how many tool calls remain.
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before runaway guard fires. `0` = disabled |
 | `MAX_CONSECUTIVE_TOOL_CALLS` | `4` | Consecutive identical calls before loop guard fires (min 3) |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to remove |
-| `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks across user messages (cache-safe: each file tagged once, earliest message wins). `False` = forward payloads unchanged |
+| `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks **within each user message** (per-turn: the core's block and the image_filter's current-turn block for the same upload merge to one tag; re-uploads in later turns keep their own block). Cache-safe: historical messages stay byte-stable between turns. `False` = forward payloads unchanged |
 
 **Validation:** `MAX_TOOL_CALLS_PER_TURN` must be **greater than**
 `MAX_CONSECUTIVE_TOOL_CALLS` when both are enabled. Enforced by Pydantic's
@@ -466,7 +466,7 @@ gateway destination.
 
 ---
 
-## 18. Attached-Files Cleanup (v2.2.0)
+## 18. Attached-Files Cleanup (v2.2.0 → v2.4.0)
 
 Since v2.2.0 the pipe also cleans up `<attached_files>` blocks (see
 `filters/image_filter/DESIGN.md` → "Attached-Files Accumulation" for the
@@ -490,26 +490,41 @@ So the payload can carry several per-message core blocks plus the
 filter's current-turn block, with the same file tagged in more than one
 place (a `+` upload is in its own message's core block and again in the
 current-turn filter block when re-attached; a pasted image that the core
-skips is only in the filter's block). That duplication is what the pipe
-collapses.
+skips is only in the filter's block). That duplication — *within a
+message* — is what the pipe collapses: the core's block and the filter's
+block of the same message merge into one tag. Files are **never**
+deduplicated across messages, so a deliberate re-upload keeps its own
+block in its turn (v2.4.0).
 
 ### Semantics (deterministic, cache-safe)
 
-- **Each file is tagged exactly once**, in the **earliest user message**
-  where it appears. Dedup keys, in order: (1) **UUID** — the same file
-  collapses across the filter's absolute form, the core's relative form,
-  and this deployment's bare-UUID raw form (`<file type="file"
-  url="{uuid}" .../>`); (2) **content hash** (v2.3.0) — two *different*
-  UUIDs whose files share `meta["file_hash"]` collapse too (first
-  occurrence wins). External URLs key by the full URL; placeholders are
-  never deduplicated.
+- **Dedup is scoped PER USER MESSAGE** (one message = one turn), never
+  across messages. Within a message, each file is tagged exactly once.
+  Dedup keys, in order: (1) **UUID** — the same file collapses across the
+  filter's absolute form, the core's relative form, and this deployment's
+  bare-UUID raw form (`<file type="file" url="{uuid}" .../>`); (2)
+  **content hash** (v2.3.0) — two *different* UUIDs whose files share
+  `meta["file_hash"]` collapse too (first occurrence wins). External URLs
+  key by the full URL; placeholders are never deduplicated.
+- **Re-uploads are never deduplicated away.** A file deliberately
+  uploaded again in a later turn gets a **new block in that turn** and
+  stays visible to the agent — the pipe must not make a re-upload
+  invisible. (The cross-message dedup of v2.2.0/v2.3.0 existed for the
+  pre-v2.12.0 filter, which re-announced a moving union block every turn;
+  the current filter never touches historical messages, so cross-message
+  dedup had no remaining legitimate work — its only effect was hiding
+  deliberate re-uploads, removed in **v2.4.0**.)
 - Multiple blocks in one message **collapse into one** (core's exact
   format), preserving attribute order.
 - Historical per-message blocks stay **byte-stable between turns** (pure
-  function of the payload + stored history), so the cached prefix extends
+  function of each message + the stored history): the cleanup is a
+  deterministic pure function per message, so the cached prefix extends
   through the whole conversation — the same depth as without the filter.
-- The last user message only keeps **genuinely new** images; every image
-  remains visible to the model via its original message's block.
+  A re-upload turn only appends to the conversation; the shared history
+  renders identically in every later turn.
+- The last user message keeps **its own files** (new or re-uploaded),
+  collapsed to one block; historical images remain visible via their own
+  message's block.
 - Tags are re-emitted in **our canonical format** — `type="image"` for
   images, `id="{uuid}"`, and an **absolute**
   `/api/v1/files/{uuid}/content` URL (`webui.url` via `Config`, falling
@@ -543,7 +558,8 @@ on/off. When off, payloads are forwarded exactly as Open WebUI built them.
 
 | Case | Handling |
 |------|----------|
-| Same file re-attached in a later turn | Tagged only at first occurrence; still visible via that message's block |
+| Same file re-attached in a later turn | Keeps a **new block in its own turn** (per-message dedup only) — the re-upload stays visible to the agent |
+| Same file tagged twice in ONE turn (core + filter) | Collapsed to one tag (UUID or content-hash match within the message) |
 | Blocks in `str` content vs list content | Both parsed; blocks may be concatenated (core+filter) or merged into the first text part |
 | `<attached_files>` block without `<file>` tags | Ignored — user text that literally contains the tag is left untouched |
 | Message content empty after stripping | Empty text part inserted (`[{"type": "text", "text": ""}]`) to avoid 400s on strict providers |
@@ -554,6 +570,18 @@ on/off. When off, payloads are forwarded exactly as Open WebUI built them.
 
 - **v2.2.0** — initial cache-safe cleanup: collapse + dedup across user
   messages, each file tagged once in the earliest message.
+- **v2.4.0** — **dedup scoped per user message (per turn)**. The
+  cross-message dedup (each file tagged once in the earliest message) was
+  only needed for the pre-v2.12.0 filter, which re-announced a moving
+  union block every turn; the current filter only announces the current
+  turn, so cross-message dedup's only remaining effect was hiding
+  deliberate re-uploads — a re-uploaded file was invisible to the agent
+  (while the `+` upload still persisted a duplicate on disk: the worst of
+  both worlds). Now each user message keeps its own files, collapsed to
+  one block (filter + core tags of the same message still merge by UUID
+  and content hash, so the "two images in one turn" fix is unchanged),
+  and historical messages stay byte-stable between turns (cache
+  preserved). See `EXAMPLE.md` for the before/after.
 - **v2.2.x (post-2.2.0 fixes)** — dedup simplified to a **UUID match** and
   tags re-emitted in **our canonical format** (`id` + absolute
   `/api/v1/files/{id}/content` URL) regardless of source, so the same

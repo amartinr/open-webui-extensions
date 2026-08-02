@@ -113,7 +113,7 @@ Configured in the Function admin panel.
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before runaway guard fires. `0` = disabled |
 | `MAX_CONSECUTIVE_TOOL_CALLS` | `4` | Consecutive identical calls before loop guard fires (min 3) |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to **remove** from the agent's tool list. Example: `"delete_file, terminal_execute"` |
-| `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks across user messages (cache-safe: each file tagged once, earliest message wins). `False` = forward payloads unchanged |
+| `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks **within each user message** (per-turn: the core's block and the image_filter's current-turn block for the same upload merge to one tag; re-uploads in later turns keep their own block). Cache-safe: historical messages stay byte-stable between turns. `False` = forward payloads unchanged |
 
 > **Validation**: `MAX_TOOL_CALLS_PER_TURN` must be **greater than**
 > `MAX_CONSECUTIVE_TOOL_CALLS` when both are enabled. The pipe validates
@@ -152,20 +152,26 @@ for any gateway destination.
 ## Attached-Files Cleanup
 
 Since v2.2.0 the pipe also cleans up `<attached_files>` blocks that Open
-WebUI injects (the `image_filter` inlet prepends a growing union block to
-the last user message; the core's `add_file_context()` prepends one block
-per stored user message). Without cleanup, the last user message carries
-duplicate tags and the union block moves/grows every turn, which breaks
-LLM prefix caching.
+WebUI injects (the `image_filter` inlet prepends one block with the
+current turn's images to the last user message; the core's
+`add_file_context()` prepends one block per stored user message with
+files). Within a turn the same upload can be tagged twice (core + filter),
+and before filter v2.12.0 the filter re-announced a growing union block
+that moved every turn — which broke LLM prefix caching. The cleanup
+collapses the duplicates within each message and keeps historical
+messages byte-stable between turns.
 
-The cleanup is **cache-safe**: each file is tagged exactly once, in the
-earliest user message where it appears, so the history prefix stays
-byte-identical between turns (deterministic, idempotent, fail-open). The
-model still sees every image via its original message's block; the last
-user message only keeps genuinely new images. Dedup is a **UUID match**
-(the file UUID is unique) plus a **content-hash backstop** (v2.3.0):
-two *different* UUIDs whose files share `meta["file_hash"]` also collapse,
-so a `+` upload never shows twice even when the filter and the core tag
+The cleanup is **cache-safe**: dedup is scoped **within each user
+message** (one message = one turn), so the history prefix stays
+byte-identical between turns (deterministic, idempotent, fail-open). Each
+turn keeps **its own files** — including a file deliberately re-uploaded
+in a later turn, which gets a fresh block and stays visible to the agent
+(it is never deduplicated away, since v2.4.0). Within a message, the
+core's block and the filter's current-turn block for the same upload
+collapse to one tag. Dedup is a **UUID match** (the file UUID is unique)
+plus a **content-hash backstop** (v2.3.0): two *different* UUIDs whose
+files share `meta["file_hash"]` also collapse within the same message, so
+a `+` upload never shows twice even when the filter and the core tag
 different copies of the same image. Every **image** tag is re-emitted in
 **our canonical format** (`id` + absolute `/api/v1/files/{id}/content`
 URL) so the same image looks identical regardless of which source produced
@@ -177,8 +183,10 @@ untouched**: they are never deduplicated nor rewritten. Disable with the
 Since filter v2.12.0, pasted images are announced only in the turn they
 are pasted (the filter no longer re-announces re-hydrated history), so the
 "moving union block" scenario no longer occurs — the pipe's remaining job
-is to collapse the core's per-message blocks with the filter's current-
-turn block and deduplicate by UUID. With the filter at **v2.12.3** the
+is to collapse the core's per-message block with the filter's current-
+turn block in the same message (dedup by UUID, plus the content-hash
+backstop for the fallback path) while leaving re-uploads in later turns
+visible. With the filter at **v2.12.3** the
 filter and the core converge on the current upload's UUID (confirmed in
 runtime logs: `reused this-turn upload ... (content hash match)`, pipe
 `kept 1 (1 dropped)`), so the UUID dedup collapses the pair; the

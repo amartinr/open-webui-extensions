@@ -168,6 +168,16 @@ is inserted to prevent 400 errors from strict providers.
   model retains conversational memory of the image but loses the file
   reference (id/URL) in later turns — if a tool needs it again the user
   re-attaches the image.
+- **Re-uploads are visible again (pipe v2.4.0)**: re-attaching the same
+  image in a later turn (via `+` or paste) creates a **new
+  `<attached_files>` block in that turn** and the agent sees it — the
+  pipe's dedup is scoped per user message and no longer hides deliberate
+  re-uploads. Note the two sources of truth per turn: the current
+  upload's file (tagged by filter + core, one UUID) and the historical
+  block of the first upload, which stays in its own message. The disk
+  copy that Open WebUI persists at `+` upload time is core behaviour
+  (the upload happens before filters run) and is not deduplicated by this
+  repo — the agent at least sees the re-upload now.
 - **Re-persistence of pasted images across turns (mostly fixed)**: pasted
   images stay in the stored chat message as `data:` URIs. Since v2.12.0
   the filter only persists/announces them in the turn they are pasted
@@ -196,8 +206,9 @@ is inserted to prevent 400 errors from strict providers.
   calling, the core still prepends its own `<attached_files>` block per
   stored user message *after* the filter runs (from stored
   `message.files`). Those blocks are per-message, stable and cached; the
-  `agent_loop_guard` pipe collapses and deduplicates them with the
-  filter's block. See "Attached-Files Accumulation — Verified Mechanism"
+  `agent_loop_guard` pipe (v2.2.0+) collapses the core's block with the
+  filter's block **within each message** (per-turn dedup by UUID and
+  content hash). See "Attached-Files Accumulation — Verified Mechanism"
   below for the verified pipeline order, the two independent sources of
   blocks, and the pipe-based cleanup design.
 - **Authenticated downloads**: `/api/v1/files/{id}/content` requires
@@ -407,8 +418,11 @@ historical user message that has files.
 
 Net effect (v2.12.0): the filter's block carries only the current turn's
 images; the core's per-message blocks carry each `+` upload once in its
-own message. The `agent_loop_guard` pipe collapses the core blocks with
-the filter's block and deduplicates by UUID (image tags only). The
+own message. The `agent_loop_guard` pipe (v2.2.0+) collapses the core's
+block with the filter's block **within each message** and deduplicates by
+UUID and content hash (image tags only); since v2.4.0 the dedup is scoped
+per message, so a file re-uploaded in a later turn keeps a new block in
+that turn (it is never deduplicated away across turns). The
 v2.11.0 dedup collapses duplicates **within one request**; v2.12.0
 removes the cross-turn re-announcement that made pasted images reappear
 forever.

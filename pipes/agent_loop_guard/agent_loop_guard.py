@@ -2,7 +2,7 @@
 title: Agent Loop Guard
 author: open-webui-tools
 author_url: https://github.com/your-org/open-webui-tools
-version: 2.3.0
+version: 2.4.0
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
 """
@@ -64,24 +64,25 @@ def _build_guard_message(status: str, tool: str | None, total: int, max_calls: i
 #
 # So the payload can carry several per-message core blocks plus the
 # filter's current-turn block, with the same file tagged in more than
-# one place. This cleanup collapses duplicate tags (a simple UUID
-# match) keeping each file once, in the earliest user message where it
-# appears, and re-emits image tags in our canonical format (id +
-# absolute URL). It is deterministic (a pure function of the payload)
-# and cache-safe: historical per-message blocks stay byte-stable
-# between turns, so the cached prefix extends through the whole
-# history. The model still sees
-# every image via the historical per-message blocks; the last user
-# message only keeps genuinely new images. Multiple blocks in one
-# message collapse into one.
+# one place. This cleanup collapses duplicate tags WITHIN each user
+# message — a simple UUID match (the same upload is tagged by both the
+# core and the filter in the current turn; the file UUID is unique) plus
+# a content-hash match (two *different* UUIDs with identical bytes
+# collapse too) — and re-emits image tags in our canonical format (id +
+# absolute URL). Multiple blocks in one message collapse into one.
 #
-# Dedup is a simple UUID match (the file UUID is unique) and the emitted
-# tags are always in OUR canonical format — `id="{uuid}"` plus an
-# absolute `/api/v1/files/{uuid}/content` URL — regardless of which
-# source produced them (the filter's absolute form, the core's relative
-# form, or this deployment's bare-UUID raw form). That keeps the builtin
-# `view_file` tool (uses `id`) and external URL loaders (ComfyUI)
-# working, and keeps the same file rendering identically everywhere.
+# The dedup scope is PER USER MESSAGE (one message = one turn), never
+# across messages: a file deliberately re-uploaded in a later turn gets
+# a NEW block in that turn and stays visible to the agent — it is NOT
+# deduplicated away. Historical per-message blocks stay byte-stable
+# between turns (the cleanup is a deterministic pure function of each
+# message + the stored history), so the cached prefix extends through
+# the whole history and nothing is re-presented from history. (The
+# cross-message dedup that earlier versions did was only needed for the
+# pre-v2.12.0 filter, which re-announced a moving union block every
+# turn; the current filter never touches historical messages, so
+# cross-message dedup's only remaining effect was hiding deliberate
+# re-uploads — removed in v2.4.0.)
 #
 # Fail-open by design: callers wrap the call in try/except and forward
 # the payload unchanged on error.
@@ -240,6 +241,11 @@ def _build_block(tags: list[dict], base_url: str) -> str:
 def _dedupe_tags(tags: list[dict], seen: set[str], hash_lookup: dict[str, str] | None = None) -> list[dict]:
     """Keep tags whose canonical key has not been seen before.
 
+    The `seen` set is scoped by the caller to ONE user message (per-turn
+    dedup): it collapses the filter's current-turn block with the core's
+    block of the same message, and never removes a deliberate re-upload
+    from a later turn.
+
     Placeholder tags (key "") are always kept and never added to `seen`.
     Each dropped duplicate is logged at info level for debuggability.
 
@@ -333,11 +339,16 @@ async def _resolve_content_hashes(uuids: list[str]) -> dict[str, str]:
 
 
 def _cleanup_attached_files(messages: list, base_url: str = "", hash_lookup: dict[str, str] | None = None) -> dict:
-    """Collapse and deduplicate `<attached_files>` blocks across user messages.
+    """Collapse and deduplicate `<attached_files>` blocks WITHIN each user message.
 
-    Pure function of the payload (deterministic → cache-safe). Each file is
-    tagged exactly once, in the earliest user message where it appears;
-    multiple blocks in one message collapse into one; relative URLs are
+    Pure function of the payload (deterministic → cache-safe). Dedup is
+    scoped PER USER MESSAGE (one message = one turn): the same upload
+    tagged by both the core's `add_file_context()` and the image_filter in
+    the current turn collapses to one tag, and two different UUIDs with
+    identical content (`hash_lookup`) collapse too. Files are NEVER
+    deduplicated across messages — a deliberate re-upload in a later turn
+    keeps its own block in that turn and stays visible to the agent.
+    Multiple blocks in one message collapse into one; relative URLs are
     normalized to absolute when `base_url` is available. Mutates `messages`
     in place (the same dicts survive the middleware's shallow copies).
     Fail-open by design: callers wrap in try/except and forward unchanged.
@@ -346,7 +357,6 @@ def _cleanup_attached_files(messages: list, base_url: str = "", hash_lookup: dic
     `{"user_messages", "blocks_found", "blocks_kept", "tags_kept",
     "tags_dropped", "image_tags_kept"}`.
     """
-    seen: set[str] = set()
     stats = {
         "user_messages": 0,
         "blocks_found": 0,
@@ -360,6 +370,13 @@ def _cleanup_attached_files(messages: list, base_url: str = "", hash_lookup: dic
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
         stats["user_messages"] += 1
+
+        # Dedup scope: THIS message only. One user message = one turn; a
+        # file re-uploaded in a later turn must stay visible in its own
+        # block. The image_filter only announces the current turn, so the
+        # core's per-message blocks are the only historical source and are
+        # already stable — a fresh `seen` per message keeps that stability.
+        seen: set[str] = set()
 
         content = message.get("content")
         if isinstance(content, str):
@@ -501,9 +518,11 @@ class Pipe:
         )
         ATTACHED_FILES_CLEANUP: bool = Field(
             default=True,
-            description="Collapse and deduplicate <attached_files> blocks across user messages. "
-            "Cache-safe: each file is tagged exactly once, in the earliest user message "
-            "where it appears, so the history prefix stays byte-stable between turns. "
+            description="Collapse and deduplicate <attached_files> blocks WITHIN each user message "
+            "(per-turn): the core's add_file_context() block and the image_filter's "
+            "current-turn block for the same upload collapse to one tag. Re-uploads in "
+            "later turns keep their own block (never deduplicated away), and historical "
+            "messages stay byte-stable between turns, so the prefix cache is preserved. "
             "Set to False to forward payloads unchanged.",
         )
 

@@ -98,3 +98,25 @@ Turn 4 (you type "tell me more now", no new image)
 > backstopped in the pipe (v2.3.0 dedups image tags by `meta["file_hash"]`
 > in addition to UUID, so two UUIDs with identical bytes collapse to the
 > first occurrence).
+
+> **Update (v2.4.0, 2026-08-02)**: the pipe's dedup is now scoped **per
+> user message (per turn)**, not across the conversation. The
+> cross-message dedup had no remaining job after filter v2.12.0 (the
+> filter only announces the current turn, so the "moving union block" is
+> gone) — its only effect was hiding a **deliberate re-upload**: re-upload
+> the same image in a later turn and the new tag was dropped (the agent
+> never saw it) while the `+` upload still persisted a duplicate on disk.
+> Now each turn keeps its own files:
+>
+> ```
+> Turn 3: you re-upload image A (new UUID A')
+>   u1  ▸ core [A]                    "first look at this"        ← original stays
+>   a1  "Answer 1"
+>   u2  "ok"
+>   a2  "Answer 2"
+>   u3  ▸ core [A']                   "look at it again"          ← re-upload visible
+>       ▸ filter [A']                 (same file from both sources → one tag)
+> ```
+>
+> The prefix u1..u2 is byte-identical to earlier turns (cache preserved);
+> the re-upload turn adds its own block.

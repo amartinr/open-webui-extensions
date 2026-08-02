@@ -298,41 +298,56 @@ def test_historical_core_block_normalized_when_alone():
     assert messages[0]["content"][1]["text"] == "First?"
 
 
-def test_last_message_collapses_blocks_and_drops_old_files():
+def test_last_message_collapses_duplicate_blocks_from_filter_and_core():
+    # The current turn's message carries the same upload twice: once from
+    # the core's add_file_context() and once from the image_filter's
+    # current-turn block (same UUID — the filter converges on the current
+    # upload since v2.12.2). Dedup is per-message: the two blocks collapse
+    # into one tag, while turn-1's file keeps its own block in u1.
     messages = [
         _user([_core_block("f1"), "First?"]),
         {"role": "assistant", "content": "Answer 1"},
-        _user([_core_block("f2"), _union_block("f1", "f2") + "Second?"]),
+        _user([_core_block("f2"), _union_block("f2") + "Second?"]),
     ]
     _cleanup_attached_files(messages, BASE)
 
     u2_text = "\n".join(p["text"] for p in messages[2]["content"] if p.get("type") == "text")
-    assert "id=\"f1\"" not in u2_text
     assert "id=\"f2\"" in u2_text
     assert u2_text.count("<attached_files>") == 1  # blocks collapsed into one
+    assert u2_text.count("id=\"f2\"") == 1         # duplicate tag dropped within the message
     assert u2_text.endswith("Second?")
 
+    # u1 keeps its own file — nothing cross-message is deduplicated.
+    u1_text = "\n".join(p["text"] for p in messages[0]["content"] if p.get("type") == "text")
+    assert "id=\"f1\"" in u1_text
 
-def test_cross_message_dedup_str_content():
+
+def test_re_attached_file_visible_in_later_turn():
+    # Deliberate re-upload of the same file in a later turn (str content):
+    # the pipe must NOT deduplicate it away — the current turn gets its
+    # own block with the re-uploaded file, so the agent is aware it was
+    # uploaded again.
     messages = [
         {"role": "user", "content": _core_block("f1") + "First?"},
-        {"role": "user", "content": _core_block("f2") + _union_block("f1", "f2") + "Second?"},
+        {"role": "user", "content": _core_block("f1") + _union_block("f1") + "Same file again."},
     ]
     _cleanup_attached_files(messages, BASE)
     u2 = messages[1]["content"]
-    assert "id=\"f1\"" not in u2
-    assert "id=\"f2\"" in u2
-    assert u2.endswith("Second?")
+    assert "id=\"f1\"" in u2  # visible again in its turn
+    assert u2.count("<attached_files>") == 1  # filter+core blocks collapsed into one
+    assert u2.endswith("Same file again.")
 
 
-def test_re_attached_file_tagged_only_at_first_occurrence():
+def test_re_attached_file_tagged_in_each_turn():
+    # Same file re-attached in a later turn: tagged in EACH turn (its own
+    # block per message). No cross-message dedup.
     messages = [
         {"role": "user", "content": _core_block("f1") + "First?"},
         {"role": "user", "content": _core_block("f1") + "Re-attach?"},
     ]
     _cleanup_attached_files(messages, BASE)
     assert "id=\"f1\"" in messages[0]["content"]
-    assert "id=\"f1\"" not in messages[1]["content"]
+    assert "id=\"f1\"" in messages[1]["content"]  # re-attach stays visible
 
 
 def test_placeholder_preserved_and_not_deduped():
@@ -344,7 +359,9 @@ def test_placeholder_preserved_and_not_deduped():
     _cleanup_attached_files(messages, BASE)
     u2 = "\n".join(p["text"] for p in messages[1]["content"] if p.get("type") == "text")
     assert u2.count("(base64 stripped)") == 1
-    assert "id=\"f1\"" not in u2  # f1 already tagged in u1
+    # Re-presented files stay in u2 — there is no cross-message dedup.
+    assert "id=\"f1\"" in u2
+    assert "id=\"f2\"" in u2
 
 
 def test_empty_content_after_strip_gets_empty_text_part():
@@ -404,8 +421,10 @@ def test_fail_open_on_malformed_input():
 
 def _turn_payload(include_next_turn: bool) -> list[dict]:
     """Payload as seen in turn 3 (history up to u3) and in turn 4 (same
-    history + a3 + u4). In turn 3, u2/u3 carry their own core block PLUS
-    the filter's union block; in turn 4 the union block has moved to u4."""
+    history + a3 + u4). Each turn's message carries its own file in a core
+    block; the LAST message additionally carries the image_filter's
+    current-turn block for the SAME file (duplicate tag, absolute URL) —
+    the filter never touches historical messages (since v2.12.0)."""
     messages = [
         _user([_core_block("f1"), "First?"]),
         {"role": "assistant", "content": "Answer 1"},
@@ -413,14 +432,14 @@ def _turn_payload(include_next_turn: bool) -> list[dict]:
         {"role": "assistant", "content": "Answer 2"},
     ]
     if include_next_turn:
-        # turn 4: history u1..u3 unchanged (core blocks only), union moved to u4
+        # turn 4: history u1..u3 unchanged (core blocks only); u4 is the
+        # current turn with its own file from both sources
         messages.append(_user([_core_block("f3"), "Third?"]))
         messages.append({"role": "assistant", "content": "Answer 3"})
-        messages.append(_user([_core_block("f4"), _union_block("f1", "f2", "f3", "f4") + "Fourth?"]))
+        messages.append(_user([_core_block("f4"), _union_block("f4") + "Fourth?"]))
     else:
-        # turn 3: u2/u3 carry the union block too
-        messages[2]["content"][1]["text"] = _union_block("f1", "f2") + "Second?"
-        messages.append(_user([_core_block("f3"), _union_block("f1", "f2", "f3") + "Third?"]))
+        # turn 3: u3 is the current turn (core + filter for its own file)
+        messages.append(_user([_core_block("f3"), _union_block("f3") + "Third?"]))
     return messages
 
 
@@ -429,7 +448,10 @@ def test_history_prefix_byte_stable_between_turns():
 
     Turn 3 and turn 4 share the history u1, a1, u2, a2, u3. After cleanup
     every shared message must be byte-identical — otherwise the provider's
-    prefix cache misses on the whole conversation.
+    prefix cache misses on the whole conversation. u3 is the interesting
+    one: in turn 3 it carries the filter's current-turn block (core f3 +
+    filter f3), in turn 4 only the core block — per-message dedup makes
+    both collapse to the same single tag, so u3 is byte-identical too.
     """
     turn3 = _turn_payload(include_next_turn=False)
     turn4 = _turn_payload(include_next_turn=True)
@@ -439,18 +461,19 @@ def test_history_prefix_byte_stable_between_turns():
 
     assert turn3[0] == turn4[0]  # u1
     assert turn3[1] == turn4[1]  # a1
-    assert turn3[2] == turn4[2]  # u2 — lost the union block between turns
+    assert turn3[2] == turn4[2]  # u2
     assert turn3[3] == turn4[3]  # a2
-    assert turn3[4] == turn4[4]  # u3 — lost the union block between turns
+    assert turn3[4] == turn4[4]  # u3 — core+filter in turn 3 vs core only in turn 4 → same block
 
-    # Sanity: u2/u3 must still show their OWN file (f2/f3), now deduplicated.
+    # Sanity: each historical message keeps exactly its own file.
     u2 = "\n".join(p["text"] for p in turn3[2]["content"] if p.get("type") == "text")
     u3 = "\n".join(p["text"] for p in turn3[4]["content"] if p.get("type") == "text")
     assert "id=\"f2\"" in u2 and "id=\"f1\"" not in u2
-    assert "id=\"f3\"" in u3 and "id=\"f1\"" not in u3
-    # The last message of turn 4 keeps only its genuinely new file.
+    assert "id=\"f3\"" in u3 and "id=\"f1\"" not in u3 and "id=\"f2\"" not in u3
+    # The last message of turn 4 keeps its own (new) file, collapsed to one tag.
     u4 = "\n".join(p["text"] for p in turn4[6]["content"] if p.get("type") == "text")
     assert "id=\"f4\"" in u4 and "id=\"f1\"" not in u4 and "id=\"f2\"" not in u4 and "id=\"f3\"" not in u4
+    assert u4.count("id=\"f4\"") == 1
 
 
 def test_history_prefix_stable_without_base_url():
@@ -508,7 +531,11 @@ def test_content_hash_dedup_keeps_different_content():
     assert messages[0]["content"].count("<file") == 2
 
 
-def test_content_hash_dedup_earliest_message_wins():
+def test_content_hash_dedup_scoped_per_message():
+    # Content-hash dedup applies WITHIN a message only (the filter and the
+    # core tagging the same upload in one turn). The same content uploaded
+    # again in a LATER turn (deliberate re-upload) is kept — it is not
+    # deduplicated across messages.
     messages = [
         _user([_core_block("f1"), "First?"]),
         _user([_core_block("f2"), "Second?"]),  # same bytes as f1, different UUID
@@ -516,7 +543,7 @@ def test_content_hash_dedup_earliest_message_wins():
     _cleanup_attached_files(messages, BASE, hash_lookup={"f1": "a" * 64, "f2": "a" * 64})
     assert "id=\"f1\"" in messages[0]["content"][0]["text"]
     u2 = "\n".join(p["text"] for p in messages[1]["content"] if p.get("type") == "text")
-    assert "id=\"f2\"" not in u2
+    assert "id=\"f2\"" in u2  # re-upload kept — not deduped across turns
 
 
 def test_content_hash_dedup_skips_non_image():
@@ -553,6 +580,58 @@ def test_content_hash_dedup_idempotent():
     once = copy.deepcopy(messages)
     _cleanup_attached_files(messages, BASE, hash_lookup={upload: digest, old_copy: digest})
     assert messages == once
+
+
+def test_re_upload_same_content_not_deduped_across_turns():
+    """Re-uploading the same image (identical content, NEW UUID from the
+    `+` button) in a later turn: the pipe must NOT drop the new tag.
+
+    Regression for the reported bug: the re-upload was invisible to the
+    agent (cross-message content-hash dedup) while the `+` upload still
+    persisted a duplicate on disk — the worst of both worlds. The disk
+    copy is core behaviour (upload happens before the pipeline); the
+    invisibility is fixed here: the current turn keeps its own block with
+    the re-uploaded file, and the original keeps its block in u1.
+    """
+    f1 = "76680237-1167-4692-894d-2de4e02a5b5b"
+    f2 = "79cb1456-2b61-4b84-9769-787f5f6eb859"
+    digest = "a" * 64
+    messages = [
+        {"role": "user", "content": _core_block(f1) + "First?"},
+        {"role": "user", "content": _core_block(f2) + _union_block(f2) + "Same image again."},
+    ]
+    _cleanup_attached_files(messages, BASE, hash_lookup={f1: digest, f2: digest})
+    assert f'id="{f1}"' in messages[0]["content"]  # original keeps its block
+    u2 = messages[1]["content"]
+    assert f'id="{f2}"' in u2          # the re-upload stays visible
+    assert u2.count("<file") == 1      # filter+core collapsed within u2 only
+    assert f'id="{f1}"' not in u2
+
+
+def test_re_upload_same_content_cache_safe_prefix():
+    """The re-upload must not destabilize the shared history: after the
+    re-upload turn, a later plain turn renders the same bytes for every
+    shared message (prefix cache keeps hitting)."""
+    digest = "a" * 64
+    turn2 = [
+        {"role": "user", "content": _core_block("f1") + "First?"},
+        {"role": "assistant", "content": "Answer 1"},
+        # current turn: re-upload of f1's content under a new UUID
+        {"role": "user", "content": _core_block("f2") + _union_block("f2") + "Same image again."},
+    ]
+    turn3 = [
+        {"role": "user", "content": _core_block("f1") + "First?"},
+        {"role": "assistant", "content": "Answer 1"},
+        {"role": "user", "content": _core_block("f2") + "Same image again."},
+        {"role": "assistant", "content": "Answer 2"},
+        {"role": "user", "content": [{"type": "text", "text": "Plain follow-up."}]},
+    ]
+    _cleanup_attached_files(turn2, BASE, hash_lookup={"f1": digest, "f2": digest})
+    _cleanup_attached_files(turn3, BASE, hash_lookup={"f1": digest, "f2": digest})
+    assert turn2[0] == turn3[0]  # u1
+    assert turn2[1] == turn3[1]  # a1
+    assert turn2[2] == turn3[2]  # u2 — re-upload turn vs its later stored form
+    assert "id=\"f2\"" in turn3[2]["content"]  # the re-upload is still visible later
 
 
 def test_collect_image_uuids():
