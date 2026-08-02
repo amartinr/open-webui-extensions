@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.6.2
+version: 0.6.3
 licence: MIT
 """
 
@@ -227,27 +227,37 @@ class Tools:
 
         The token is never logged and never included in any output.
         """
-        state = getattr(request, "state", None) if request is not None else None
-        token = getattr(state, "token", None) if state is not None else None
+        token = self._extract_token_quiet(request)
         if token is None:
             raise ToolError(
                 "No authentication token available. This tool must run inside an "
                 "authenticated Open WebUI session or API request (it reads "
                 "__request__.state.token)."
             )
-        # v0.10.2: HTTPAuthorizationCredentials object with .credentials;
-        # a plain string is accepted for robustness across versions/tests.
-        if isinstance(token, str):
-            credentials = token
-        else:
-            credentials = getattr(token, "credentials", None)
-        if not isinstance(credentials, str) or not credentials.strip():
-            raise ToolError(
-                "No authentication token available. This tool must run inside an "
-                "authenticated Open WebUI session or API request (it reads "
-                "__request__.state.token)."
-            )
-        return credentials.strip()
+        return token
+
+    @staticmethod
+    def _extract_token_quiet(request: Any) -> Optional[str]:
+        """Tolerant token read used for output redaction (never raises).
+
+        Same extraction as ``_require_token`` but returns ``None`` instead of
+        raising, so the output boundary can redact the token string without
+        disturbing the normal auth flow.
+        """
+        try:
+            state = getattr(request, "state", None) if request is not None else None
+            token = getattr(state, "token", None) if state is not None else None
+            if token is None:
+                return None
+            if isinstance(token, str):
+                credentials = token
+            else:
+                credentials = getattr(token, "credentials", None)
+            if isinstance(credentials, str) and credentials.strip():
+                return credentials.strip()
+        except Exception:
+            pass
+        return None
 
     # ──────────────────────────────────────────────
     #  HTTP engine (DESIGN §8.4, §7.2)
@@ -364,6 +374,7 @@ class Tools:
         valve; callers pass the per-user effective format when available.
         """
         fmt = output_format or self.valves.output_format
+        payload = self._sanitize(payload)  # output-boundary guard (DESIGN §7.2)
         if fmt == "json":
             return self._truncate(
                 json.dumps(payload, ensure_ascii=False, indent=2, default=str)
@@ -376,6 +387,52 @@ class Tools:
         if fmt == "json":
             return json.dumps({"error": message}, ensure_ascii=False, indent=2)
         return f"Error: {message}"
+
+    # ──────────────────────────────────────────────
+    #  Output-boundary guards (DESIGN §7.2, defense in depth)
+    #
+    #  Every method whitelists/summarizes its fields, but a FUTURE method (or
+    #  a future server version that echoes a credential under a field we did
+    #  not expect — exactly what /api/v1/auths/ does with ``token``) could
+    #  accidentally pass a sensitive value through. These guards run at the
+    #  output boundary so no sensitive value can reach the model even then:
+    #
+    #   1. _sanitize   — drops any dict key whose NAME looks like a credential
+    #                    when its VALUE is a non-empty string. Boolean
+    #                    permission FLAGS named e.g. ``api_keys`` are kept.
+    #   2. _run        — redacts the raw token string from any output
+    #                    (success or error) before it is returned.
+    #  A static tripwire test (test_security.py) pins that no method passes a
+    #  raw server body straight into _ok.
+    # ──────────────────────────────────────────────
+
+    _SENSITIVE_KEY_RE = re.compile(
+        r"(token|api[_-]?key|apikey|password|passwd|secret|credential|"
+        r"authorization|private[_-]?key|access[_-]?key|client[_-]?secret|"
+        r"connection[_-]?string|x[_-]?api[_-]?key)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _sanitize(cls, value: Any) -> Any:
+        """Recursively drop credential-looking keys (string values only)."""
+        if isinstance(value, dict):
+            out = {}
+            for key, val in value.items():
+                if cls._SENSITIVE_KEY_RE.search(str(key)) and isinstance(val, str) and val.strip():
+                    continue  # credential-like key with a non-empty string value
+                out[key] = cls._sanitize(val)
+            return out
+        if isinstance(value, list):
+            return [cls._sanitize(v) for v in value]
+        return value
+
+    @staticmethod
+    def _redact(text: str, secret: Optional[str]) -> str:
+        """Replace the request token string if it ever appears in output."""
+        if not secret or len(secret) < 8 or secret not in text:
+            return text
+        return text.replace(secret, "[REDACTED]")
 
     # ──────────────────────────────────────────────
     #  Markdown renderers (DESIGN §8.8)
@@ -728,20 +785,31 @@ class Tools:
             lines.append(self._md_hierarchy(meta))
         return "\n".join(lines)
 
-    async def _run(self, coro: Any, output_format: Optional[str] = None) -> str:
-        """Execute a private implementation, converting failures to safe output."""
+    async def _run(self, coro: Any, output_format: Optional[str] = None,
+                   request: Any = None) -> str:
+        """Execute a private implementation, converting failures to safe output.
+
+        ``request`` is used to redact the request token from any output
+        (defense in depth — the token must never reach the model even if it
+        accidentally appears in a field or an error message).
+        """
+        secret = self._extract_token_quiet(request)
         try:
-            return await coro
+            result = await coro
         except ToolError as exc:
-            return self._error(str(exc), output_format)
+            return self._redact(self._error(str(exc), output_format), secret)
         except Exception as exc:  # pragma: no cover - defensive
             # The token is never part of an exception message (it travels in a
             # header only), so logging the traceback cannot leak it.
             logger.exception("owui_meta: unexpected error")
-            return self._error(
-                f"Unexpected internal error ({type(exc).__name__}); see server logs.",
-                output_format,
+            return self._redact(
+                self._error(
+                    f"Unexpected internal error ({type(exc).__name__}); see server logs.",
+                    output_format,
+                ),
+                secret,
             )
+        return self._redact(result, secret)
 
     # ──────────────────────────────────────────────
     #  Validation helpers
@@ -951,6 +1019,7 @@ class Tools:
         return await self._run(
             self._get_my_profile(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_my_profile(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -982,6 +1051,7 @@ class Tools:
         return await self._run(
             self._get_models(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_models(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1013,6 +1083,7 @@ class Tools:
                 __user__=__user__, output_format=output_format,
             ),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_my_chats(self, limit: Any, request: Any, sort_by: Any = "updated_at",
@@ -1036,6 +1107,7 @@ class Tools:
         return await self._run(
             self._get_chat(chat_id, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_chat(self, chat_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1068,6 +1140,7 @@ class Tools:
         return await self._run(
             self._search_chats(text, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _search_chats(self, text: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1091,6 +1164,7 @@ class Tools:
         return await self._run(
             self._get_shared_chats(limit, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_shared_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1112,6 +1186,7 @@ class Tools:
         return await self._run(
             self._get_pinned_chats(limit, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_pinned_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1159,6 +1234,7 @@ class Tools:
                 filename=filename, __user__=__user__, output_format=output_format,
             ),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_my_files(self, request: Any, limit: Any = 50, sort_by: Any = "created_at",
@@ -1193,6 +1269,7 @@ class Tools:
         return await self._run(
             self._get_file_content(file_id, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_file_content(self, file_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1223,6 +1300,7 @@ class Tools:
         return await self._run(
             self._get_my_prompts(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_my_prompts(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1242,6 +1320,7 @@ class Tools:
         return await self._run(
             self._get_my_tools(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_my_tools(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1266,6 +1345,7 @@ class Tools:
         return await self._run(
             self._get_knowledge_bases(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_knowledge_bases(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1291,6 +1371,7 @@ class Tools:
         return await self._run(
             self._get_my_skills(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_my_skills(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1309,6 +1390,7 @@ class Tools:
         return await self._run(
             self._get_skill(skill_id, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
+            request=__request__,
         )
 
     async def _get_skill(self, skill_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
