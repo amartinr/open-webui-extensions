@@ -157,7 +157,7 @@ Implements DESIGN §8.8 (decision 2026-08-01), pulled ahead of Iterations 2–5 
 
 **Definition of done:** the tool returns readable Markdown by default (tables/bullets), JSON remains available via valve — 56 tests green.
 
-## Iteration 7 — Skills endpoints (query-only) ✅ DONE
+## Iteration 7 — Skills endpoints (query-only) ✅ DONE (commit `1deaa15`)
 
 **Commit:** `feat(owui_meta): add skills endpoints (get_my_skills, get_skill)`
 
