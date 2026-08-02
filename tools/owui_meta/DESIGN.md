@@ -28,6 +28,7 @@ The central, differentiating feature: **the tool authenticates with the credenti
 - **RAG / retrieval** (`/api/v1/retrieval*`, `/api/v1/rag*`, `embed*`, `rerank*`): the instance has RAG **globally bypassed** (`BYPASS_EMBEDDING_AND_RETRIEVAL`), there are no collections to query.
 - **Memories** (`/api/v1/memories*`): the user does not use them.
 - **Writing/deleting** user data: the tool is **read-only** in its first version.
+- **Export/import**: v1 is a **query-only interface** (decision 2026-08-01). No exports or imports are exposed, even when the endpoint is a `GET` (e.g. `/api/v1/skills/export`, `/api/v1/tools/export`, `/api/v1/functions/export`, `/api/v1/models/export`, `/api/v1/knowledge/{id}/export`, `/api/v1/chats/stats/export`); the `/import` endpoints are `POST` and are already excluded by the read-only rule.
 - **Administration endpoints** except for users with the `admin` role (see §7).
 
 ---
@@ -207,6 +208,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 - `memories*`
 - `/api/v1/auths/signin`, `/signup` (pointless from within an already-authenticated session)
 - `POST/PUT/DELETE` in general (read-only in v1)
+- Any export/import route (GET or POST) — v1 is query-only (decision 2026-08-01)
 - Any route not explicitly listed
 
 ---

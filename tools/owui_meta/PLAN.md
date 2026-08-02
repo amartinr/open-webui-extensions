@@ -194,4 +194,5 @@ Work intentionally postponed to a future version of the tool (not part of the cu
 - RAG/retrieval (`/api/v1/retrieval*`, `rag*`, `embed*`, `rerank*`) — globally bypassed on the instance.
 - Memories (`/api/v1/memories*`).
 - Any write/delete operation (read-only in v1).
+- Any export/import route — v1 is a **query-only interface** (user decision 2026-08-01), so even `GET` exports (`/skills/export`, `/tools/export`, `/functions/export`, `/models/export`, `/knowledge/{id}/export`, `/chats/stats/export`) and the `POST` imports (`/chats/import`, `/models/import`) are excluded.
 - Any route not explicitly allowlisted.
