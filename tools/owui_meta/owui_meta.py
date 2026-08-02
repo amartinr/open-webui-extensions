@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.6.1
+version: 0.6.2
 licence: MIT
 """
 
@@ -1044,7 +1044,20 @@ class Tools:
         _status, _ct, body = await self._api_get_json(
             token, _ROUTE_CHAT.format(chat_id=chat_id)
         )
-        return self._ok(json.loads(body), "chat", output_format=output_format)
+        raw = json.loads(body)
+        # Field whitelist (defense in depth): the full ChatResponse carries
+        # bookkeeping noise (user_id, meta, tasks, summary, folder_id) that
+        # the model does not need. Keep the conversation (chat/messages),
+        # title and the user-facing flags only. No token or credential field
+        # exists here (verified in v0.10.2), but whitelisting keeps json mode
+        # consistent with the markdown renderer.
+        chat = {
+            k: raw.get(k)
+            for k in ("id", "title", "chat", "messages", "created_at",
+                      "updated_at", "share_id", "pinned", "archived")
+            if k in raw
+        }
+        return self._ok(chat, "chat", output_format=output_format)
 
     async def search_chats(self, text: str, __request__: Any = None, __user__: dict = None) -> str:
         """Search the requesting user's chats for a text fragment.
@@ -1302,4 +1315,15 @@ class Tools:
         token = self._require_token(request)
         skill_id = self._require_id(skill_id, "skill_id")
         _status, _ct, body = await self._api_get_json(token, _ROUTE_SKILL.format(skill_id=skill_id))
-        return self._ok(json.loads(body), "skill", output_format=output_format)
+        raw = json.loads(body)
+        # Field whitelist: the raw SkillAccessResponse embeds the OWNER's
+        # UserResponse (id, email, …) — for a shared skill that is another
+        # user's contact info — plus access_grants/write_access bookkeeping.
+        # None of it is needed to answer queries about the skill.
+        skill = {
+            k: raw.get(k)
+            for k in ("id", "name", "description", "content", "is_active",
+                      "created_at", "updated_at", "meta")
+            if k in raw
+        }
+        return self._ok(skill, "skill", output_format=output_format)

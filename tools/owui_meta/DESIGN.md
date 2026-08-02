@@ -213,6 +213,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 - `/api/v1/auths/signin`, `/signup` (pointless from within an already-authenticated session)
 - `POST/PUT/DELETE` in general (read-only in v1)
 - Any export/import route (GET or POST) — v1 is query-only (decision 2026-08-01)
+- **Secret-bearing GETs (audit 2026-08-01 — never add)**: `GET /api/v1/auths/api_key` (returns the user's API key), `GET /api/v1/tools/id/{id}/valves` and `/valves/user` (return configured valve values, which can contain API keys), `GET /api/v1/tools/id/{id}` (the tool's Python source, which may contain hardcoded secrets), `GET /api/v1/knowledge/external/connections*` (external DB configs with credentials), and any `*/admin/*` config route (LDAP/OAuth secrets).
 - Any route not explicitly listed
 
 ---
@@ -233,6 +234,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 - **Timeout**: configurable (default 15 s).
 - **No token logging**: the token must never appear in logs or in messages returned to the model.
 - **Profile field whitelist (security fix 2026-08-01)**: `GET /api/v1/auths/` **echoes the request token** in its body (v0.10.2 `get_session_user` returns `token`/`token_type`/`expires_at` for the frontend's session refresh). The tool never serializes the raw profile body — `_get_my_profile` builds an explicit field whitelist (`id`, `email`, `name`, `role`, `profile_image_url`, `permissions`, timestamps) and the token fields are never included, in **either** output format.
+- **Whitelist on every raw detail method (audit 2026-08-01)**: an audit of all allowlisted endpoints against the v0.10.2 source found **no other token echoes** (chats/models/files/prompts/tools/knowledge/skills responses carry no credentials). For defense in depth, the two remaining raw pass-throughs were also whitelisted: `get_chat` keeps `id/title/chat/messages/dates/share_id/pinned/archived` (drops `user_id`, `meta`, `tasks`, `summary`, `folder_id`); `get_skill` keeps `id/name/description/content/is_active/dates/meta` (drops the embedded owner `UserResponse` — another user's email for shared skills — plus `access_grants`/`write_access`). List methods were already summarized with explicit field picks.
 
 ### 7.3 User isolation (verified in tests)
 - `GET /api/v1/chats/11111111-…-1111` (nonexistent UUID) → **401 "We could not find what you're looking for"**: no existence leak.

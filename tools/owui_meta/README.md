@@ -16,6 +16,7 @@ A server-side Open WebUI tool that lets the model query the platform's **own int
 - **Mapped errors** — 401/403/404/5xx become readable messages; 404 never reveals whether a resource exists.
 - **Truncation** — responses are capped before reaching the model context.
 - **No token logging** — the credential never appears in logs or tool output. (`GET /api/v1/auths/` echoes the request token in its body; the tool field-whitelists the profile so the token never reaches the model, in any output format.)
+- **Every response is field-whitelisted** — no method serializes a raw API body. Detail methods (profile, chat, skill) pick explicit fields; list methods summarize. Secret-bearing GETs (`auths/api_key`, tool valves, tool source, external DB configs, admin configs) are **not** in the allowlist.
 
 ## Output format
 

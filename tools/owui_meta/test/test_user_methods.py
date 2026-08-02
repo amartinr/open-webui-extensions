@@ -89,6 +89,10 @@ def api_handler(request):
             "id": "sk1", "name": "RAG summarizer", "description": "Summarizes documents",
             "is_active": True, "content": "You summarize documents.",
             "meta": {"model": "deepseek"}, "created_at": 1, "updated_at": 2, "write_access": True,
+            # a shared skill embeds the OWNER's user object — must never leak
+            "user_id": "owner-123",
+            "user": {"id": "owner-123", "email": "owner@example.com", "name": "Owner", "role": "user"},
+            "access_grants": [{"principal_id": "*", "permission": "read"}],
         })
     return json_response({"unexpected": path}, status=404)
 
@@ -238,7 +242,55 @@ async def test_get_skill_returns_full_detail():
     payload = json.loads(out)
     assert payload["id"] == "sk1"
     assert payload["content"] == "You summarize documents."
-    assert payload["write_access"] is True
+    assert payload["meta"] == {"model": "deepseek"}
+
+
+async def test_get_skill_strips_owner_and_bookkeeping():
+    # SECURITY (whitelist): the raw SkillAccessResponse embeds the OWNER's
+    # UserResponse (email!) for shared skills, plus access_grants/write_access
+    # bookkeeping. None of it must reach the model — in any output format.
+    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    out = await tools.get_skill("sk1", __request__=FakeRequest())
+    assert "owner@example.com" not in out
+    payload = json.loads(out)
+    assert "user" not in payload
+    assert "user_id" not in payload
+    assert "access_grants" not in payload
+    assert "write_access" not in payload
+
+    # markdown mode also clean
+    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
+    out = await tools.get_skill("sk1", __request__=FakeRequest())
+    assert "owner@example.com" not in out
+    assert "owner-123" not in out
+
+
+async def test_get_chat_strips_bookkeeping_fields():
+    # SECURITY (whitelist): the full ChatResponse carries bookkeeping noise
+    # (user_id, meta, tasks, summary, folder_id) that json mode used to dump
+    # raw. The conversation itself is kept (that is the feature).
+    def handler(request):
+        return json_response({
+            "id": CHAT_ID, "title": "Budget planning", "user_id": "u1",
+            "folder_id": "f1", "meta": {"profile": "x"}, "tasks": [],
+            "summary": "a summary", "last_read_at": 123,
+            "messages": [{"role": "user", "content": "hola"}],
+            "created_at": 1, "updated_at": 2, "pinned": False, "archived": False,
+        })
+
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
+    payload = json.loads(out)
+    assert payload["messages"][0]["content"] == "hola"  # conversation kept
+    for noise in ("user_id", "folder_id", "meta", "tasks", "summary", "last_read_at"):
+        assert noise not in payload, f"{noise} should be stripped"
+
+    # markdown mode shows the conversation as before
+    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
+    assert "**user**" in out
+    assert "hola" in out
+    assert "a summary" not in out
 
 
 async def test_get_skill_invalid_id_rejected_without_request():
