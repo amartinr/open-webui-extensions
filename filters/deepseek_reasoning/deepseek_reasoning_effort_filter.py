@@ -3,7 +3,7 @@ title: DeepSeek Reasoning Effort Selector
 author: pi-agent
 description: Toggleable filter that lets users select "low", "high" or "max" reasoning effort for DeepSeek models. Admin defines a per-model default via the model_effort_map valve (JSON: model pattern -> effort); models not listed fall back to default_effort ("low"). User chip choice wins; otherwise the per-model default applies. No monkey-patching required.
 required_open_webui_version: 0.9.0
-version: 1.3.0
+version: 1.3.1
 """
 
 import json
@@ -31,7 +31,7 @@ def _parse_effort_map(raw: str) -> list[tuple[str, str]]:
     for pattern, effort in data.items():
         if isinstance(effort, str) and effort in ALLOWED:
             pairs.append((str(pattern).strip().lower(), effort))
-    # El patrón más específico (más largo) gana sobre subcadenas genéricas
+    # The most specific (longest) pattern wins over generic substrings.
     pairs.sort(key=lambda p: len(p[0]), reverse=True)
     return pairs
 
@@ -132,9 +132,9 @@ class Filter:
 
         pairs = _parse_effort_map(self.valves.model_effort_map)
 
-        # 1. Elección explícita del usuario (chip) gana
+        # 1. Explicit user choice (chip) wins
         effort: Optional[str] = None
-        source = "fallback"
+        source = "system"
         if __user__ and __user__.get("valves"):
             uv = __user__["valves"]
             if isinstance(uv, dict):
@@ -143,15 +143,15 @@ class Filter:
                 user_effort = getattr(uv, "reasoning_effort", "")
             if user_effort in ALLOWED:
                 effort = user_effort
-                source = "usuario"
+                source = "user"
 
-        # 2. Default del modelo (mapa por patrón)
+        # 2. Per-model default (map by pattern)
         if effort is None:
             effort = _resolve_model_effort(model, pairs)
             if effort is not None:
-                source = "modelo (map)"
+                source = "model"
 
-        # 3. Fallback global
+        # 3. Global fallback
         if effort is None:
             effort = self.valves.default_effort
 
@@ -171,7 +171,7 @@ class Filter:
                 {
                     "type": "status",
                     "data": {
-                        "description": f"🧠 Reasoning effort ({effort}, {source})",
+                        "description": f"🧠 Reasoning effort: {effort} ({source})",
                         "done": True,
                         "hidden": False,
                     },
