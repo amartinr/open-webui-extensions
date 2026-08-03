@@ -11,7 +11,7 @@ A server-side Open WebUI tool that lets the model query the platform's **own int
 ## Security model (by design)
 
 - **Endpoint allowlist** with typed methods — no arbitrary URL calls, no SSRF.
-- **Read-only** in v1; admin methods gated by runtime role check.
+- **Read-only except one explicit write**: `delete_files(file_ids)` (user-authorized batch deletion of specific files) is the only write operation; everything else is query-only. The backend re-verifies authorization and removes each file from storage, metadata and the vector index.
 - **`Content-Type` validation** — the SPA HTML catch-all returns HTTP 200, so only JSON (or explicitly allowed binary types) is trusted.
 - **Mapped errors** — 401/403/404/5xx become readable messages; 404 never reveals whether a resource exists.
 - **Truncation** — responses are capped before reaching the model context.
@@ -62,6 +62,14 @@ List methods support **pagination, sorting and filtering** (client-side, since t
 - `get_my_chats(limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc")`.
 
 The tool iterates pages transparently (bounded by `MAX_PAGES`) and returns a **summarized** result: top N items + counts, never a full dump.
+
+## File cleanup
+
+Open WebUI keeps chat-attached files when the chat is deleted (verified in the v0.10.2 source — `delete_chat_by_id` never touches `Files`), so files from deleted chats stay in the library and storage forever. `delete_files` addresses the cleanup:
+
+- `delete_files(file_ids)` — permanently deletes the given files in one pass (up to 50 per call). The whole list is validated before anything runs; per file it reports the name and removes it (the backend re-verifies you own it or have write access, and removes it from storage, metadata, KB associations and the vector index). A file that fails (missing / not yours / backend error) is reported by id without aborting the rest. **Irreversible.**
+
+Finding the obsolete files is up to the model, using the existing read methods: `get_my_files()` exposes each file's `origin_chat_id`, and `get_my_chats()` gives the live chat ids — files whose origin chat is not in that list are cleanup candidates. Typical flow: `get_my_files()` + `get_my_chats()` → identify the orphans → `delete_files([ids...])` after user confirmation.
 
 ## Requirements
 

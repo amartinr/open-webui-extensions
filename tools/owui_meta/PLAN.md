@@ -196,6 +196,7 @@ These changes were not in the initial plan; they emerged during development / li
 | 13 | Hardening (user question: “¿implementado?”) | **Output-boundary guards against accidental leaks** | Whitelists are per-method/manual; a future method or server field could leak. Added two structural guards: `_sanitize` (drops credential-named keys with string values; boolean flags like `api_keys` kept) applied in `_ok` for both formats, and `_run` redacting the raw token string from success and error output (`request=__request__` threaded through all 14 wrappers). Plus `test/test_security.py`: sanitizer unit, future-raw-pass-through simulation, token redaction inside a whitelisted field, redaction in the error path, static no-raw-body tripwire. | (this commit) |
 | 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite in Iteration 5 is still pending; these were one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
 | 14 | Design decision (user) | **`get_file_content` attaches files to the UI via the native `files` event** — image → inline preview + download, text → 100-char snippet (no dump), binary → note. Best-effort metadata call to `GET /api/v1/files/{id}` (added to the allowlist) for the attachment display name; best-effort `_emit_files` so a dead UI socket never breaks the tool call. Read opt-in (`max_chars`/`offset`) deferred — see §7. | Verified against Open WebUI source: the `files` event is persisted by `socket/main.py` and rendered by `ResponseMessage.svelte`/`FileItem.svelte`/`Image.svelte`; the item schema is pinned by `test/test_file_attachment.py`. See §7 design note. | (this commit) |
+| 15 | Design decision (user) | **File cleanup: `delete_files(file_ids)`** — the first write operation, an explicit exception to read-only v1. Accepts a list of ids (whole list validated up front; dedup; capped by `MAX_DELETE_FILES`); per file: GET metadata first (report what disappears; a 404 never reaches the DELETE), then `DELETE /api/v1/files/{id}` (backend re-verifies owner/admin/write, cleans KB + vector index). Per-file failures are reported by id without aborting the rest. A dedicated orphan-list method was considered then dropped by user decision (the model derives orphans from `get_my_files()` `origin_chat_id` + `get_my_chats()`). HTTP engine generalized (`_fetch`/`_fetch_with_retry` take a method; new `_api_delete_json`). | Open WebUI keeps chat-attached files when a chat is deleted (verified in v0.10.2 `chats.py`: `delete_chat_by_id` never touches `Files`) — the orphan-cleanup case. See §7 design note. | (this commit) |
 
 **Unchanged commitments:** scope confined to `tools/owui_meta/`; one commit per iteration; Conventional Commits; all docs/code in English; no credentials ever configured or stored.
 
@@ -233,10 +234,27 @@ Reviewed against Open WebUI source (`main` and the instance's v0.10.2) — not j
 
 ---
 
+### Design note (2026-08-03): file cleanup — `delete_files`
+
+**Problem (user report, verified in v0.10.2 source):** deleting a chat does NOT delete the files attached to it. `chats.py::delete_chat_by_id` never touches `Files`, so the file stays in the user's library and in storage, forever.
+
+**First write operation — an explicit exception to read-only v1 (user decision 2026-08-03):**
+
+- `delete_files(file_ids)` — accepts a **list** of ids for one-pass cleanup. The whole list is validated up front (one invalid id rejects the call before any request, so nothing is partially deleted by a bad call); ids are deduplicated and capped at `MAX_DELETE_FILES` (50). Per file: `GET /api/v1/files/{id}` first (report filename/type/size that will disappear; a 404 on the GET means the DELETE would fail too, so nothing is touched for that id), then `DELETE /api/v1/files/{id}`. The backend (v0.10.2 `files.py::delete_file_by_id`) re-verifies authorization (`file.user_id == user.id` or admin or write access, else 404), removes KB associations + embeddings, deletes the object from storage and the vector collection, and returns `{"message": "File deleted successfully"}`. Deletion is **irreversible** — the tool call itself is the confirmation. A per-file failure (missing / not yours / backend error) is reported by id without aborting the rest.
+- **Orphan detection is NOT a tool method (user decision):** it was prototyped as `list_orphan_files` (files whose `meta.data.chat_id` is absent from the user's live chats) and then dropped — the model already derives it from `get_my_files()` (which exposes `origin_chat_id`) + `get_my_chats()` (live chat ids), so a dedicated method would duplicate existing capability with extra surface. Documented cleanup flow in README.
+
+**HTTP engine:** `_fetch`/`_fetch_with_retry` now take a `method` argument (default `GET`); new `_api_delete_json` applies the same content-type validation and non-leaking error mapping as GET (SPA HTML catch-all protection intact). The only write-capable method is `delete_files`; the allowlist gains no other write route (PLAN §8).
+
+**Safety posture unchanged:** token never in logs/URLs, `_sanitize`/`_redact`/tripwire intact, 404 never reveals existence, DELETE inherits `_validate_status` mapping. Pinned by `test/test_file_deletion.py` (9 tests: batch per-file GET+DELETE, partial failure, markdown summary, 404-on-GET never calls DELETE, 403 mapping, whole-list validation, non-list/empty rejection, dedup).
+
+**Future (not in scope now):** admin sweep of all users, deletion of files orphaned by deleted *messages* inside live chats.
+
+---
+
 ## 8. Out of scope (per DESIGN §2)
 
 - RAG/retrieval (`/api/v1/retrieval*`, `rag*`, `embed*`, `rerank*`) — globally bypassed on the instance.
 - Memories (`/api/v1/memories*`).
-- Any write/delete operation (read-only in v1).
+- **Any write/delete operation** — except the single explicit exception decided 2026-08-03: `delete_files(file_ids)` for file cleanup (see §7 design note). No other write/delete route is allowed.
 - Any export/import route — v1 is a **query-only interface** (user decision 2026-08-01), so even `GET` exports (`/skills/export`, `/tools/export`, `/functions/export`, `/models/export`, `/knowledge/{id}/export`, `/chats/stats/export`) and the `POST` imports (`/chats/import`, `/models/import`) are excluded.
 - Any route not explicitly allowlisted.

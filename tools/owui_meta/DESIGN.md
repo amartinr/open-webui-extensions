@@ -27,7 +27,7 @@ The central, differentiating feature: **the tool authenticates with the credenti
 ### Non-goals (out of scope, decided by the instance owner)
 - **RAG / retrieval** (`/api/v1/retrieval*`, `/api/v1/rag*`, `embed*`, `rerank*`): the instance has RAG **globally bypassed** (`BYPASS_EMBEDDING_AND_RETRIEVAL`), there are no collections to query.
 - **Memories** (`/api/v1/memories*`): the user does not use them.
-- **Writing/deleting** user data: the tool is **read-only** in its first version.
+- **Writing/deleting** user data: the tool is **read-only** in its first version, **with a single explicit exception added 2026-08-03**: `delete_files(file_ids)` — user-authorized batch file deletion for cleanup (see §6.1/§8.5). Everything else remains query-only; no other write/delete endpoint is allowed.
 - **Export/import**: v1 is a **query-only interface** (decision 2026-08-01). No exports or imports are exposed, even when the endpoint is a `GET` (e.g. `/api/v1/skills/export`, `/api/v1/tools/export`, `/api/v1/functions/export`, `/api/v1/models/export`, `/api/v1/knowledge/{id}/export`, `/api/v1/chats/stats/export`); the `/import` endpoints are `POST` and are already excluded by the read-only rule.
 - **Administration endpoints** except for users with the `admin` role (see §7).
 
@@ -191,6 +191,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `get_pinned_chats()` | `GET /api/v1/chats/pinned` |
 | `get_my_files()` | `GET /api/v1/files` |
 | `get_file_content(file_id)` | `GET /api/v1/files/{id}/content` |
+| `delete_files(file_ids)` | per id: `GET /api/v1/files/{id}` + `DELETE /api/v1/files/{id}` (write, explicit — see §7.4) |
 | `get_my_prompts()` | `GET /api/v1/prompts` |
 | `get_my_tools()` | `GET /api/v1/tools` |
 | `get_knowledge_bases()` | `GET /api/v1/knowledge` |
@@ -236,6 +237,8 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 - **Profile field whitelist (security fix 2026-08-01)**: `GET /api/v1/auths/` **echoes the request token** in its body (v0.10.2 `get_session_user` returns `token`/`token_type`/`expires_at` for the frontend's session refresh). The tool never serializes the raw profile body — `_get_my_profile` builds an explicit field whitelist (`id`, `email`, `name`, `role`, `profile_image_url`, `permissions`, timestamps) and the token fields are never included, in **either** output format.
 - **Whitelist on every raw detail method (audit 2026-08-01)**: an audit of all allowlisted endpoints against the v0.10.2 source found **no other token echoes** (chats/models/files/prompts/tools/knowledge/skills responses carry no credentials). For defense in depth, the two remaining raw pass-throughs were also whitelisted: `get_chat` keeps `id/title/chat/messages/dates/share_id/pinned/archived` (drops `user_id`, `meta`, `tasks`, `summary`, `folder_id`); `get_skill` keeps `id/name/description/content/is_active/dates/meta` (drops the embedded owner `UserResponse` — another user's email for shared skills — plus `access_grants`/`write_access`). List methods were already summarized with explicit field picks.
 - **Output-boundary guards (hardening 2026-08-01)**: whitelists are per-method and manual, so two guards run at the output boundary to also stop *accidental* leaks (a future method, or a future server version echoing a credential under an unexpected field): (1) `_sanitize` recursively drops any dict key whose name looks like a credential (`token`, `api_key`, `password`, `secret`, `authorization`, …) when its value is a **non-empty string** — boolean permission flags named e.g. `api_keys` are kept; (2) `_run` redacts the **raw token string** from any output (success or error) before returning. A static tripwire test (`test_security.py`) pins that no method passes a raw server body into `_ok`.
+
+- **File deletion is the only write operation (2026-08-03)**: `delete_files(file_ids)` validates the whole id list up front (one invalid id rejects the call before any request), then per file: `GET` the metadata (report what disappears; a 404 never reaches the `DELETE`) and `DELETE /api/v1/files/{id}`. The backend re-verifies authorization (`file.user_id == user.id` or admin or write access — otherwise 404), cleans up KB associations + embeddings, removes the object from storage and the vector index. Deletion is **irreversible**; the model/user decides per call. A per-file failure is reported by id without aborting the rest (bounded by `MAX_DELETE_FILES`). Orphan detection is intentionally NOT a tool method: the model derives it from `get_my_files()` (`origin_chat_id`) + `get_my_chats()`.
 
 ### 7.3 User isolation (verified in tests)
 - `GET /api/v1/chats/11111111-…-1111` (nonexistent UUID) → **401 "We could not find what you're looking for"**: no existence leak.

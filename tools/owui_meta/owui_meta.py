@@ -3,10 +3,10 @@ title: Open WebUI Meta-Tool
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions
-description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
+description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.7.0
+version: 0.8.0
 licence: MIT
 """
 
@@ -41,6 +41,10 @@ DEFAULT_MAX_RESPONSE_CHARS = 8000
 # the snippet is only for the model to recognize what the file is about —
 # never a full dump (DESIGN §8.6.5, PLAN.md §7 2026-08-03).
 FILE_SNIPPET_CHARS = 100
+
+# Hard cap on how many files one delete_files() call may delete in a single
+# pass. Prevents a runaway tool call from wiping a large library at once.
+MAX_DELETE_FILES = 50
 
 # Transparent page iteration: the API caps at 50 items/page and exposes
 # ``total`` (DESIGN §8.6). ``MAX_PAGES`` bounds how many pages the tool will
@@ -280,19 +284,21 @@ class Tools:
         )
 
     async def _fetch(self, url: str, token: str, params: Optional[dict] = None,
-                     accept: str = "application/json") -> httpx.Response:
+                     accept: str = "application/json",
+                     method: str = "GET") -> httpx.Response:
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": accept,
             "User-Agent": "owui_meta/0.1.0 (Open WebUI internal tool)",
         }
         async with self._client() as client:
-            return await client.get(url, headers=headers, params=params)
+            return await client.request(method, url, headers=headers, params=params)
 
     async def _fetch_with_retry(self, token: str, path: str,
                                 params: Optional[dict] = None,
-                                accept: str = "application/json") -> httpx.Response:
-        """GET an allowlisted route, retrying once against the fallback URL.
+                                accept: str = "application/json",
+                                method: str = "GET") -> httpx.Response:
+        """Call an allowlisted route, retrying once against the fallback URL.
 
         Retry only on transport errors (DNS/connection/timeout — DESIGN §4.3).
         Never retries on API 4xx/5xx responses.
@@ -300,12 +306,12 @@ class Tools:
         base = await self._resolve_base_url()
         primary_url = base + path
         try:
-            resp = await self._fetch(primary_url, token, params, accept)
+            resp = await self._fetch(primary_url, token, params, accept, method)
         except httpx.RequestError as exc:
             fallback = self.valves.fallback_base_url.rstrip("/")
             if fallback and fallback != base:
                 try:
-                    resp = await self._fetch(fallback + path, token, params, accept)
+                    resp = await self._fetch(fallback + path, token, params, accept, method)
                 except httpx.RequestError as exc2:
                     raise ToolError(
                         f"Could not reach the internal API at {fallback + path}: {exc2}"
@@ -360,6 +366,23 @@ class Tools:
         resp = await self._fetch_with_retry(token, path, accept="*/*")
         status, content_type = self._validate_status(resp)
         return status, content_type, resp.content
+
+    async def _api_delete_json(self, token: str, path: str) -> tuple[int, str, str]:
+        """JSON DELETE for explicit, user-authorized deletions (e.g. files).
+
+        Same content-type validation as GET (the SPA HTML catch-all returns
+        200), and the same non-leaking error mapping from ``_validate_status``.
+        """
+        resp = await self._fetch_with_retry(token, path, method="DELETE")
+        status, content_type = self._validate_status(resp)
+        allowed = {"application/json"}
+        if content_type not in allowed:
+            raise ToolError(
+                f"Expected JSON from the internal API but got "
+                f"'{content_type or 'no content type'}' (HTTP {status}) — the route "
+                "may not exist or may have changed."
+            )
+        return status, content_type, resp.text
 
     # ──────────────────────────────────────────────
     #  Output formatting (DESIGN §8.6.5, §7.2)
@@ -582,6 +605,8 @@ class Tools:
             return self._render_chat(payload)
         if kind == "files":
             return self._render_files(payload)
+        if kind == "files_deleted":
+            return self._render_files_deleted(payload)
         if kind == "file_text":
             return self._render_file_text(payload)
         if kind == "file_binary":
@@ -737,6 +762,28 @@ class Tools:
         if p.get("filename"):
             head += f" (id: {p.get('file_id')})"
         return head + "\n\n" + p.get("note", "Binary content not returned inline.")
+
+    def _render_files_deleted(self, p: dict) -> str:
+        """Render the batch deletion summary: per-file rows + counts."""
+        deleted = p.get("deleted", [])
+        failed = p.get("failed", [])
+        lines = [
+            f"**Deleted {p.get('deleted_count', len(deleted))} of "
+            f"{p.get('requested', len(deleted) + len(failed))} files**",
+            "",
+        ]
+        rows = []
+        for d in deleted:
+            ident = d.get("filename") or d.get("file_id")
+            rows.append(["deleted", ident, d.get("content_type") or "", d.get("file_id")])
+        for f in failed:
+            rows.append(["failed", f.get("file_id"), f.get("error", ""), ""])
+        if rows:
+            lines.append(self._md_table(
+                ["Status", "File", "Type / error", "ID"],
+                rows,
+            ))
+        return "\n".join(lines)
 
     def _render_prompts(self, p: dict) -> str:
         items = p.get("prompts", [])
@@ -1410,6 +1457,95 @@ class Tools:
             raise  # never swallow cancellation
         except Exception:
             pass  # Event emission is best-effort
+
+    async def delete_files(self, file_ids: list, __request__: Any = None,
+                           __user__: dict = None) -> str:
+        """Delete several files permanently in one pass (storage + vector index).
+
+        Destructive and irreversible. Each file is reported with its name;
+        failures (missing / not yours / backend error) are reported per id
+        without aborting the rest. The backend only allows deleting your
+        own files (or files you have write access to).
+
+        :param file_ids: the UUIDs of the files to delete.
+        """
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._delete_files(file_ids, __request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+            request=__request__,
+        )
+
+    async def _delete_files(self, file_ids: Any, request: Any, __user__: Optional[dict] = None,
+                            output_format: Optional[str] = None) -> str:
+        token = self._require_token(request)
+
+        # Validate the WHOLE list up front: one invalid id rejects the call
+        # before any request is made, so nothing is deleted.
+        if not isinstance(file_ids, (list, tuple, set)) or not file_ids:
+            raise ToolError("Invalid file_ids: expected a non-empty list of file ids.")
+        ids = list(file_ids)
+        if len(ids) > MAX_DELETE_FILES:
+            raise ToolError(
+                f"Too many file ids: at most {MAX_DELETE_FILES} per call "
+                f"({len(ids)} given)."
+            )
+        cleaned = [self._require_id(v, "file_id") for v in ids]
+        # Drop duplicates so the same file is never deleted twice.
+        seen = set()
+        unique = []
+        for c in cleaned:
+            if c not in seen:
+                seen.add(c)
+                unique.append(c)
+
+        deleted, failed = [], []
+        for file_id in unique:
+            try:
+                deleted.append(await self._delete_one_file(token, file_id))
+            except ToolError as exc:
+                failed.append({"file_id": file_id, "error": str(exc)})
+            except Exception as exc:  # defensive — per-file isolation
+                failed.append({"file_id": file_id, "error": f"Unexpected error ({type(exc).__name__})"})
+
+        return self._ok({
+            "requested": len(unique),
+            "deleted_count": len(deleted),
+            "failed_count": len(failed),
+            "deleted": deleted,
+            "failed": failed,
+        }, "files_deleted", output_format=output_format)
+
+    async def _delete_one_file(self, token: str, file_id: str) -> dict:
+        """Delete a single file and return its report.
+
+        Fetch metadata first: (1) it gives the user a clear report of what is
+        about to disappear, and (2) a 404 here means the DELETE would fail
+        too — report it without touching anything.
+        """
+        _status, _ct, body = await self._api_get_json(token, _ROUTE_FILE.format(file_id=file_id))
+        meta = json.loads(body)
+        filename = meta.get("filename") if isinstance(meta, dict) else None
+        meta_info = meta.get("meta") if isinstance(meta, dict) else None
+        content_type = (meta_info or {}).get("content_type") if isinstance(meta_info, dict) else None
+        size = (meta_info or {}).get("size") if isinstance(meta_info, dict) else None
+
+        _status, _ct, resp_body = await self._api_delete_json(token, _ROUTE_FILE.format(file_id=file_id))
+        message = "File deleted successfully"
+        try:
+            resp = json.loads(resp_body)
+            if isinstance(resp, dict) and resp.get("message"):
+                message = resp["message"]
+        except Exception:
+            pass  # response body is informational only
+
+        return {
+            "file_id": file_id,
+            "filename": filename,
+            "content_type": content_type,
+            "size": size,
+            "message": message,
+        }
 
     async def get_my_prompts(self, __request__: Any = None, __user__: dict = None) -> str:
         """List the requesting user's custom prompts (command, name, content)."""
