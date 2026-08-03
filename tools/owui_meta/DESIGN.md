@@ -291,12 +291,14 @@ async def <method>(self, __user__: dict, __request__: Request, <typed parameters
 
 ### 8.5 Optional events (UX)
 
-Via `__event_emitter__`, statuses can be emitted during execution:
-- `status` "Querying your chats…" (start)
-- `status` "N chats found" (end)
-- `status` with error on failure
+Via `__event_emitter__`, statuses can be emitted during execution (implemented in Iteration 4):
+- `status` "Querying your chats…" (start, `done=False`)
+- `status` same action with `done=True` (completion — stops the shimmer)
+- `chat:message:error` on failure (the error block rendered in the message)
 
 This makes the tool's execution visible in the UI, just like `search_web` or the built-in tools.
+
+**Verbosity (2026-08-03):** progress `status` events are gated by a `verbose` valve (admin + per-user; per-user overrides admin; default `True`). **Errors are NOT gated**: `chat:message:error` is always emitted on failure, and **consolidated** — at most one error event per tool call. A batch `delete_files` with several failures emits a single "N of M file(s) could not be deleted" summary (the per-id detail stays in the returned text), so repeated failures never flood the user with toasts.
 
 **File attachments (2026-08-03):** `get_file_content` additionally emits the native `files` event (`{"type": "files", "data": {"files": [...]}}`) so the requested file is attached to the assistant message: inline preview for images, download chip for everything else, while the returned text stays clean (100-char snippet for text, metadata note for binaries — never a full dump). The backend persists the event into the message's `files` field automatically and re-broadcasts it live; no token is put in any URL (the frontend builds download URLs with the session cookie). Emission is best-effort: a dead UI socket never breaks the tool call. The item schema (image vs file url forms) mirrors the frontend renderers — see `test/test_file_attachment.py`.
 

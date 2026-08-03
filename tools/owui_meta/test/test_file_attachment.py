@@ -37,6 +37,10 @@ class FakeEmitter:
     async def __call__(self, event):
         self.events.append(event)
 
+    def files_event(self):
+        """Return the ``files`` event, ignoring status/progress events."""
+        return next(e for e in self.events if e.get("type") == "files")
+
 
 def api_with_metadata(filename):
     """Handler serving file metadata (individual route) + content."""
@@ -55,8 +59,8 @@ async def test_text_file_emits_file_attachment():
                        base_url="http://open-webui.private", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
-    assert len(emitter.events) == 1
-    event = emitter.events[0]
+    assert len(emitter.events) >= 1
+    event = emitter.files_event()
     assert event["type"] == "files"
     files = event["data"]["files"]
     assert len(files) == 1
@@ -84,7 +88,7 @@ async def test_image_file_emits_image_attachment_with_preview_url():
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
-    item = emitter.events[0]["data"]["files"][0]
+    item = emitter.files_event()["data"]["files"][0]
     assert item["type"] == "image"
     assert item["url"] == f"/api/v1/files/{FILE_ID}/content"
     assert item["name"] == "pic.png"
@@ -105,7 +109,7 @@ async def test_generic_binary_emits_file_attachment():
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
-    item = emitter.events[0]["data"]["files"][0]
+    item = emitter.files_event()["data"]["files"][0]
     assert item["type"] == "file"
     assert item["url"] == FILE_ID
     assert item["name"] == "spec.pdf"
@@ -146,7 +150,7 @@ async def test_attachment_name_falls_back_to_file_id():
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
     await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
-    item = emitter.events[0]["data"]["files"][0]
+    item = emitter.files_event()["data"]["files"][0]
     assert item["name"] == FILE_ID
 
 

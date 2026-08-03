@@ -116,16 +116,17 @@ Implements DESIGN §8.6 across the list methods:
 
 **Definition of done:** a 100+ item dataset is queryable with filtering and sorting in bounded output — proven by tests (73 total green).
 
-## Iteration 4 — Status events (UX)
+## Iteration 4 — Status events (UX) ✅ DONE (commit pending)
 
 **Commit:** `feat(owui_meta): emit status events during execution`
 
-- `__event_emitter__` statuses on start ("Querying your chats…"), completion ("N chats found") and failure — DESIGN §8.5, matching the `smart_fetch_url` UX pattern.
-- `verbose` valve to toggle events.
+- `__event_emitter__` statuses on start ("Reading your profile…", "Querying your chats…", "Listing your files…"…), completion (same action, `done=True`) and failure — DESIGN §8.5, matching the `smart_fetch_url` UX pattern.
+- `verbose` valve (admin + per-user, default `True`; per-user overrides admin) to toggle progress events.
+- **Errors are `chat:message:error`** (the error block rendered in the message), **always shown regardless of `verbose`**, and **consolidated**: at most one error event per tool call — a batch `delete_files` with several failures emits a single "N of M file(s) could not be deleted" summary, never one toast per file.
 - Events never contain the token.
-- **Tests** (`test/test_events.py`): recording fake emitter asserts event sequence and absence of token data.
+- **Tests** (`test/test_events.py`, 8): start+done sequence, no-emitter no-op, `verbose=False` suppresses status (but not errors), per-user `verbose` override, failure emits single error, batch failures emit single consolidated error, no token in any event.
 
-**Definition of done:** tool execution is visible in the UI; event payloads are token-free (tested).
+**Definition of done:** tool execution is visible in the UI; error events are consolidated (never flooding); event payloads are token-free (tested).
 
 ## Iteration 5 — Live validation & isolation tests
 
@@ -197,6 +198,7 @@ These changes were not in the initial plan; they emerged during development / li
 | 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite in Iteration 5 is still pending; these were one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
 | 14 | Design decision (user) | **`get_file_content` attaches files to the UI via the native `files` event** — image → inline preview + download, text → 100-char snippet (no dump), binary → note. Best-effort metadata call to `GET /api/v1/files/{id}` (added to the allowlist) for the attachment display name; best-effort `_emit_files` so a dead UI socket never breaks the tool call. Read opt-in (`max_chars`/`offset`) deferred — see §7. | Verified against Open WebUI source: the `files` event is persisted by `socket/main.py` and rendered by `ResponseMessage.svelte`/`FileItem.svelte`/`Image.svelte`; the item schema is pinned by `test/test_file_attachment.py`. See §7 design note. | (this commit) |
 | 15 | Design decision (user) | **File cleanup: `delete_files(file_ids)`** — the first write operation, an explicit exception to read-only v1. Accepts a list of ids (whole list validated up front; dedup; capped by `MAX_DELETE_FILES`); per file: GET metadata first (report what disappears; a 404 never reaches the DELETE), then `DELETE /api/v1/files/{id}` (backend re-verifies owner/admin/write, cleans KB + vector index). Per-file failures are reported by id without aborting the rest. A dedicated orphan-list method was considered then dropped by user decision (the model derives orphans from `get_my_files()` `origin_chat_id` + `get_my_chats()`). HTTP engine generalized (`_fetch`/`_fetch_with_retry` take a method; new `_api_delete_json`). | Open WebUI keeps chat-attached files when a chat is deleted (verified in v0.10.2 `chats.py`: `delete_chat_by_id` never touches `Files`) — the orphan-cleanup case. See §7 design note. | (this commit) |
+| 16 | Design decision (user) | **Iteration 4 status events + error consolidation** — `status` events (start/done) gated by a `verbose` valve (admin + per-user, per-user overrides); errors are `chat:message:error`, always shown, and consolidated to ONE per tool call (batch delete failures → single "N of M failed" summary). Logs explicitly parked by user decision (2026-08-03). | smart_fetch_url UX pattern (DESIGN §8.5); the user asked to reserve error visibility for real errors and never flood the user with repeated toasts. See §7 design note. | (this commit) |
 
 **Unchanged commitments:** scope confined to `tools/owui_meta/`; one commit per iteration; Conventional Commits; all docs/code in English; no credentials ever configured or stored.
 
@@ -250,6 +252,14 @@ Reviewed against Open WebUI source (`main` and the instance's v0.10.2) — not j
 **Future (not in scope now):** admin sweep of all users, deletion of files orphaned by deleted *messages* inside live chats.
 
 ---
+
+### Design note (2026-08-03): status events (Iteration 4) + error consolidation
+
+**Scope (user decision):** progress info goes only through `__event_emitter__` — no application logs added (explicitly parked).
+
+- **Progress = `status` events** (start `done=False`, completion `done=True` with the same action label — "Reading your profile…", "Querying your chats…", "Listing your files…"…), the `smart_fetch_url` UX pattern (DESIGN §8.5). Gated by a new `verbose` valve (admin + per-user; per-user overrides admin; default `True`) so quiet users can turn them off. Wired through `_run(emitter=…, action=…, verbose=…)` — every public wrapper passes `__event_emitter__`.
+- **Errors = `chat:message:error`** (the message error block, verified in the frontend `Chat.svelte`/`Error.svelte`), **never gated by `verbose`**, and **consolidated to at most one per tool call**: `_run` emits a single error on failure; a batch `delete_files` with per-file failures emits one "N of M file(s) could not be deleted" summary instead of one toast per file — the per-id detail stays in the returned text. This directly addresses the user's requirement: error visibility is reserved for real errors, and repeated failures never flood the user with toasts.
+- **Events never contain the token** (pinned by `test/test_events.py`: start+done, no-emitter no-op, `verbose=False` suppresses status but NOT errors, per-user override, single error on failure, single consolidated error on batch failures, no token in any event).
 
 ## 8. Out of scope (per DESIGN §2)
 

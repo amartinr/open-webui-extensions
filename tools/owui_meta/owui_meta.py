@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.8.0
+version: 0.9.0
 licence: MIT
 """
 
@@ -144,6 +144,14 @@ class Tools:
                 "objects)."
             ),
         )
+        verbose: bool = Field(
+            True,
+            description=(
+                "Emit progress status events in the UI while the tool runs "
+                "(e.g. \"Querying your chats…\"). Errors are always shown, "
+                "regardless of this setting."
+            ),
+        )
 
     class UserValves(BaseModel):
         """Per-user overrides, configurable from the chat session.
@@ -168,6 +176,12 @@ class Tools:
                     ],
                 }
             },
+        )
+        verbose: bool = Field(
+            True,
+            description=(
+                "Show progress status events for this user while the tool runs."
+            ),
         )
 
     def __init__(self):
@@ -195,6 +209,14 @@ class Tools:
         if uv is not None and uv.output_format:
             return uv.output_format
         return self.valves.output_format
+
+    def _resolve_verbose(self, __user__: Optional[Any]) -> bool:
+        """Effective status-event verbosity: user's choice (if provided) else
+        the admin valve. Errors are shown regardless (see ``_run``)."""
+        uv = self._get_user_valves(__user__)
+        if uv is not None and uv.verbose is not None:
+            return bool(uv.verbose)
+        return bool(self.valves.verbose)
 
     # ──────────────────────────────────────────────
     #  Base URL resolution (DESIGN §4.2)
@@ -854,29 +876,50 @@ class Tools:
         return "\n".join(lines)
 
     async def _run(self, coro: Any, output_format: Optional[str] = None,
-                   request: Any = None) -> str:
+                   request: Any = None, emitter: Any = None,
+                   action: Optional[str] = None,
+                   verbose: Optional[bool] = None) -> str:
         """Execute a private implementation, converting failures to safe output.
 
         ``request`` is used to redact the request token from any output
         (defense in depth — the token must never reach the model even if it
         accidentally appears in a field or an error message).
+
+        When ``emitter`` is provided, ``action`` (a short progress label such
+        as "Querying your chats…") drives the UI status events: a ``status``
+        ``done=False`` at start and ``done=True`` at completion, both gated by
+        ``verbose`` (the user's choice, else the admin valve). On failure a
+        single ``chat:message:error`` is emitted — ALWAYS visible, never gated
+        by verbose, and at most one per call (callers consolidate batch
+        failures into one summary instead of flooding the user).
         """
         secret = self._extract_token_quiet(request)
+        show_status = emitter is not None and action is not None
+        if verbose is None:
+            verbose = self.valves.verbose
+        if show_status and verbose:
+            await self._emit_status(emitter, action, done=False)
         try:
             result = await coro
         except ToolError as exc:
+            if emitter is not None:
+                await self._emit_error(emitter, str(exc))
             return self._redact(self._error(str(exc), output_format), secret)
         except Exception as exc:  # pragma: no cover - defensive
             # The token is never part of an exception message (it travels in a
             # header only), so logging the traceback cannot leak it.
             logger.exception("owui_meta: unexpected error")
+            message = (
+                f"Unexpected internal error ({type(exc).__name__}); see server logs."
+            )
+            if emitter is not None:
+                await self._emit_error(emitter, message)
             return self._redact(
-                self._error(
-                    f"Unexpected internal error ({type(exc).__name__}); see server logs.",
-                    output_format,
-                ),
+                self._error(message, output_format),
                 secret,
             )
+        if show_status and verbose:
+            await self._emit_status(emitter, action, done=True)
         return self._redact(result, secret)
 
     # ──────────────────────────────────────────────
@@ -1078,7 +1121,8 @@ class Tools:
     #  Tool methods — user role (DESIGN §6.1)
     # ──────────────────────────────────────────────
 
-    async def get_my_profile(self, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_my_profile(self, __request__: Any = None, __user__: dict = None,
+                             __event_emitter__: Any = None) -> str:
         """Get the requesting user's own profile: id, name, email, role and permissions.
 
         Use this to learn who you are talking to and what they are allowed to do.
@@ -1088,6 +1132,9 @@ class Tools:
             self._get_my_profile(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Reading your profile…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_my_profile(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1110,7 +1157,8 @@ class Tools:
         }
         return self._ok(profile, "profile", output_format=output_format)
 
-    async def get_models(self, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_models(self, __request__: Any = None, __user__: dict = None,
+                         __event_emitter__: Any = None) -> str:
         """List the models available to the requesting user (id, name, owner).
 
         Only lightweight metadata is returned, not the full model definitions.
@@ -1120,6 +1168,9 @@ class Tools:
             self._get_models(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Reading available models…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_models(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1137,6 +1188,7 @@ class Tools:
         sort_order: str = "desc",
         __request__: Any = None,
         __user__: dict = None,
+        __event_emitter__: Any = None,
     ) -> str:
         """List the requesting user's recent chats (id, title, dates).
 
@@ -1152,6 +1204,9 @@ class Tools:
             ),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Querying your chats…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_my_chats(self, limit: Any, request: Any, sort_by: Any = "updated_at",
@@ -1166,7 +1221,8 @@ class Tools:
         chats = self._summarize_chats(sorted_items[:limit])
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_chat(self, chat_id: str, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_chat(self, chat_id: str, __request__: Any = None, __user__: dict = None,
+                       __event_emitter__: Any = None) -> str:
         """Get the full content of one chat (all its messages) by id.
 
         :param chat_id: the chat's UUID.
@@ -1176,6 +1232,9 @@ class Tools:
             self._get_chat(chat_id, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Reading chat…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_chat(self, chat_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1199,7 +1258,8 @@ class Tools:
         }
         return self._ok(chat, "chat", output_format=output_format)
 
-    async def search_chats(self, text: str, __request__: Any = None, __user__: dict = None) -> str:
+    async def search_chats(self, text: str, __request__: Any = None, __user__: dict = None,
+                           __event_emitter__: Any = None) -> str:
         """Search the requesting user's chats for a text fragment.
 
         :param text: the search term (matched against chat titles and messages).
@@ -1209,6 +1269,9 @@ class Tools:
             self._search_chats(text, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Searching your chats…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _search_chats(self, text: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1223,7 +1286,8 @@ class Tools:
         chats = self._summarize_chats(items)
         return self._ok({"query": text, "count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_shared_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_shared_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None,
+                               __event_emitter__: Any = None) -> str:
         """List chats the requesting user has shared with others.
 
         :param limit: how many chats to return (default 10, max 100).
@@ -1233,6 +1297,9 @@ class Tools:
             self._get_shared_chats(limit, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Reading shared chats…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_shared_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1245,7 +1312,8 @@ class Tools:
         chats = self._summarize_chats(items)
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_pinned_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_pinned_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None,
+                               __event_emitter__: Any = None) -> str:
         """List chats the requesting user has pinned.
 
         :param limit: how many chats to return (default 10, max 100).
@@ -1255,6 +1323,9 @@ class Tools:
             self._get_pinned_chats(limit, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Reading pinned chats…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_pinned_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1278,6 +1349,7 @@ class Tools:
         filename: str = None,
         __request__: Any = None,
         __user__: dict = None,
+        __event_emitter__: Any = None,
     ) -> str:
         """List the requesting user's files with optional sorting and filtering.
 
@@ -1303,6 +1375,9 @@ class Tools:
             ),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Listing your files…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_my_files(self, request: Any, limit: Any = 50, sort_by: Any = "created_at",
@@ -1344,6 +1419,9 @@ class Tools:
                                    __event_emitter__=__event_emitter__),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Reading file…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_file_content(self, file_id: Any, request: Any, __user__: Optional[dict] = None,
@@ -1458,8 +1536,57 @@ class Tools:
         except Exception:
             pass  # Event emission is best-effort
 
+    async def _emit_status(self, emitter: Optional[Any], description: str,
+                           done: bool = False) -> None:
+        """Emit a real-time progress ``status`` event (the UI shimmer).
+
+        Mirrors the smart_fetch_url UX pattern (DESIGN §8.5): ``done=False``
+        starts the progress indicator, a final ``done=True`` stops it. Gated
+        by the ``verbose`` valve in ``_run`` — the caller decides. Best-effort:
+        a failed UI event never breaks the tool call.
+        """
+        if emitter is None:
+            return
+        try:
+            await emitter({
+                "type": "status",
+                "data": {
+                    "description": description,
+                    "done": done,
+                    "hidden": False,
+                },
+            })
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
+        except Exception:
+            pass  # Event emission is best-effort
+
+    async def _emit_error(self, emitter: Optional[Any], message: str) -> None:
+        """Emit a single visible error event for the message.
+
+        Uses ``chat:message:error`` (the error block the frontend renders in
+        the assistant message — Error.svelte) rather than a status event, so
+        failures stand out from progress. Errors are NOT gated by ``verbose``
+        (they must always be visible), but callers consolidate: at most ONE
+        error event per tool call — e.g. delete_files reports a batch failure
+        as a single "N of M files failed" instead of one event per file, so
+        the user is never flooded.
+        """
+        if emitter is None:
+            return
+        try:
+            await emitter({
+                "type": "chat:message:error",
+                "data": {"error": {"content": message}},
+            })
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
+        except Exception:
+            pass  # Event emission is best-effort
+
     async def delete_files(self, file_ids: list, __request__: Any = None,
-                           __user__: dict = None) -> str:
+                           __user__: dict = None,
+                           __event_emitter__: Any = None) -> str:
         """Delete several files permanently in one pass (storage + vector index).
 
         Destructive and irreversible. Each file is reported with its name;
@@ -1471,13 +1598,19 @@ class Tools:
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._delete_files(file_ids, __request__, __user__=__user__, output_format=output_format),
+            self._delete_files(file_ids, __request__, __user__=__user__,
+                               output_format=output_format,
+                               __event_emitter__=__event_emitter__),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Deleting files…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _delete_files(self, file_ids: Any, request: Any, __user__: Optional[dict] = None,
-                            output_format: Optional[str] = None) -> str:
+                            output_format: Optional[str] = None,
+                            __event_emitter__: Optional[Any] = None) -> str:
         token = self._require_token(request)
 
         # Validate the WHOLE list up front: one invalid id rejects the call
@@ -1507,6 +1640,15 @@ class Tools:
                 failed.append({"file_id": file_id, "error": str(exc)})
             except Exception as exc:  # defensive — per-file isolation
                 failed.append({"file_id": file_id, "error": f"Unexpected error ({type(exc).__name__})"})
+
+        # A batch with failures emits ONE consolidated error event (the
+        # per-id detail stays in the returned text), so a multi-file cleanup
+        # never floods the user with one error per failed file.
+        if failed and __event_emitter__ is not None:
+            await self._emit_error(
+                __event_emitter__,
+                f"{len(failed)} of {len(unique)} file(s) could not be deleted.",
+            )
 
         return self._ok({
             "requested": len(unique),
@@ -1547,13 +1689,17 @@ class Tools:
             "message": message,
         }
 
-    async def get_my_prompts(self, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_my_prompts(self, __request__: Any = None, __user__: dict = None,
+                             __event_emitter__: Any = None) -> str:
         """List the requesting user's custom prompts (command, name, content)."""
         output_format = self._resolve_output_format(__user__)
         return await self._run(
             self._get_my_prompts(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Listing your prompts…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_my_prompts(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1567,13 +1713,17 @@ class Tools:
         ]
         return self._ok({"count": len(prompts), "prompts": prompts}, "prompts", output_format=output_format)
 
-    async def get_my_tools(self, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_my_tools(self, __request__: Any = None, __user__: dict = None,
+                           __event_emitter__: Any = None) -> str:
         """List the tools available to the requesting user (id, name, description)."""
         output_format = self._resolve_output_format(__user__)
         return await self._run(
             self._get_my_tools(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Listing your tools…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_my_tools(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1592,13 +1742,17 @@ class Tools:
             })
         return self._ok({"count": len(tools), "tools": tools}, "tools", output_format=output_format)
 
-    async def get_knowledge_bases(self, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_knowledge_bases(self, __request__: Any = None, __user__: dict = None,
+                                  __event_emitter__: Any = None) -> str:
         """List the knowledge bases available to the requesting user (id, name, description)."""
         output_format = self._resolve_output_format(__user__)
         return await self._run(
             self._get_knowledge_bases(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Listing knowledge bases…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_knowledge_bases(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1612,7 +1766,8 @@ class Tools:
         ]
         return self._ok({"count": len(knowledge), "total": total, "knowledge": knowledge}, "knowledge", output_format=output_format)
 
-    async def get_my_skills(self, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_my_skills(self, __request__: Any = None, __user__: dict = None,
+                            __event_emitter__: Any = None) -> str:
         """List the skills available to the requesting user (id, name, description, active state).
 
         Skills are workspace resources like tools and prompts: the list includes
@@ -1625,6 +1780,9 @@ class Tools:
             self._get_my_skills(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Listing your skills…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_my_skills(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
@@ -1634,7 +1792,8 @@ class Tools:
         skills = self._summarize_skills(items)
         return self._ok({"count": len(skills), "skills": skills}, "skills", output_format=output_format)
 
-    async def get_skill(self, skill_id: str, __request__: Any = None, __user__: dict = None) -> str:
+    async def get_skill(self, skill_id: str, __request__: Any = None, __user__: dict = None,
+                        __event_emitter__: Any = None) -> str:
         """Get one skill's full detail by id, including its content (the skill's instructions).
 
         :param skill_id: the skill's id (letters, digits, '-' and '_').
@@ -1644,6 +1803,9 @@ class Tools:
             self._get_skill(skill_id, __request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
+            emitter=__event_emitter__,
+            action="Reading skill…",
+            verbose=self._resolve_verbose(__user__),
         )
 
     async def _get_skill(self, skill_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
