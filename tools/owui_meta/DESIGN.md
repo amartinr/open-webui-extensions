@@ -295,6 +295,8 @@ Via `__event_emitter__`, statuses can be emitted during execution:
 
 This makes the tool's execution visible in the UI, just like `search_web` or the built-in tools.
 
+**File attachments (2026-08-03):** `get_file_content` additionally emits the native `files` event (`{"type": "files", "data": {"files": [...]}}`) so the requested file is attached to the assistant message: inline preview for images, download chip for everything else, while the returned text stays clean (100-char snippet for text, metadata note for binaries — never a full dump). The backend persists the event into the message's `files` field automatically and re-broadcasts it live; no token is put in any URL (the frontend builds download URLs with the session cookie). Emission is best-effort: a dead UI socket never breaks the tool call. The item schema (image vs file url forms) mirrors the frontend renderers — see `test/test_file_attachment.py`.
+
 ### 8.6 Pagination, sorting and filtering (cross-cutting requirement)
 
 **Verified in the POC** (`/api/v1/files/`): the API **paginates responses** with an observed maximum of **50 items per page**, exposes the total (`{"items":[…], "total": N}`) and accepts `page` / `pageSize`. On the real instance: 104 files → 3 pages.

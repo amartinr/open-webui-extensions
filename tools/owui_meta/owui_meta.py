@@ -6,10 +6,11 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge). Authenticates automatically with the requesting user's token — no credentials to configure. Read-only, allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.6.3
+version: 0.7.0
 licence: MIT
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -34,6 +35,12 @@ except Exception:  # pragma: no cover - environment-dependent
 DEFAULT_FALLBACK_BASE_URL = "http://localhost:8080"
 DEFAULT_TIMEOUT = 15
 DEFAULT_MAX_RESPONSE_CHARS = 8000
+
+# Length of the text snippet returned to the model by get_file_content.
+# The full file is attached to the conversation via the ``files`` event, so
+# the snippet is only for the model to recognize what the file is about —
+# never a full dump (DESIGN §8.6.5, PLAN.md §7 2026-08-03).
+FILE_SNIPPET_CHARS = 100
 
 # Transparent page iteration: the API caps at 50 items/page and exposes
 # ``total`` (DESIGN §8.6). ``MAX_PAGES`` bounds how many pages the tool will
@@ -60,6 +67,7 @@ _ROUTE_CHATS_SEARCH = "/api/v1/chats/search"
 _ROUTE_CHATS_SHARED = "/api/v1/chats/shared"
 _ROUTE_CHATS_PINNED = "/api/v1/chats/pinned"
 _ROUTE_FILES = "/api/v1/files/"
+_ROUTE_FILE = "/api/v1/files/{file_id}"
 _ROUTE_FILE_CONTENT = "/api/v1/files/{file_id}/content"
 _ROUTE_PROMPTS = "/api/v1/prompts/"
 _ROUTE_TOOLS = "/api/v1/tools/"
@@ -706,16 +714,29 @@ class Tools:
     def _render_file_text(self, p: dict) -> str:
         ct = p.get("content_type", "text")
         lang = self._lang_hint(ct)
-        return (
-            f"**File: {p.get('file_id')}** ({ct}, {p.get('size')} bytes)\n\n"
-            f"```{lang}\n{p.get('content', '')}\n```"
-        )
+        ident = p.get("filename") or p.get("file_id")
+        head = f"**File: {ident}** ({ct}, {p.get('size')} bytes)"
+        if p.get("filename"):
+            head += f" (id: {p.get('file_id')})"
+        lines = [head, "", f"```{lang}\n{p.get('content', '')}\n```"]
+        if p.get("truncated"):
+            total = p.get("total_chars")
+            note = p.get("note")
+            if total and note:
+                note = f"{note} ({total} chars total)"
+            elif total:
+                note = f"File truncated to the first {FILE_SNIPPET_CHARS} characters ({total} chars total)."
+            else:
+                note = f"File truncated to the first {FILE_SNIPPET_CHARS} characters."
+            lines += ["", note]
+        return "\n".join(lines)
 
     def _render_file_binary(self, p: dict) -> str:
-        return (
-            f"**File: {p.get('file_id')}** ({p.get('content_type')}, {p.get('size')} bytes)\n\n"
-            f"{p.get('note', 'Binary content not returned inline.')}"
-        )
+        ident = p.get("filename") or p.get("file_id")
+        head = f"**File: {ident}** ({p.get('content_type')}, {p.get('size')} bytes)"
+        if p.get("filename"):
+            head += f" (id: {p.get('file_id')})"
+        return head + "\n\n" + p.get("note", "Binary content not returned inline.")
 
     def _render_prompts(self, p: dict) -> str:
         items = p.get("prompts", [])
@@ -1257,42 +1278,138 @@ class Tools:
             "files": files,
         }, "files", output_format=output_format)
 
-    async def get_file_content(self, file_id: str, __request__: Any = None, __user__: dict = None) -> str:
-        """Read a file's content by id.
+    async def get_file_content(self, file_id: str, __request__: Any = None,
+                               __user__: dict = None,
+                               __event_emitter__: Any = None) -> str:
+        """Read a file by id and attach it to the conversation.
 
-        Text files return their content (truncated to max_response_chars).
-        Binary files (images, PDFs, ...) return metadata only, with a note.
+        Text files return a 100-character snippet; images and other binary
+        files return metadata only. In both cases the file is attached to
+        the assistant message via the ``files`` event so the user can
+        preview and download it from the UI.
 
         :param file_id: the file's UUID.
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_file_content(file_id, __request__, __user__=__user__, output_format=output_format),
+            self._get_file_content(file_id, __request__, __user__=__user__,
+                                   output_format=output_format,
+                                   __event_emitter__=__event_emitter__),
             output_format=output_format,
             request=__request__,
         )
 
-    async def _get_file_content(self, file_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+    async def _get_file_content(self, file_id: Any, request: Any, __user__: Optional[dict] = None,
+                                output_format: Optional[str] = None,
+                                __event_emitter__: Optional[Any] = None) -> str:
         token = self._require_token(request)
         file_id = self._require_id(file_id, "file_id")
+
+        # Best-effort metadata fetch for the attachment's display name. The
+        # body is never serialized raw — only ``filename`` is extracted (the
+        # static no-raw-body tripwire pins this). A failure here (route
+        # changed, file missing, unexpected content type) must not block the
+        # content fetch below, so it is swallowed and the id doubles as name.
+        filename = None
+        try:
+            _status, _ct, body = await self._api_get_json(token, _ROUTE_FILE.format(file_id=file_id))
+            meta = json.loads(body)
+            if isinstance(meta, dict):
+                filename = meta.get("filename")
+        except Exception:
+            filename = None
+
         path = _ROUTE_FILE_CONTENT.format(file_id=file_id)
         _status, content_type, body = await self._api_get_raw(token, path)
         ct = content_type.split(";")[0].strip().lower()
+        size = len(body)
+
+        # Attach the file to the assistant message (UI preview + download).
+        # The event is emitted BEFORE the response so the attachment shows up
+        # as the model starts replying.
+        await self._emit_files(
+            __event_emitter__, [self._file_attachment(file_id, ct, size, filename)]
+        )
+
         if ct.startswith("text/") or ct in _TEXT_CONTENT_TYPES or ct.endswith(("+json", "+xml")):
             text = body.decode("utf-8", errors="replace")
+            snippet = text[:FILE_SNIPPET_CHARS]
+            truncated = len(text) > FILE_SNIPPET_CHARS
             return self._ok({
                 "file_id": file_id,
+                "filename": filename,
                 "content_type": ct,
-                "size": len(body),
-                "content": text,
+                "size": size,
+                "content": snippet,
+                "truncated": truncated,
+                "total_chars": len(text),
+                "note": f"Showing the first {FILE_SNIPPET_CHARS} characters; "
+                        "the full file is attached to the conversation.",
             }, "file_text", output_format=output_format)
+
         return self._ok({
             "file_id": file_id,
+            "filename": filename,
             "content_type": ct,
-            "size": len(body),
-            "note": f"Binary content ({ct}) is not returned inline. Use get_my_files() "
-                    "for metadata (size, dates, origin).",
+            "size": size,
+            "note": f"Binary content ({ct}) is not returned inline; the file is "
+                    "attached to the conversation (preview and download available).",
         }, "file_binary", output_format=output_format)
+
+    def _file_attachment(self, file_id: str, content_type: str, size: int,
+                         filename: Optional[str]) -> dict:
+        """Build the ``files`` event item for a downloaded file.
+
+        Mirrors what the Open WebUI frontend renders (verified against main's
+        ResponseMessage.svelte / FileItem.svelte / FileItemModal.svelte):
+
+        - images -> ``type: "image"`` + a '/'-prefixed path URL: Image.svelte
+          prefixes ``WEBUI_BASE_URL`` for paths starting with '/' and renders
+          an inline preview (mirrors generate_image).
+        - everything else -> ``type: "file"`` + the bare file id as ``url``:
+          FileItem.svelte opens ``/files/{url}/content`` (session cookie),
+          and FileItemModal reads ``meta.content_type`` for the preview.
+
+        A bare id as ``url`` with ``type: "file"`` would break inline image
+        preview (ResponseMessage renders images from ``file.url`` directly),
+        hence the special-casing above.
+        """
+        name = filename or file_id
+        if content_type.startswith("image/"):
+            return {
+                "type": "image",
+                "url": f"/api/v1/files/{file_id}/content",
+                "name": name,
+                "size": size,
+                "content_type": content_type,
+            }
+        return {
+            "type": "file",
+            "url": file_id,
+            "name": name,
+            "size": size,
+            "content_type": content_type,
+            "meta": {"content_type": content_type},
+        }
+
+    async def _emit_files(self, emitter: Optional[Any], files: list) -> None:
+        """Emit a ``files`` event attaching files to the assistant message.
+
+        Native Open WebUI event (verified in backend/open_webui/socket/main.py):
+        the backend re-broadcasts it to the UI in real time AND persists the
+        items into the assistant message's ``files`` field — no extra
+        persistence code needed. Best-effort: a failed UI event must never
+        break the tool call (the returned text still carries the snippet /
+        metadata).
+        """
+        if emitter is None or not files:
+            return
+        try:
+            await emitter({"type": "files", "data": {"files": files}})
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
+        except Exception:
+            pass  # Event emission is best-effort
 
     async def get_my_prompts(self, __request__: Any = None, __user__: dict = None) -> str:
         """List the requesting user's custom prompts (command, name, content)."""

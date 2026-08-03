@@ -195,6 +195,7 @@ These changes were not in the initial plan; they emerged during development / li
 | 12 | Security audit (user request) | **Whitelisted the last raw pass-throughs + documented secret-bearing GETs as never-allowed** | Audited every allowlisted endpoint against v0.10.2 source: no other token echoes. `get_chat` (json) dumped bookkeeping noise (`user_id`, `meta`, `tasks`, `summary`, `folder_id`) and `get_skill` (json) embedded the owner's `UserResponse` (another user's email for shared skills) — both now whitelisted. Also pinned in DESIGN §6.3: `auths/api_key`, `tools/id/{id}/valves(+/user)`, `tools/id/{id}`, `knowledge/external/connections*`, `*/admin/*` configs are **never** to be added to the allowlist (they return credentials). Tests: `test_get_skill_strips_owner_and_bookkeeping`, `test_get_chat_strips_bookkeeping_fields`. | `1ce2da9` |
 | 13 | Hardening (user question: “¿implementado?”) | **Output-boundary guards against accidental leaks** | Whitelists are per-method/manual; a future method or server field could leak. Added two structural guards: `_sanitize` (drops credential-named keys with string values; boolean flags like `api_keys` kept) applied in `_ok` for both formats, and `_run` redacting the raw token string from success and error output (`request=__request__` threaded through all 14 wrappers). Plus `test/test_security.py`: sanitizer unit, future-raw-pass-through simulation, token redaction inside a whitelisted field, redaction in the error path, static no-raw-body tripwire. | (this commit) |
 | 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite in Iteration 5 is still pending; these were one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
+| 14 | Design decision (user) | **`get_file_content` attaches files to the UI via the native `files` event** — image → inline preview + download, text → 100-char snippet (no dump), binary → note. Best-effort metadata call to `GET /api/v1/files/{id}` (added to the allowlist) for the attachment display name; best-effort `_emit_files` so a dead UI socket never breaks the tool call. Read opt-in (`max_chars`/`offset`) deferred — see §7. | Verified against Open WebUI source: the `files` event is persisted by `socket/main.py` and rendered by `ResponseMessage.svelte`/`FileItem.svelte`/`Image.svelte`; the item schema is pinned by `test/test_file_attachment.py`. See §7 design note. | (this commit) |
 
 **Unchanged commitments:** scope confined to `tools/owui_meta/`; one commit per iteration; Conventional Commits; all docs/code in English; no credentials ever configured or stored.
 
@@ -206,6 +207,29 @@ Work intentionally postponed to a future version of the tool (not part of the cu
 
 - **Admin-only methods** (former Iteration 2, DESIGN §6.2): `list_users`, `get_user`, `list_all_chats`, `get_admin_config` — with the runtime role gate (`__user__.role == 'admin'` before any HTTP call). Deferred by user decision (2026-08-01).
 - Anything else not explicitly in the current iterations (per DESIGN §2 / out-of-scope list below).
+
+---
+
+### Design note (2026-08-03): file attachments in the UI + `get_file_content` read opt-in
+
+Reviewed against Open WebUI source (`main` and the instance's v0.10.2) — not just intuition:
+
+**Implemented (2026-08-03):** `get_file_content` attaches the requested file to the assistant message via the native `files` event, while the returned text stays clean:
+
+- **Image** → inline preview + download; no content in context.
+- **Text** → attachment + 100-char snippet; no full dump.
+- **Generic binary** → attachment + note; no content in context.
+- **Mechanism** → `{"type": "files", "data": {"files": [...]}}` via `__event_emitter__` (native event, verified in `backend/open_webui/socket/main.py`): the backend re-broadcasts it live AND persists it into the assistant message's `files` field automatically (`touch=False`) — no extra persistence code needed.
+- **Security** → no token in the URL (the frontend builds the download URL itself: `FileItem.svelte` opens `/files/{id}/content` with the session cookie; `Image.svelte` prefixes `WEBUI_BASE_URL` for paths starting with `/`); `_sanitize`/`_redact` unchanged; no bytes in the context.
+- **Filename** → one extra best-effort call to `GET /api/v1/files/{id}` (added to the allowlist) for the display name; on failure the file id doubles as name and the content fetch is never blocked.
+
+**Event item schema pitfall (verified in the frontend, pinned by `test/test_file_attachment.py`):** `ResponseMessage.svelte` renders `file.url`/`name`/`type`/`size`/`content_type` and `FileItemModal.svelte` reads `item.meta.content_type`. For images use `type: "image"` + `url: /api/v1/files/{id}/content` (path with `/`, mirroring `generate_image`); for everything else use `type: "file"` + `url: <id>` + `meta: {content_type}`. A bare id as `url` with `type: "file"` works for download but breaks inline image preview.
+
+**Declared side effect:** the `files` event writes to the assistant message in chat history. This is a benign message-level mutation for a tool advertised as read-only — DESIGN/README wording acknowledges it.
+
+**Read opt-in (deferred by user decision, 2026-08-03):** the 100-char snippet alone would degrade `get_file_content` for user-library files that nothing else covers in v0.10.2 (no `view_file` for chat files until `main`; no RAG for them). Follow the `view_file` pattern (verified in `main` and v0.10.2 `backend/open_webui/tools/builtin.py`): `max_chars` (default 100) + optional `offset` for paged reading, so the model can read more on demand while the default stays clean. The model decides with the snippet whether it needs more.
+
+**Interaction with `file_context` (verified in `middleware.py`):** the capability only gates chat-attached files (`metadata.files` → `chat_completion_files_handler`): with it ON, attached files are injected into context (full or RAG chunks) — full-context files make a `get_file_content` dump redundant; with it OFF, nothing is injected and `main` injects `list_chat_files`/`query_chat_files`/`grep_chat_files`/`view_file` instead. KB/model-attached knowledge is NOT gated by `file_context`. `owui_meta` remains complementary in both modes (user-library files are never covered by either path).
 
 ---
 
