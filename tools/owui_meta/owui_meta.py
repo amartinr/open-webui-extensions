@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.9.0
+version: 0.10.0
 licence: MIT
 """
 
@@ -1448,10 +1448,30 @@ class Tools:
         _status, content_type, body = await self._api_get_raw(token, path)
         ct = content_type.split(";")[0].strip().lower()
         size = len(body)
+        name = filename or file_id
 
-        # Attach the file to the assistant message (UI preview + download).
-        # The event is emitted BEFORE the response so the attachment shows up
-        # as the model starts replying.
+        if ct.startswith("image/"):
+            # Option B (user decision 2026-08-03): embed the image inline in
+            # the message via the ``embeds`` event (FullHeightIframe srcdoc),
+            # styled like a snippet — NOT markdown, NOT the files attachment
+            # (which sits above the text). The note tells the model the image
+            # is already visible so it must not embed/display it again as
+            # markdown (mirrors generate_image's contract).
+            await self._emit_embeds(
+                __event_emitter__, [self._image_embed_html(file_id, name)]
+            )
+            return self._ok({
+                "file_id": file_id,
+                "filename": filename,
+                "content_type": ct,
+                "size": size,
+                "note": f"Image ({ct}, {size} bytes) is embedded in the "
+                        "conversation and visible to the user. Do NOT embed or "
+                        "display it again as markdown.",
+            }, "file_binary", output_format=output_format)
+
+        # Text and generic binaries: attach via the ``files`` event (UI
+        # download chip).
         await self._emit_files(
             __event_emitter__, [self._file_attachment(file_id, ct, size, filename)]
         )
@@ -1516,6 +1536,43 @@ class Tools:
             "content_type": content_type,
             "meta": {"content_type": content_type},
         }
+
+    def _image_embed_html(self, file_id: str, name: str) -> str:
+        """Build the HTML fragment that embeds an image inline in the message.
+
+        Rendered by the frontend's ``embeds`` block (FullHeightIframe with
+        srcdoc — see ResponseMessage.svelte / FullHeightIframe.svelte in
+        v0.10.2). The srcdoc iframe inherits the parent document's base URL,
+        so the relative ``/api/v1/files/{id}/content`` path resolves against
+        the app origin and loads with the session cookie (no token in the
+        URL). Styled as an inline preview: contained, rounded, capped height.
+        """
+        name_html = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return (
+            f'<div style="max-width:100%;padding:4px;">'
+            f'<img src="/api/v1/files/{file_id}/content" '
+            f'alt="{name_html}" '
+            f'style="max-width:100%;max-height:320px;object-fit:contain;'
+            f'border-radius:8px;display:block;"/>'
+            f'</div>'
+        )
+
+    async def _emit_embeds(self, emitter: Optional[Any], embeds: list) -> None:
+        """Emit an ``embeds`` event rendering HTML inline in the message.
+
+        Native Open WebUI event (verified in backend/open_webui/socket/main.py
+        and Chat.svelte / ResponseMessage.svelte in v0.10.2): the backend
+        persists it into the assistant message and re-broadcasts it live.
+        Best-effort: a failed UI event must never break the tool call.
+        """
+        if emitter is None or not embeds:
+            return
+        try:
+            await emitter({"type": "embeds", "data": {"embeds": embeds}})
+        except asyncio.CancelledError:
+            raise  # never swallow cancellation
+        except Exception:
+            pass  # Event emission is best-effort
 
     async def _emit_files(self, emitter: Optional[Any], files: list) -> None:
         """Emit a ``files`` event attaching files to the assistant message.

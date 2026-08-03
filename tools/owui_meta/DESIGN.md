@@ -300,7 +300,11 @@ This makes the tool's execution visible in the UI, just like `search_web` or the
 
 **Verbosity (2026-08-03):** progress `status` events are gated by a `verbose` valve (admin + per-user; per-user overrides admin; default `True`). **Errors are NOT gated**: `chat:message:error` is always emitted on failure, and **consolidated** — at most one error event per tool call. A batch `delete_files` with several failures emits a single "N of M file(s) could not be deleted" summary (the per-id detail stays in the returned text), so repeated failures never flood the user with toasts.
 
-**File attachments (2026-08-03):** `get_file_content` additionally emits the native `files` event (`{"type": "files", "data": {"files": [...]}}`) so the requested file is attached to the assistant message: inline preview for images, download chip for everything else, while the returned text stays clean (100-char snippet for text, metadata note for binaries — never a full dump). The backend persists the event into the message's `files` field automatically and re-broadcasts it live; no token is put in any URL (the frontend builds download URLs with the session cookie). Emission is best-effort: a dead UI socket never breaks the tool call. The item schema (image vs file url forms) mirrors the frontend renderers — see `test/test_file_attachment.py`.
+**File attachments (2026-08-03, Option B for images):** `get_file_content` shows the file in the assistant message without dumping bytes into the context:
+- **Images** → `embeds` event with an HTML `<img>` fragment (contained, rounded, capped height) rendered by `FullHeightIframe` srcdoc — the non-markdown, non-artifact embed mechanism. The returned note tells the model the image is already visible and must not embed/display it again as markdown (mirrors `generate_image`'s contract).
+- **Text** → `files` event (download chip) + 100-char snippet in the returned text; never a full dump.
+- **Generic binary** → `files` event (download chip) + note.
+The `files`/`embeds` events are persisted by the backend into the message's field automatically and re-broadcast live; no token is put in any URL (the frontend builds download URLs with the session cookie); emission is best-effort. The image embed is sandboxed (srcdoc iframe); if a deployment blocks same-origin subrequests, `iframeSandboxAllowSameOrigin` is the lever. Item schemas pinned by `test/test_file_attachment.py`.
 
 ### 8.6 Pagination, sorting and filtering (cross-cutting requirement)
 

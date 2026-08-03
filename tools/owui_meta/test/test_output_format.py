@@ -183,7 +183,7 @@ async def test_file_binary_content_is_a_note():
 
     out = await md_tools(handler).get_file_content(FILE_ID, __request__=FakeRequest())
     assert "**File: " + FILE_ID + "** (image/png, 18 bytes)" in out
-    assert "Binary content" in out
+    assert "embedded in the conversation" in out
     assert "PNG" not in out  # no raw bytes leaked
 
 

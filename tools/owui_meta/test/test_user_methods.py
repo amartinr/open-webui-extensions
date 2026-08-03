@@ -197,7 +197,7 @@ async def test_get_file_content_binary_file_returns_note():
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["content_type"] == "image/png"
-    assert "Binary content" in payload["note"]
+    assert "embedded in the conversation" in payload["note"]
     assert "content" not in payload
 
 

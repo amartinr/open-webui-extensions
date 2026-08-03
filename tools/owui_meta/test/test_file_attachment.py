@@ -20,6 +20,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -40,6 +42,10 @@ class FakeEmitter:
     def files_event(self):
         """Return the ``files`` event, ignoring status/progress events."""
         return next(e for e in self.events if e.get("type") == "files")
+
+    def embeds_event(self):
+        """Return the ``embeds`` event, ignoring status/progress events."""
+        return next(e for e in self.events if e.get("type") == "embeds")
 
 
 def api_with_metadata(filename):
@@ -78,7 +84,7 @@ async def test_text_file_emits_file_attachment():
     assert payload["filename"] == "notes.txt"
 
 
-async def test_image_file_emits_image_attachment_with_preview_url():
+async def test_image_file_emits_embeds_html_preview():
     def handler(request):
         if request.url.path == f"/api/v1/files/{FILE_ID}":
             return json_response({"id": FILE_ID, "filename": "pic.png"})
@@ -88,15 +94,23 @@ async def test_image_file_emits_image_attachment_with_preview_url():
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
-    item = emitter.files_event()["data"]["files"][0]
-    assert item["type"] == "image"
-    assert item["url"] == f"/api/v1/files/{FILE_ID}/content"
-    assert item["name"] == "pic.png"
-    assert item["content_type"] == "image/png"
+    # images use the embeds mechanism (HTML inline, like a snippet) — NOT files
+    event = emitter.embeds_event()
+    assert event["type"] == "embeds"
+    embeds = event["data"]["embeds"]
+    assert len(embeds) == 1
+    html = embeds[0]
+    assert f"src=\"/api/v1/files/{FILE_ID}/content\"" in html
+    assert "max-height:320px" in html
+    assert "pic.png" in html
+    # no files event for images (avoids double rendering)
+    with pytest.raises(StopIteration):
+        emitter.files_event()
 
     payload = json.loads(out)
     assert "content" not in payload
-    assert "Binary content" in payload["note"]
+    assert "embedded in the conversation" in payload["note"]
+    assert "Do NOT embed or display it again" in payload["note"]
 
 
 async def test_generic_binary_emits_file_attachment():
