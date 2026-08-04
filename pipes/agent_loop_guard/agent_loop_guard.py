@@ -2,7 +2,7 @@
 title: Agent Loop Guard
 author: open-webui-tools
 author_url: https://github.com/your-org/open-webui-tools
-version: 2.4.0
+version: 2.5.0
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
 """
@@ -41,12 +41,16 @@ MSG_NOTIFY_RUNAWAY = "\U0001f527 Tool call budget exhausted ({total}/{max_calls}
 MSG_COUNTER = "\U0001f527 Remaining tool calls: {remaining}/{max_calls}"
 
 
-def _build_guard_message(status: str, tool: str | None, total: int, max_calls: int) -> str:
+def _build_guard_message(
+    status: str, tool: str | None, total: int, max_calls: int
+) -> str:
     """Build the text that replaces the tool result when budget is exhausted."""
     if status == "loop":
         return MSG_TOOL_LOOP.format(marker=GUARD_MARKER, tool=tool, total=total)
     elif status == "runaway":
-        return MSG_TOOL_RUNAWAY.format(marker=GUARD_MARKER, total=total, max_calls=max_calls)
+        return MSG_TOOL_RUNAWAY.format(
+            marker=GUARD_MARKER, total=total, max_calls=max_calls
+        )
     return ""
 
 
@@ -666,11 +670,15 @@ class Pipe:
         if not tools:
             return
         blocked = self._parse_tool_list(raw)
-        actual_names = {t.get("function", {}).get("name") for t in tools if t.get("function", {})}
+        actual_names = {
+            t.get("function", {}).get("name") for t in tools if t.get("function", {})
+        }
         unknown = blocked - actual_names
         if unknown:
             log.warning("TOOL_BLOCKLIST contains unknown names: %s", sorted(unknown))
-        body["tools"][:] = [t for t in tools if t.get("function", {}).get("name") not in blocked]
+        body["tools"][:] = [
+            t for t in tools if t.get("function", {}).get("name") not in blocked
+        ]
         tool_choice = body.get("tool_choice")
         if isinstance(tool_choice, str) and tool_choice in blocked:
             body.pop("tool_choice", None)
@@ -761,13 +769,31 @@ class Pipe:
     # Gateway proxy
     # ------------------------------------------------------------------
 
-    async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
+    # _stream now accepts model_override to rewrite the model_id
+    # in SSE chunks, so Open WebUI persists the message under
+    # the Workspace model ID the user actually selected.
+    async def _stream(
+        self, payload: dict, headers: dict, url: str, model_override: str | None = None
+    ) -> AsyncGenerator[str, None]:
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
-                    if line:
-                        yield line
+                    if not line:
+                        continue
+                    # Rewrite the "model" field in each SSE data chunk
+                    if model_override and line.startswith("data:"):
+                        data_str = line[5:].strip()
+                        if data_str and data_str != "[DONE]":
+                            try:
+                                obj = json.loads(data_str)
+                                if isinstance(obj, dict):
+                                    obj["model"] = model_override
+                                    yield f"data: {json.dumps(obj)}"
+                                    continue
+                            except json.JSONDecodeError:
+                                pass
+                    yield line
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
         async with httpx.AsyncClient(timeout=300) as client:
@@ -791,8 +817,27 @@ class Pipe:
         if not messages:
             return ""
 
+        # Resolve the REAL model_id selected by the user (Workspace).
+        # Open WebUI resolves the Workspace model to its manifold before
+        # calling the pipe, so body["model"] already arrives as
+        # "agent_loop_guard.deepseek/deepseek-v4-flash". The original
+        # Workspace ID (e.g. "deepseek-v4-media-assistant") travels in
+        # __metadata__["model_id"] (and in __metadata__["model"]["id"]).
+        # We use it to rewrite the model in the response so Analytics
+        # attributes usage to the correct model, even though all Workspaces
+        # share the same base_model_id.
+        metadata = __metadata__ or {}
+        persist_model = (
+            metadata.get("model_id")
+            or (metadata.get("model") or {}).get("id")
+            or body["model"]  # fallback: direct manifold usage
+        )
+
         real_model = body["model"].split(".", 1)[-1]
-        headers = {"Content-Type": "application/json", **self._build_gateway_headers(user=__user__, metadata=__metadata__)}
+        headers = {
+            "Content-Type": "application/json",
+            **self._build_gateway_headers(user=__user__, metadata=metadata),
+        }
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 
         # --- Analyse tool calls ---------------------------------------------
@@ -800,7 +845,12 @@ class Pipe:
 
         log.info(
             "Agent Loop Guard → %s (block=%s, kind=%s, tool=%s, total=%s, max=%s)",
-            url, should_block, kind, bad_tool, total, max_calls,
+            url,
+            should_block,
+            kind,
+            bad_tool,
+            total,
+            max_calls,
         )
 
         # --- Block: replace last tool result --------------------------------
@@ -812,22 +862,35 @@ class Pipe:
                         messages[i]["content"] = guard_msg
                         log.info(
                             "Tool result replaced with guard (kind=%s, tool=%s)",
-                            kind, bad_tool,
+                            kind,
+                            bad_tool,
                         )
                         break
 
             if __event_emitter__:
                 try:
                     if kind == "loop":
-                        await __event_emitter__({
-                            "type": "notification",
-                            "data": {"type": "error", "content": MSG_NOTIFY_LOOP.format(tool=bad_tool)},
-                        })
+                        await __event_emitter__(
+                            {
+                                "type": "notification",
+                                "data": {
+                                    "type": "error",
+                                    "content": MSG_NOTIFY_LOOP.format(tool=bad_tool),
+                                },
+                            }
+                        )
                     elif kind == "runaway":
-                        await __event_emitter__({
-                            "type": "notification",
-                            "data": {"type": "error", "content": MSG_NOTIFY_RUNAWAY.format(total=total, max_calls=max_calls)},
-                        })
+                        await __event_emitter__(
+                            {
+                                "type": "notification",
+                                "data": {
+                                    "type": "error",
+                                    "content": MSG_NOTIFY_RUNAWAY.format(
+                                        total=total, max_calls=max_calls
+                                    ),
+                                },
+                            }
+                        )
                 except Exception:
                     log.warning("Failed to emit event (non-fatal)", exc_info=True)
 
@@ -835,10 +898,18 @@ class Pipe:
         if __event_emitter__ and max_calls > 0 and total > 0:
             remaining = max(0, max_calls - total)
             try:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": MSG_COUNTER.format(remaining=remaining, max_calls=max_calls), "done": True, "hidden": False},
-                })
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": MSG_COUNTER.format(
+                                remaining=remaining, max_calls=max_calls
+                            ),
+                            "done": True,
+                            "hidden": False,
+                        },
+                    }
+                )
             except Exception:
                 pass
 
@@ -858,18 +929,32 @@ class Pipe:
                 # upload) collapse here even when the filter's this-turn
                 # reuse failed. Fail-open: any resolution error degrades to
                 # UUID-only dedup.
-                hash_lookup = await _resolve_content_hashes(_collect_image_uuids(messages))
+                hash_lookup = await _resolve_content_hashes(
+                    _collect_image_uuids(messages)
+                )
                 _cleanup_attached_files(messages, base_url, hash_lookup=hash_lookup)
             except Exception as exc:
                 log.warning("attached_files cleanup failed (fail-open): %s", exc)
 
         payload = {**body, "model": real_model, "messages": messages}
 
+        # Log the mapping for verification (optional, you can remove it)
+        log.info(
+            "Persisting model: %s (manifold: %s, gateway model: %s)",
+            persist_model,
+            body["model"],
+            real_model,
+        )
+
         try:
             if body.get("stream", False):
-                return self._stream(payload, headers, url)
+                return self._stream(payload, headers, url, model_override=persist_model)
             else:
-                return await self._call(payload, headers, url)
+                result = await self._call(payload, headers, url)
+                if isinstance(result, dict):
+                    # In non-streaming, overwrite the model in the response
+                    result["model"] = persist_model
+                return result
         except httpx.HTTPStatusError as e:
             log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
             return f"Gateway error: HTTP {e.response.status_code}."
@@ -879,3 +964,4 @@ class Pipe:
         except Exception as e:
             log.error("Unexpected error: %s", e)
             return f"Error: {e}"
+
