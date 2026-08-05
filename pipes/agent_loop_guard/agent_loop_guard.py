@@ -2,7 +2,7 @@
 title: Agent Loop Guard
 author: open-webui-tools
 author_url: https://github.com/your-org/open-webui-tools
-version: 2.5.0
+version: 2.5.1
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
 """
@@ -242,7 +242,9 @@ def _build_block(tags: list[dict], base_url: str) -> str:
     return "<attached_files>\n" + "\n".join(lines) + "\n</attached_files>\n\n"
 
 
-def _dedupe_tags(tags: list[dict], seen: set[str], hash_lookup: dict[str, str] | None = None) -> list[dict]:
+def _dedupe_tags(
+    tags: list[dict], seen: set[str], hash_lookup: dict[str, str] | None = None
+) -> list[dict]:
     """Keep tags whose canonical key has not been seen before.
 
     The `seen` set is scoped by the caller to ONE user message (per-turn
@@ -342,7 +344,9 @@ async def _resolve_content_hashes(uuids: list[str]) -> dict[str, str]:
     return resolved
 
 
-def _cleanup_attached_files(messages: list, base_url: str = "", hash_lookup: dict[str, str] | None = None) -> dict:
+def _cleanup_attached_files(
+    messages: list, base_url: str = "", hash_lookup: dict[str, str] | None = None
+) -> dict:
     """Collapse and deduplicate `<attached_files>` blocks WITHIN each user message.
 
     Pure function of the payload (deterministic → cache-safe). Dedup is
@@ -455,7 +459,9 @@ def _cleanup_attached_files(messages: list, base_url: str = "", hash_lookup: dic
             block = _build_block(kept, base_url)
             if block:
                 new_content.insert(0, {"type": "text", "text": block})
-            message["content"] = new_content if new_content else [{"type": "text", "text": ""}]
+            message["content"] = (
+                new_content if new_content else [{"type": "text", "text": ""}]
+            )
             blocks_kept = 1 if block else 0
             stats["blocks_kept"] += blocks_kept
             log.info(
@@ -769,9 +775,9 @@ class Pipe:
     # Gateway proxy
     # ------------------------------------------------------------------
 
-    # _stream now accepts model_override to rewrite the model_id
-    # in SSE chunks, so Open WebUI persists the message under
-    # the Workspace model ID the user actually selected.
+    # _stream accepts model_override to overwrite the model_id
+    # in SSE chunks, so the way Open WebUI persists the message
+    # under the Workspace model_id
     async def _stream(
         self, payload: dict, headers: dict, url: str, model_override: str | None = None
     ) -> AsyncGenerator[str, None]:
@@ -781,7 +787,7 @@ class Pipe:
                 async for line in r.aiter_lines():
                     if not line:
                         continue
-                    # Rewrite the "model" field in each SSE data chunk
+                    # 🆕 Reescribir el campo "model" en cada chunk de datos SSE
                     if model_override and line.startswith("data:"):
                         data_str = line[5:].strip()
                         if data_str and data_str != "[DONE]":
@@ -822,7 +828,7 @@ class Pipe:
         # calling the pipe, so body["model"] already arrives as
         # "agent_loop_guard.deepseek/deepseek-v4-flash". The original
         # Workspace ID (e.g. "deepseek-v4-media-assistant") travels in
-        # __metadata__["model_id"] (and in __metadata__["model"]["id"]).
+        # __metadata__["model_id"] (and also in __metadata__["model"]["id"]).
         # We use it to rewrite the model in the response so Analytics
         # attributes usage to the correct model, even though all Workspaces
         # share the same base_model_id.
@@ -830,7 +836,7 @@ class Pipe:
         persist_model = (
             metadata.get("model_id")
             or (metadata.get("model") or {}).get("id")
-            or body["model"]  # fallback: direct manifold usage
+            or body["model"]  # fallback: uso directo del manifold
         )
 
         real_model = body["model"].split(".", 1)[-1]
@@ -938,21 +944,13 @@ class Pipe:
 
         payload = {**body, "model": real_model, "messages": messages}
 
-        # Log the mapping for verification (optional, you can remove it)
-        log.info(
-            "Persisting model: %s (manifold: %s, gateway model: %s)",
-            persist_model,
-            body["model"],
-            real_model,
-        )
-
         try:
             if body.get("stream", False):
                 return self._stream(payload, headers, url, model_override=persist_model)
             else:
                 result = await self._call(payload, headers, url)
                 if isinstance(result, dict):
-                    # In non-streaming, overwrite the model in the response
+                    # overwrite model during response for no-streaming responses
                     result["model"] = persist_model
                 return result
         except httpx.HTTPStatusError as e:
@@ -964,4 +962,3 @@ class Pipe:
         except Exception as e:
             log.error("Unexpected error: %s", e)
             return f"Error: {e}"
-
