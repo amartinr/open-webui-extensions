@@ -2,7 +2,7 @@
 title: Agent Loop Guard
 author: open-webui-tools
 author_url: https://github.com/your-org/open-webui-tools
-version: 2.5.1
+version: 2.5.2
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
 """
@@ -775,31 +775,13 @@ class Pipe:
     # Gateway proxy
     # ------------------------------------------------------------------
 
-    # _stream accepts model_override to overwrite the model_id
-    # in SSE chunks, so the way Open WebUI persists the message
-    # under the Workspace model_id
-    async def _stream(
-        self, payload: dict, headers: dict, url: str, model_override: str | None = None
-    ) -> AsyncGenerator[str, None]:
+    async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
-                    if not line:
-                        continue
-                    # 🆕 Reescribir el campo "model" en cada chunk de datos SSE
-                    if model_override and line.startswith("data:"):
-                        data_str = line[5:].strip()
-                        if data_str and data_str != "[DONE]":
-                            try:
-                                obj = json.loads(data_str)
-                                if isinstance(obj, dict):
-                                    obj["model"] = model_override
-                                    yield f"data: {json.dumps(obj)}"
-                                    continue
-                            except json.JSONDecodeError:
-                                pass
-                    yield line
+                    if line:
+                        yield line
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
         async with httpx.AsyncClient(timeout=300) as client:
@@ -823,26 +805,16 @@ class Pipe:
         if not messages:
             return ""
 
-        # Resolve the REAL model_id selected by the user (Workspace).
-        # Open WebUI resolves the Workspace model to its manifold before
-        # calling the pipe, so body["model"] already arrives as
-        # "agent_loop_guard.deepseek/deepseek-v4-flash". The original
-        # Workspace ID (e.g. "deepseek-v4-media-assistant") travels in
-        # __metadata__["model_id"] (and also in __metadata__["model"]["id"]).
-        # We use it to rewrite the model in the response so Analytics
-        # attributes usage to the correct model, even though all Workspaces
-        # share the same base_model_id.
-        metadata = __metadata__ or {}
-        persist_model = (
-            metadata.get("model_id")
-            or (metadata.get("model") or {}).get("id")
-            or body["model"]  # fallback: uso directo del manifold
-        )
-
+        # NOTE: we intentionally do NOT rewrite the "model" field in the
+        # upstream response. Open WebUI's frontend persists the assistant
+        # message under the Workspace ID the user actually selected
+        # (message.model is set client-side at message creation and is never
+        # overwritten from the SSE/dict "model"), so rewriting it here did
+        # not help Analytics attribution — it only added noise to the stream.
         real_model = body["model"].split(".", 1)[-1]
         headers = {
             "Content-Type": "application/json",
-            **self._build_gateway_headers(user=__user__, metadata=metadata),
+            **self._build_gateway_headers(user=__user__, metadata=__metadata__),
         }
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 
@@ -946,13 +918,9 @@ class Pipe:
 
         try:
             if body.get("stream", False):
-                return self._stream(payload, headers, url, model_override=persist_model)
+                return self._stream(payload, headers, url)
             else:
-                result = await self._call(payload, headers, url)
-                if isinstance(result, dict):
-                    # overwrite model during response for no-streaming responses
-                    result["model"] = persist_model
-                return result
+                return await self._call(payload, headers, url)
         except httpx.HTTPStatusError as e:
             log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
             return f"Gateway error: HTTP {e.response.status_code}."
