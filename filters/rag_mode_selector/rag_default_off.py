@@ -1,12 +1,16 @@
 """
 title: RAG Default Off
-author: your_name
-version: 1.0.0
-required_open_webui_version: 0.5.0
+id: rag_default_off
+author: A. Martin
+author_url: https://github.com/amartinr
+git_url: https://github.com/amartinr/open-webui-extensions.git
 description: >
     Always-on filter that suppresses built-in RAG and injects full file
     content into context. Part of the RAG Mode Selector system.
     Pair with 'rag_enable' (priority 1) to let users toggle RAG on demand.
+required_open_webui_version: 0.5.0
+version: 1.0.0
+licence: MIT
 """
 
 import logging

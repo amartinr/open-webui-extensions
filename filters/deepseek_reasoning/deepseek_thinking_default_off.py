@@ -1,9 +1,13 @@
 """
 title: DeepSeek Thinking Default Off
-author: pi-agent
+id: deepseek_thinking_default_off
+author: A. Martin
+author_url: https://github.com/amartinr
+git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Global filter that explicitly sets thinking mode to "disabled" for DeepSeek models by default. Prevents DeepSeek from using its default thinking mode (which is ON). When the toggleable "DeepSeek Reasoning Effort Selector" filter is activated by the user, it overrides this to enable thinking + reasoning effort. This filter is always-on (no user chip) and runs first (priority 0).
 required_open_webui_version: 0.9.0
 version: 1.0.0
+licence: MIT
 """
 
 from pydantic import BaseModel, Field

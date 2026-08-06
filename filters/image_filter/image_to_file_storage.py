@@ -1,9 +1,13 @@
 """
 title: Image to File Storage
-author: pi-agent
+id: image_to_file_storage
+author: A. Martin
+author_url: https://github.com/amartinr
+git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Strips images from LLM context to prevent RAG and base64 bloat. Persists pasted images with content-hash dedup and injects a deduplicated <attached_files> block with absolute file URLs so tools (e.g. ComfyUI URL-loading nodes) can fetch the stored images. Pasted images are announced only in the turn they are pasted — later turns strip the re-hydrated history without re-announcing it.
 required_open_webui_version: 0.5.0
 version: 2.12.3
+licence: MIT
 """
 
 import base64
