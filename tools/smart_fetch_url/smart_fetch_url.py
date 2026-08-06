@@ -2,7 +2,7 @@
 title: Smart Fetch URL
 author: A. Martin
 author_url: https://github.com/amartinr
-git_url: https://github.com/amartinr/open-webui-extensions
+git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax

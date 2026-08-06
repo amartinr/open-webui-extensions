@@ -1,10 +1,14 @@
 """
 title: Agent Loop Guard
-author: open-webui-tools
-author_url: https://github.com/your-org/open-webui-tools
-version: 2.5.2
+id: agent_loop_guard
+author: A. Martin
+author_url: https://github.com/amartinr
+git_url: https://github.com/amartinr/open-webui-extensions.git
+description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
+version: 2.5.2
+licence: MIT
 """
 
 from pydantic import BaseModel, Field, model_validator

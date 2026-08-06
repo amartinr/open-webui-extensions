@@ -1,8 +1,9 @@
 """
 title: RAG Enable
-author: your_name
-version: 1.0.0
-required_open_webui_version: 0.5.0
+id: rag_enable
+author: A. Martin
+author_url: https://github.com/amartinr
+git_url: https://github.com/amartinr/open-webui-extensions.git
 description: >
     Toggleable filter that restores built-in RAG when enabled.
     Part of the RAG Mode Selector system.
@@ -12,6 +13,9 @@ description: >
     full-content block injected by rag_default_off as a fallback so the
     model can always answer.
     When OFF: passthrough (inlet not called by Open WebUI).
+required_open_webui_version: 0.5.0
+version: 1.0.0
+licence: MIT
 """
 
 import logging

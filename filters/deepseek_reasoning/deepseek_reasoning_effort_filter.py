@@ -1,9 +1,13 @@
 """
 title: DeepSeek Reasoning Effort Selector
-author: pi-agent
+id: deepseek_reasoning_effort_filter
+author: A. Martin
+author_url: https://github.com/amartinr
+git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Toggleable filter that lets users select "low", "high" or "max" reasoning effort for DeepSeek models. Admin defines a per-model default via the model_effort_map valve (JSON: model pattern -> effort); models not listed fall back to default_effort ("low"). User chip choice wins; otherwise the per-model default applies. No monkey-patching required.
 required_open_webui_version: 0.9.0
 version: 1.3.2
+licence: MIT
 """
 
 import json
@@ -115,7 +119,8 @@ class Filter:
         # A chip appears in the chat input bar; clicking it opens the
         # UserValves modal to select the reasoning effort.
         self.toggle = True
-        self.icon = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGZpbGw9Im5vbmUiIHZpZXdCb3g9IjIgMC44IDIwIDIwIiBzdHJva2U9IiM4YjAwMDAiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGFyaWEtaGlkZGVuPSJ0cnVlIj4gIDxwYXRoIGQ9Ik05LjY2MyAxN2g0LjY3M00xMiAzdjFtNi4zNjQgMS42MzZsLS43MDcuNzA3TTIxIDEyaC0xTTQgMTJIM20zLjM0My01LjY1N2wtLjcwNy0uNzA3bTIuODI4IDkuOWE1IDUgMCAxMTcuMDcyIDBsLS41NDguNTQ3QTMuMzc0IDMuMzc0IDAgMDAxNCAxOC40NjlWMTlhMSAxIDAgMDEtMSAxaC0yYTEgMSAwIDAxLTEtMXYtLjUzMWMwLS44OTUtLjM1Ni0xLjc1NC0uOTg4LTIuMzg2bC0uNTQ4LS41NDd6IiAvPjwvc3ZnPg=="
+        # #722200
+        self.icon = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGZpbGw9Im5vbmUiIHZpZXdCb3g9IjIgMC44IDIwIDIwIiBzdHJva2U9IiM3MjIyMDAiIGFyaWEtaGlkZGVuPSJ0cnVlIiBzdHJva2Utd2lkdGg9IjIiIGNsYXNzPSJ3LTQgaC00Ij48cGF0aCBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiIGQ9Ik05LjY2MyAxN2g0LjY3M00xMiAzdjFtNi4zNjQgMS42MzZsLS43MDcuNzA3TTIxIDEyaC0xTTQgMTJIM20zLjM0My01LjY1N2wtLjcwNy0uNzA3bTIuODI4IDkuOWE1IDUgMCAxMTcuMDcyIDBsLS41NDguNTQ3QTMuMzc0IDMuMzc0IDAgMDAxNCAxOC40NjlWMTlhMSAxIDAgMDEtMSAxaC0yYTEgMSAwIDAxLTEtMXYtLjUzMWMwLS44OTUtLjM1Ni0xLjc1NC0uOTg4LTIuMzg2bC0uNTQ4LS41NDd6Ii8+PC9zdmc+"
 
     # Inlet: modify the request body BEFORE it reaches the LLM API
     async def inlet(
