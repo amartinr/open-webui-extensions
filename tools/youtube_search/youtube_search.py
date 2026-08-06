@@ -4,16 +4,20 @@ id: youtube_search
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Search YouTube videos, channels, playlists, get transcripts, and more.
+description: Search YouTube videos, channels, playlists, get transcripts, and embed videos inline in the chat.
 required_open_webui_version: 0.5.0
 requirements: httpx
-version: 1.0.0
+version: 1.2.0
 licence: MIT
 """
 
+import re
 from typing import Optional
+import html as _html
+
 import httpx
 from pydantic import BaseModel, Field
+from fastapi.responses import HTMLResponse
 
 
 class Tools:
@@ -118,9 +122,9 @@ class Tools:
 
         elif action == "get":
             if rtype == "video":
-                return f"{base}/video", {"video_id": kwargs["video_id"]}
+                return f"{base}/video", {"video_id": kwargs["id"]}
             elif rtype == "transcript":
-                params = {"video_id": kwargs["video_id"]}
+                params = {"video_id": kwargs["id"]}
                 lang = (
                     kwargs.get("language")
                     if kwargs.get("language") is not None
@@ -133,7 +137,7 @@ class Tools:
         elif action == "list":
             if rtype == "channel":
                 params = {
-                    "name": kwargs["handle"],
+                    "name": kwargs["id"],
                     "max_results": self._resolve_max_results(kwargs.get("max_results")),
                 }
                 channel_sorts = ("views", "date", "duration")
@@ -142,7 +146,7 @@ class Tools:
                 return f"{base}/channel", params
             elif rtype == "playlist":
                 params = {
-                    "id": kwargs["playlist_id"],
+                    "id": kwargs["id"],
                     "max_results": self._resolve_max_results(kwargs.get("max_results")),
                 }
                 return f"{base}/playlist", params
@@ -392,6 +396,144 @@ class Tools:
         return f"**Error:** {error_code}\n{detail}"
 
     # ------------------------------------------------------------------ #
+    # Rich UI embed (HTMLResponse)
+    # ------------------------------------------------------------------ #
+    #
+    # action="view" returns a bare HTMLResponse (not a tuple). Open WebUI's
+    # middleware detects it, emits the `embeds` event via Socket.IO, and the
+    # frontend renders it inline as a sandboxed iframe. The LLM never sees
+    # the HTML and receives only the middleware's generic message.
+    #
+    # YouTube fast-path: the embed iframe only needs the 11-character video
+    # ID, so view does NOT call the YT DLP API (GET /video) — YouTube
+    # blocks automated metadata extraction with "login to confirm you're
+    # not a bot", but the official youtube.com/embed/<id> iframe works
+    # regardless. The ID is extracted directly from the argument (bare ID
+    # or full watch/embed URL) and the embed is built locally, exactly like
+    # the Open WebUI video embedder's YouTube fast-path.
+    #
+    # Quality: vq=hd720 is a playback hint — YouTube starts at 720p when
+    # the video offers it and the connection allows, else it picks the best
+    # available quality. It is not a guarantee (the user can change it in
+    # the player). There is no way to force 30fps: 60fps videos play at
+    # 60fps automatically and no embed parameter controls frame rate.
+    #
+    # Sizing (same sandbox constraints as any Open WebUI embed):
+    #  - `vh`/`vw` inside the sandboxed iframe refer to the iframe box
+    #    (~150px initial), NOT the browser viewport. Any viewport cap is
+    #    expressed via `screen.availHeight` (readable in the sandbox): the
+    #    height never exceeds 65% of the available screen height.
+    #  - The width derives from the chat container width and the video's
+    #    aspect ratio. YouTube embeds are 16/9 by design.
+    #  - `reportHeight()` posts the document's own height so the iframe
+    #    hugs the content instead of staying at the tiny default box.
+    #
+    # Reimplemented from scratch for this tool (the author owns both this
+    # repo and the Open WebUI video embedder; no credit requested).
+
+    @staticmethod
+    def _extract_video_id(value: str) -> Optional[str]:
+        """Return the 11-char YouTube video ID from a bare ID or a YouTube URL."""
+        if not value:
+            return None
+        value = value.strip()
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
+            return value
+        m = re.search(
+            r"(?:youtube\.com|youtu\.be)/(?:watch\?v=|shorts/|embed/|live/|v/)?([A-Za-z0-9_-]{11})",
+            value,
+        )
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _build_iframe_fragment(embed_url: str, title: str = "", ar: str = "16/9") -> str:
+        """Build a `.player` fragment containing an iframe embed."""
+        src = _html.escape(embed_url, quote=True)
+        safe_title = _html.escape(title, quote=True)
+        return (
+            f'<div class="player" data-ar="{ar}">'
+            f'<iframe src="{src}" title="{safe_title}" allow="autoplay;fullscreen" '
+            f'allowfullscreen loading="lazy"></iframe>'
+            f"</div>"
+        )
+
+    @staticmethod
+    def _build_embed_document(players: list) -> str:
+        """Combine `.player` fragments into a self-contained HTML document.
+
+        Sizing follows the video embedder's player document: fit the chat
+        container width, height capped at 65% of the available screen height
+        (screen.availHeight — vh/vw units are useless inside the sandboxed
+        iframe), and reportHeight() posts the STACK's own height
+        (stack.offsetHeight — never document.scrollHeight, which with
+        html,body{height:100%;overflow:hidden} reflects the iframe's initial
+        ~150px box instead of the content, leaving a narrow embed).
+
+        Iframes use their `data-ar` (16/9 fallback); videos would re-fit on
+        loadedmetadata, but this tool only embeds YouTube iframes.
+        """
+        joined = "\n".join(players)
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{{
+  color-scheme:light dark;
+}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+html,body{{height:100%;overflow:hidden;margin:0;padding:0}}
+body{{display:flex;align-items:center;justify-content:center;padding:16px;background:transparent}}
+#stack{{display:flex;flex-direction:column;align-items:center;gap:16px}}
+.player{{max-width:100%;overflow:hidden;border-radius:12px;background:#000}}
+.player video,.player iframe{{display:block;width:100%;height:100%;border:0;object-fit:contain;border-radius:12px;background:#000}}
+</style>
+</head>
+<body>
+<div id="stack">
+{joined}
+</div>
+<script>
+const players=[...document.querySelectorAll('.player')],stack=document.getElementById('stack');
+function reportHeight(){{parent.postMessage({{type:'iframe:height',height:stack.offsetHeight||document.documentElement.scrollHeight}},'*')}}
+function ratioOf(p){{
+  const v=p.querySelector('video');
+  if(v&&v.videoWidth>0&&v.videoHeight>0)return v.videoWidth/v.videoHeight;
+  const a=(p.dataset.ar||'16/9').split('/').map(Number);
+  return a[0]>0&&a[1]>0?a[0]/a[1]:16/9;
+}}
+function fit(){{
+  // Height cap: 65% of the available screen height (screen.availHeight is
+  // readable inside the sandbox; vh/vw units refer to the iframe box and
+  // are useless here). The width derives from the container width and the
+  // aspect ratio; the height never overflows the available screen space.
+  const maxH=(screen.availHeight||screen.height||0)*0.65;
+  const cw=document.documentElement.clientWidth;
+  for(const p of players){{
+    const r=ratioOf(p);
+    let w=cw;
+    if(maxH>0){{const wByH=maxH*r;if(wByH>0&&wByH<w)w=wByH;}}
+    p.style.width=w+'px';
+    p.style.height=(w/r)+'px';
+  }}
+  reportHeight();
+}}
+for(const v of document.querySelectorAll('video')){{
+  v.addEventListener('loadedmetadata',fit);
+  v.addEventListener('loadeddata',fit);
+  v.addEventListener('canplay',fit);
+}}
+window.addEventListener('load',fit);
+addEventListener('resize',fit);
+new ResizeObserver(fit).observe(document.body);
+fit();
+</script>
+</body>
+</html>
+"""
+
+    # ------------------------------------------------------------------ #
     # Public tool method
     # ------------------------------------------------------------------ #
 
@@ -400,66 +542,28 @@ class Tools:
         action: str,
         type: str = "video",
         query: str = "",
-        video_id: str = "",
-        handle: str = "",
-        playlist_id: str = "",
+        id: str = "",
         max_results: Optional[int] = None,
         sort: str = "relevance",
         language: Optional[str] = None,
         __event_emitter__=None,
     ) -> str:
         """
-        Unified tool for querying YouTube via the YT DLP API.
+        Query YouTube via the YT DLP API. action (verb) + type (resource) determine the call:
 
-        action (verb) + type (resource) determine what happens.
-        verb is always an action, type is always the thing being acted on.
+        - search: find content by keyword. Needs query. type=video (supports sort) | channel (returns @handle) | playlist (returns id)
+        - get: fetch details for one item. Needs id. type=video (likes, upload date, tags, description) | transcript (timed fragments, supports language)
+        - list: enumerate videos from a known resource. Needs id (channel @handle/handle/UCID or playlist id). Does not search
+        - view: embed a video inline in the chat as a Rich UI player. Builds the YouTube iframe directly from id — NO API call, so it works even when YouTube blocks automated extraction. Terminal result: the player renders in the chat and the LLM sees only the middleware's generic message
 
-        :param action: Verb: search | get | list
-
-            **search** — find content by keyword.
-              Needs ``query``. ``type`` selects what to search for.
-              Returns matching items with metadata.
-
-              * type=video  → search videos (supports sort)
-              * type=channel → search channels (returns @handle)
-              * type=playlist → search playlists (returns id)
-
-            **get** — fetch detailed info for a single item.
-              Needs ``video_id``.
-
-              * type=video → likes, upload_date, tags, description
-              * type=transcript → timed transcript fragments (supports language)
-
-            **list** — enumerate videos from a known resource.
-              Does NOT search. You need the identifier first.
-
-              * type=channel → needs handle (@handle, handle, or UCID)
-              * type=playlist → needs playlist_id
-
-            **Workflow for channels:**
-              1. action=search, type=channel, query="Nate Gentile"
-                 → returns @NateGentile7
-              2. action=list, type=channel, handle="@NateGentile7"
-                 → lists his videos
-
-        :param type: Resource type: video (default), channel, playlist, transcript.
-        :param query: Search term (required for action=search)
-        :param video_id: YouTube video ID (required for action=get with type=video|transcript)
-        :param handle: Channel identifier (required for action=list with type=channel).
-            Accepts @handle (``@NateGentile7``), handle without @ (``NateGentile7``),
-            or UCID (``UC36xmz34q...``).
-            Does NOT accept display names — use ``action=search, type=channel`` to find
-            the @handle first.
-        :param playlist_id: Playlist ID (required for action=list with type=playlist)
-        :param max_results: Max results. If omitted, UserValve default_results is used.
-            Clamped by UserValve max_results (personal ceiling) and AdminValve
-            max_results (global ceiling).
-        :param sort: Sort order.
-            search+video: relevance (default), views, duration
-            list+channel: views (default), date, duration
-        :param language: Language for transcripts. If omitted, UserValve preferred_language.
-            Only applies to get+transcript.
-        :param __event_emitter__: Injected by Open WebUI for emitting status events
+        :param action: search | get | list | view
+        :param type: video (default), channel, playlist, transcript
+        :param query: Search term (required for search)
+        :param id: Identifier of the resource, matching type: 11-char video ID or watch/embed URL (get+video, get+transcript, view), channel @handle/handle/UCID (list+channel), or playlist ID (list+playlist)
+        :param max_results: Max results; omitted = UserValve default, clamped by UserValve and AdminValve caps
+        :param sort: search+video: relevance (default), views, duration. list+channel: views (default), date, duration
+        :param language: Transcript language (get+transcript only); omitted = UserValve preferred_language
+        :param __event_emitter__: Injected by Open WebUI for status events
         """
         # --- status labels ---
         status_map = {
@@ -470,9 +574,38 @@ class Tools:
             ("get", "transcript"): "Fetching transcript...",
             ("list", "channel"): "Fetching channel videos...",
             ("list", "playlist"): "Fetching playlist videos...",
+            ("view", "video"): "Embedding video...",
         }
         label = status_map.get((action, type), "Processing...")
         await self._emit_status(__event_emitter__, label)
+
+        # --- view action: build the embed directly from the video ID ---
+        # YouTube blocks automated metadata extraction ("login to confirm
+        # you're not a bot"), but the embed iframe only needs the
+        # 11-character video ID. No YT DLP API call: extract the ID from
+        # the argument (bare ID or URL) and build the iframe locally.
+        if action == "view":
+            if type == "video":
+                embed_id = self._extract_video_id(id)
+                if not embed_id:
+                    await self._emit_status(__event_emitter__, label, done=True)
+                    return self._fmt_error(
+                        "invalid_video_id",
+                        "view needs an 11-character YouTube video ID "
+                        "(or a watch/embed URL) in id",
+                    )
+                embed_url = f"https://www.youtube.com/embed/{embed_id}?rel=0&vq=hd720"
+                fragment = self._build_iframe_fragment(embed_url, title="YouTube video")
+                document = self._build_embed_document([fragment])
+                await self._emit_status(__event_emitter__, label, done=True)
+                return HTMLResponse(
+                    content=document,
+                    headers={"Content-Disposition": "inline"},
+                )
+            await self._emit_status(__event_emitter__, label, done=True)
+            return self._fmt_error(
+                "invalid_action", f"{action}/{type}: view only supports type='video'"
+            )
 
         # --- build request ---
         try:
@@ -480,9 +613,7 @@ class Tools:
                 action=action,
                 type=type,
                 query=query,
-                video_id=video_id,
-                handle=handle,
-                playlist_id=playlist_id,
+                id=id,
                 max_results=max_results,
                 sort=sort,
                 language=language,
