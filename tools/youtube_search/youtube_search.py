@@ -446,48 +446,88 @@ class Tools:
         return m.group(1) if m else None
 
     @staticmethod
-    def _build_embed_document(embed_url: str, title: str = "") -> str:
-        """Build a self-contained HTML document embedding a YouTube iframe."""
+    def _build_iframe_fragment(embed_url: str, title: str = "", ar: str = "16/9") -> str:
+        """Build a `.player` fragment containing an iframe embed."""
         src = _html.escape(embed_url, quote=True)
         safe_title = _html.escape(title, quote=True)
+        return (
+            f'<div class="player" data-ar="{ar}">'
+            f'<iframe src="{src}" title="{safe_title}" allow="autoplay;fullscreen" '
+            f'allowfullscreen loading="lazy"></iframe>'
+            f"</div>"
+        )
+
+    @staticmethod
+    def _build_embed_document(players: list) -> str:
+        """Combine `.player` fragments into a self-contained HTML document.
+
+        Sizing follows the video embedder's player document: fit the chat
+        container width, height capped at 65% of the available screen height
+        (screen.availHeight — vh/vw units are useless inside the sandboxed
+        iframe), and reportHeight() posts the STACK's own height
+        (stack.offsetHeight — never document.scrollHeight, which with
+        html,body{height:100%;overflow:hidden} reflects the iframe's initial
+        ~150px box instead of the content, leaving a narrow embed).
+
+        Iframes use their `data-ar` (16/9 fallback); videos would re-fit on
+        loadedmetadata, but this tool only embeds YouTube iframes.
+        """
+        joined = "\n".join(players)
         return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-:root{{color-scheme:light dark}}
+:root{{
+  color-scheme:light dark;
+}}
 *{{margin:0;padding:0;box-sizing:border-box}}
-html,body{{height:100%;overflow:hidden;background:transparent}}
-body{{display:flex;align-items:center;justify-content:center;padding:16px}}
-#player{{position:relative;width:100%;max-width:100%;border-radius:12px;overflow:hidden;background:#000;aspect-ratio:16/9}}
-#player iframe{{position:absolute;inset:0;width:100%;height:100%;border:0}}
+html,body{{height:100%;overflow:hidden;margin:0;padding:0}}
+body{{display:flex;align-items:center;justify-content:center;padding:16px;background:transparent}}
+#stack{{display:flex;flex-direction:column;align-items:center;gap:16px}}
+.player{{max-width:100%;overflow:hidden;border-radius:12px;background:#000}}
+.player video,.player iframe{{display:block;width:100%;height:100%;border:0;object-fit:contain;border-radius:12px;background:#000}}
 </style>
 </head>
 <body>
-<div id="player">
-<iframe src="{src}" title="{safe_title}" allow="autoplay;fullscreen" allowfullscreen loading="lazy"></iframe>
+<div id="stack">
+{joined}
 </div>
 <script>
-(function(){{
-  var player=document.getElementById('player');
-  function reportHeight(){{
-    parent.postMessage({{type:'iframe:height',height:document.documentElement.scrollHeight}},'*');
+const players=[...document.querySelectorAll('.player')],stack=document.getElementById('stack');
+function reportHeight(){{parent.postMessage({{type:'iframe:height',height:stack.offsetHeight||document.documentElement.scrollHeight}},'*')}}
+function ratioOf(p){{
+  const v=p.querySelector('video');
+  if(v&&v.videoWidth>0&&v.videoHeight>0)return v.videoWidth/v.videoHeight;
+  const a=(p.dataset.ar||'16/9').split('/').map(Number);
+  return a[0]>0&&a[1]>0?a[0]/a[1]:16/9;
+}}
+function fit(){{
+  // Height cap: 65% of the available screen height (screen.availHeight is
+  // readable inside the sandbox; vh/vw units refer to the iframe box and
+  // are useless here). The width derives from the container width and the
+  // aspect ratio; the height never overflows the available screen space.
+  const maxH=(screen.availHeight||screen.height||0)*0.65;
+  const cw=document.documentElement.clientWidth;
+  for(const p of players){{
+    const r=ratioOf(p);
+    let w=cw;
+    if(maxH>0){{const wByH=maxH*r;if(wByH>0&&wByH<w)w=wByH;}}
+    p.style.width=w+'px';
+    p.style.height=(w/r)+'px';
   }}
-  function fit(){{
-    var maxH=(screen.availHeight||screen.height||0)*0.65;
-    var cw=document.documentElement.clientWidth;
-    var w=cw;
-    if(maxH>0){{var wByH=maxH*16/9;if(wByH>0&&wByH<w)w=wByH;}}
-    player.style.width=w+'px';
-    player.style.height=(w*9/16)+'px';
-    reportHeight();
-  }}
-  window.addEventListener('load',fit);
-  addEventListener('resize',fit);
-  new ResizeObserver(fit).observe(document.body);
-  fit();
-}})();
+  reportHeight();
+}}
+for(const v of document.querySelectorAll('video')){{
+  v.addEventListener('loadedmetadata',fit);
+  v.addEventListener('loadeddata',fit);
+  v.addEventListener('canplay',fit);
+}}
+window.addEventListener('load',fit);
+addEventListener('resize',fit);
+new ResizeObserver(fit).observe(document.body);
+fit();
 </script>
 </body>
 </html>
@@ -555,7 +595,8 @@ body{{display:flex;align-items:center;justify-content:center;padding:16px}}
                         "(or a watch/embed URL) in id",
                     )
                 embed_url = f"https://www.youtube.com/embed/{embed_id}?rel=0&vq=hd720"
-                document = self._build_embed_document(embed_url, title="YouTube video")
+                fragment = self._build_iframe_fragment(embed_url, title="YouTube video")
+                document = self._build_embed_document([fragment])
                 await self._emit_status(__event_emitter__, label, done=True)
                 return HTMLResponse(
                     content=document,
