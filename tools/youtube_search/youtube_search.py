@@ -412,6 +412,12 @@ class Tools:
     # or full watch/embed URL) and the embed is built locally, exactly like
     # the Open WebUI video embedder's YouTube fast-path.
     #
+    # Quality: vq=hd720 is a playback hint — YouTube starts at 720p when
+    # the video offers it and the connection allows, else it picks the best
+    # available quality. It is not a guarantee (the user can change it in
+    # the player). There is no way to force 30fps: 60fps videos play at
+    # 60fps automatically and no embed parameter controls frame rate.
+    #
     # Sizing (same sandbox constraints as any Open WebUI embed):
     #  - `vh`/`vw` inside the sandboxed iframe refer to the iframe box
     #    (~150px initial), NOT the browser viewport. Any viewport cap is
@@ -548,7 +554,7 @@ body{{display:flex;align-items:center;justify-content:center;padding:16px}}
                         "view needs an 11-character YouTube video ID "
                         "(or a watch/embed URL) in id",
                     )
-                embed_url = f"https://www.youtube.com/embed/{embed_id}?rel=0"
+                embed_url = f"https://www.youtube.com/embed/{embed_id}?rel=0&vq=hd720"
                 document = self._build_embed_document(embed_url, title="YouTube video")
                 await self._emit_status(__event_emitter__, label, done=True)
                 return HTMLResponse(
