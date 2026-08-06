@@ -4,16 +4,19 @@ id: youtube_search
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Search YouTube videos, channels, playlists, get transcripts, and more.
+description: Search YouTube videos, channels, playlists, get transcripts, and embed videos inline in the chat.
 required_open_webui_version: 0.5.0
 requirements: httpx
-version: 1.0.0
+version: 1.1.0
 licence: MIT
 """
 
 from typing import Optional
+import html as _html
+
 import httpx
 from pydantic import BaseModel, Field
+from fastapi.responses import HTMLResponse
 
 
 class Tools:
@@ -129,6 +132,12 @@ class Tools:
                 if lang:
                     params["language"] = lang
                 return f"{base}/transcript", params
+
+        elif action == "view":
+            # Embeds a video in the chat. Like get+video, it fetches the
+            # metadata via /video to confirm the ID, then returns a Rich UI
+            # embed instead of Markdown.
+            return f"{base}/video", {"video_id": kwargs["video_id"]}
 
         elif action == "list":
             if rtype == "channel":
@@ -392,6 +401,76 @@ class Tools:
         return f"**Error:** {error_code}\n{detail}"
 
     # ------------------------------------------------------------------ #
+    # Rich UI embed (HTMLResponse)
+    # ------------------------------------------------------------------ #
+    #
+    # action="view" returns a bare HTMLResponse (not a tuple). Open WebUI's
+    # middleware detects it, emits the `embeds` event via Socket.IO, and the
+    # frontend renders it inline as a sandboxed iframe. The LLM never sees
+    # the HTML and receives only the middleware's generic message.
+    #
+    # Sizing (same sandbox constraints as any Open WebUI embed):
+    #  - `vh`/`vw` inside the sandboxed iframe refer to the iframe box
+    #    (~150px initial), NOT the browser viewport. Any viewport cap is
+    #    expressed via `screen.availHeight` (readable in the sandbox): the
+    #    height never exceeds 65% of the available screen height.
+    #  - The width derives from the chat container width and the video's
+    #    aspect ratio. YouTube embeds are 16/9 by design.
+    #  - `reportHeight()` posts the document's own height so the iframe
+    #    hugs the content instead of staying at the tiny default box.
+    #
+    # Reimplemented from scratch for this tool (the author owns both this
+    # repo and the Open WebUI video embedder; no credit requested).
+
+    @staticmethod
+    def _build_embed_document(embed_url: str, title: str = "") -> str:
+        """Build a self-contained HTML document embedding a YouTube iframe."""
+        src = _html.escape(embed_url, quote=True)
+        safe_title = _html.escape(title, quote=True)
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{{color-scheme:light dark}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+html,body{{height:100%;overflow:hidden;background:transparent}}
+body{{display:flex;align-items:center;justify-content:center;padding:16px}}
+#player{{position:relative;width:100%;max-width:100%;border-radius:12px;overflow:hidden;background:#000;aspect-ratio:16/9}}
+#player iframe{{position:absolute;inset:0;width:100%;height:100%;border:0}}
+</style>
+</head>
+<body>
+<div id="player">
+<iframe src="{src}" title="{safe_title}" allow="autoplay;fullscreen" allowfullscreen loading="lazy"></iframe>
+</div>
+<script>
+(function(){{
+  var player=document.getElementById('player');
+  function reportHeight(){{
+    parent.postMessage({{type:'iframe:height',height:document.documentElement.scrollHeight}},'*');
+  }}
+  function fit(){{
+    var maxH=(screen.availHeight||screen.height||0)*0.65;
+    var cw=document.documentElement.clientWidth;
+    var w=cw;
+    if(maxH>0){{var wByH=maxH*16/9;if(wByH>0&&wByH<w)w=wByH;}}
+    player.style.width=w+'px';
+    player.style.height=(w*9/16)+'px';
+    reportHeight();
+  }}
+  window.addEventListener('load',fit);
+  addEventListener('resize',fit);
+  new ResizeObserver(fit).observe(document.body);
+  fit();
+}})();
+</script>
+</body>
+</html>
+"""
+
+    # ------------------------------------------------------------------ #
     # Public tool method
     # ------------------------------------------------------------------ #
 
@@ -414,7 +493,7 @@ class Tools:
         action (verb) + type (resource) determine what happens.
         verb is always an action, type is always the thing being acted on.
 
-        :param action: Verb: search | get | list
+        :param action: Verb: search | get | list | view
 
             **search** — find content by keyword.
               Needs ``query``. ``type`` selects what to search for.
@@ -436,6 +515,12 @@ class Tools:
               * type=channel → needs handle (@handle, handle, or UCID)
               * type=playlist → needs playlist_id
 
+            **view** — embed a single video in the chat as a Rich UI player.
+              Needs ``video_id``. Returns an embedded YouTube player
+              (HTMLResponse) that Open WebUI renders inline in the chat;
+              this is a terminal result — the player is shown to the user
+              and the LLM sees only the middleware's generic message.
+
             **Workflow for channels:**
               1. action=search, type=channel, query="Nate Gentile"
                  → returns @NateGentile7
@@ -444,7 +529,7 @@ class Tools:
 
         :param type: Resource type: video (default), channel, playlist, transcript.
         :param query: Search term (required for action=search)
-        :param video_id: YouTube video ID (required for action=get with type=video|transcript)
+        :param video_id: YouTube video ID (required for action=get with type=video|transcript, and for action=view)
         :param handle: Channel identifier (required for action=list with type=channel).
             Accepts @handle (``@NateGentile7``), handle without @ (``NateGentile7``),
             or UCID (``UC36xmz34q...``).
@@ -470,6 +555,7 @@ class Tools:
             ("get", "transcript"): "Fetching transcript...",
             ("list", "channel"): "Fetching channel videos...",
             ("list", "playlist"): "Fetching playlist videos...",
+            ("view", "video"): "Embedding video...",
         }
         label = status_map.get((action, type), "Processing...")
         await self._emit_status(__event_emitter__, label)
@@ -521,6 +607,17 @@ class Tools:
                 return self._fmt_video(data)
             elif type == "transcript":
                 return self._fmt_transcript(data)
+
+        elif action == "view":
+            if type == "video":
+                video_id = data.get("id") or video_id
+                title = data.get("title", "YouTube video")
+                embed_url = f"https://www.youtube.com/embed/{video_id}?rel=0"
+                document = self._build_embed_document(embed_url, title=title)
+                return HTMLResponse(
+                    content=document,
+                    headers={"Content-Disposition": "inline"},
+                )
 
         elif action == "list":
             if type == "channel":

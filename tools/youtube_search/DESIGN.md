@@ -19,10 +19,10 @@ id: youtube_search
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Search YouTube videos, channels, playlists, get transcripts, and more.
+description: Search YouTube videos, channels, playlists, get transcripts, and embed videos inline in the chat.
 required_open_webui_version: 0.5.0
 requirements: httpx
-version: 1.0.0
+version: 1.1.0
 licence: MIT
 """
 ```
@@ -614,10 +614,10 @@ completamente asíncronas del engine:
 ```python
 async def youtube_tool(
     self,
-    action: str,              # Verb: search | get | list
+    action: str,              # Verb: search | get | list | view
     type: str = "video",      # Resource: video | channel | playlist | transcript
     query: str = "",          # For action=search: search term
-    video_id: str = "",       # For action=get + type=video|transcript
+    video_id: str = "",       # For action=get + type=video|transcript, and action=view
     handle: str = "",   # For action=list + type=channel
     playlist_id: str = "",    # For action=list + type=playlist
     max_results: Optional[int] = None,  # If omitted, falls back to UserValve default_results
@@ -628,7 +628,7 @@ async def youtube_tool(
     """
     Unified tool for YouTube. action (verb) + type (resource) determine the call.
 
-    :param action: Verb: search | get | list
+    :param action: Verb: search | get | list | view
 
         search + type=video     → search videos
         search + type=channel   → search channels (returns @handle)
@@ -637,10 +637,11 @@ async def youtube_tool(
         get + type=transcript   → timed transcript
         list + type=channel     → list channel videos (needs @handle)
         list + type=playlist    → list playlist videos (needs id)
+        view + type=video       → embed the video in the chat (Rich UI player)
 
     :param type: Resource type: video, channel, playlist, transcript
     :param query: Search term (required for action=search)
-    :param video_id: YouTube video ID (required for get+video|transcript)
+    :param video_id: YouTube video ID (required for get+video|transcript, and view)
     :param handle: @handle, handle, or UCID (required for list+channel).
         Does NOT accept display names.
     :param playlist_id: Playlist ID (required for list+playlist)
@@ -698,6 +699,7 @@ await __event_emitter__(
 | `search` | `playlist` | `query` | `max_results` | `GET /search` | List of playlists with id |
 | `get` | `video` | `video_id` | — | `GET /video` | Full video metadata (likes, date, tags) |
 | `get` | `transcript` | `video_id` | `language` | `GET /transcript` | Timed transcript fragments |
+| `view` | `video` | `video_id` | — | `GET /video` | Rich UI embed (HTMLResponse) of the video in the chat |
 | `list` | `channel` | `handle` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
 | `list` | `playlist` | `playlist_id` | `max_results` | `GET /playlist` | Playlist info + list of videos |
 
@@ -738,6 +740,11 @@ On errors:
 1. `youtube_tool(action="get", type="transcript", video_id="dQw4w9WgXcQ", language="en")`
 2. LLM summarises the transcript text
 
+### Flow 5: View / embed a video
+1. `youtube_tool(action="view", type="video", video_id="dQw4w9WgXcQ")`
+2. The video player is embedded directly in the chat (Rich UI) — a terminal
+   result, no further LLM action needed.
+
 ---
 
 ## Example User Prompts
@@ -756,6 +763,7 @@ On errors:
 | "Who uploaded it?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `channel` |
 | "What is this video about?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `description` |
 | "How long is it?" | `youtube_tool(action="get", type="video", ...)` or search → `duration` |
+| "Play/show me this video" | `youtube_tool(action="view", type="video", video_id="dQw4w9WgXcQ")` → Rich UI embed in chat |
 | "Summarise this video" | `youtube_tool(action="get", type="transcript", video_id="...", language="en")` then LLM summarises |
 | "What did they say at minute 2?" | `youtube_tool(action="get", type="transcript", video_id="...", language="en")` → filter around 120s |
 | "Give me the link to that video" | Reconstruct URL: `https://www.youtube.com/watch?v={id}` |
