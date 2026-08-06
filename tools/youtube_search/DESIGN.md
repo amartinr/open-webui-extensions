@@ -22,7 +22,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Search YouTube videos, channels, playlists, get transcripts, and embed videos inline in the chat.
 required_open_webui_version: 0.5.0
 requirements: httpx
-version: 1.1.0
+version: 1.2.0
 licence: MIT
 """
 ```
@@ -617,38 +617,28 @@ async def youtube_tool(
     action: str,              # Verb: search | get | list | view
     type: str = "video",      # Resource: video | channel | playlist | transcript
     query: str = "",          # For action=search: search term
-    video_id: str = "",       # For action=get + type=video|transcript, and action=view
-    handle: str = "",   # For action=list + type=channel
-    playlist_id: str = "",    # For action=list + type=playlist
+    id: str = "",             # Resource id, matches type (video id/handle/playlist id)
     max_results: Optional[int] = None,  # If omitted, falls back to UserValve default_results
     sort: str = "relevance",  # Sort order
     language: Optional[str] = None,  # For get+transcript
     __event_emitter__=None,   # Injected by Open WebUI
 ) -> str:
     """
-    Unified tool for YouTube. action (verb) + type (resource) determine the call.
+    Query YouTube via the YT DLP API. action (verb) + type (resource) determine the call:
 
-    :param action: Verb: search | get | list | view
+    - search: find content by keyword. Needs query. type=video (supports sort) | channel (returns @handle) | playlist (returns id)
+    - get: fetch details for one item. Needs id. type=video (likes, upload date, tags, description) | transcript (timed fragments, supports language)
+    - list: enumerate videos from a known resource. Needs id (channel @handle/handle/UCID or playlist id). Does not search
+    - view: embed a video inline in the chat as a Rich UI player. Builds the YouTube iframe directly from id — NO API call, so it works even when YouTube blocks automated extraction. Terminal result: the player renders in the chat and the LLM sees only the middleware's generic message
 
-        search + type=video     → search videos
-        search + type=channel   → search channels (returns @handle)
-        search + type=playlist  → search playlists
-        get + type=video        → video metadata (likes, date, tags)
-        get + type=transcript   → timed transcript
-        list + type=channel     → list channel videos (needs @handle)
-        list + type=playlist    → list playlist videos (needs id)
-        view + type=video       → embed the video in the chat (Rich UI player)
-
-    :param type: Resource type: video, channel, playlist, transcript
-    :param query: Search term (required for action=search)
-    :param video_id: YouTube video ID (required for get+video|transcript, and view)
-    :param handle: @handle, handle, or UCID (required for list+channel).
-        Does NOT accept display names.
-    :param playlist_id: Playlist ID (required for list+playlist)
-    :param max_results: Max results. Resolved against UserValve/AdminValve.
-    :param sort: search+video → relevance/views/duration. list+channel → views/date/duration.
-    :param language: Language for get+transcript. Falls back to UserValve preferred_language.
-    :param __event_emitter__: Injected by Open WebUI
+    :param action: search | get | list | view
+    :param type: video (default), channel, playlist, transcript
+    :param query: Search term (required for search)
+    :param id: Identifier of the resource, matching type: 11-char video ID or watch/embed URL (get+video, get+transcript, view), channel @handle/handle/UCID (list+channel), or playlist ID (list+playlist)
+    :param max_results: Max results; omitted = UserValve default, clamped by UserValve and AdminValve caps
+    :param sort: search+video: relevance (default), views, duration. list+channel: views (default), date, duration
+    :param language: Transcript language (get+transcript only); omitted = UserValve preferred_language
+    :param __event_emitter__: Injected by Open WebUI for status events
     """
 ```
 
@@ -697,11 +687,11 @@ await __event_emitter__(
 | `search` | `video` | `query` | `max_results`, `sort` | `GET /search` | List of videos |
 | `search` | `channel` | `query` | `max_results` | `GET /search` | List of channels with @handle |
 | `search` | `playlist` | `query` | `max_results` | `GET /search` | List of playlists with id |
-| `get` | `video` | `video_id` | — | `GET /video` | Full video metadata (likes, date, tags) |
-| `get` | `transcript` | `video_id` | `language` | `GET /transcript` | Timed transcript fragments |
-| `view` | `video` | `video_id` | — | `GET /video` | Rich UI embed (HTMLResponse) of the video in the chat |
-| `list` | `channel` | `handle` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
-| `list` | `playlist` | `playlist_id` | `max_results` | `GET /playlist` | Playlist info + list of videos |
+| `get` | `video` | `id` | — | `GET /video` | Full video metadata (likes, date, tags) |
+| `get` | `transcript` | `id` | `language` | `GET /transcript` | Timed transcript fragments |
+| `view` | `video` | `id` | — | *(none — no API call)* | Rich UI embed (HTMLResponse) of the video in the chat |
+| `list` | `channel` | `id` | `max_results`, `sort` | `GET /channel` | Channel info + list of videos |
+| `list` | `playlist` | `id` | `max_results` | `GET /playlist` | Playlist info + list of videos |
 
 ### Error handling
 
@@ -722,28 +712,32 @@ On errors:
 
 ### Flow 1: Search + metadata (videos)
 1. `youtube_tool(action="search", type="video", query="rick astley", max_results=3)`
-2. If likes or upload date needed → `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")`
+2. If likes or upload date needed → `youtube_tool(action="get", type="video", id="dQw4w9WgXcQ")`
 
 ### Flow 2: Search non-video content
 1. `youtube_tool(action="search", type="playlist", query="machine learning", max_results=3)`
-2. Get playlist contents → `youtube_tool(action="list", type="playlist", playlist_id="PL...", max_results=10)`
+2. Get playlist contents → `youtube_tool(action="list", type="playlist", id="PL...", max_results=10)`
 
 1. `youtube_tool(action="search", type="channel", query="python", max_results=3)`
-2. Get channel videos → `youtube_tool(action="list", type="channel", handle="@Fireship", max_results=10)`
+2. Get channel videos → `youtube_tool(action="list", type="channel", id="@Fireship", max_results=10)`
 
 ### Flow 3: Explore channel or playlist
-1. `youtube_tool(action="list", type="channel", handle="@statquest", max_results=5, sort="views")`
-2. Get details of one video → `youtube_tool(action="get", type="video", video_id="h5o1n1QMcmM")`
-3. Get transcript → `youtube_tool(action="get", type="transcript", video_id="h5o1n1QMcmM", language="en")`
+1. `youtube_tool(action="list", type="channel", id="@statquest", max_results=5, sort="views")`
+2. Get details of one video → `youtube_tool(action="get", type="video", id="h5o1n1QMcmM")`
+3. Get transcript → `youtube_tool(action="get", type="transcript", id="h5o1n1QMcmM", language="en")`
 
 ### Flow 4: Summarise
-1. `youtube_tool(action="get", type="transcript", video_id="dQw4w9WgXcQ", language="en")`
+1. `youtube_tool(action="get", type="transcript", id="dQw4w9WgXcQ", language="en")`
 2. LLM summarises the transcript text
 
 ### Flow 5: View / embed a video
-1. `youtube_tool(action="view", type="video", video_id="dQw4w9WgXcQ")`
+1. `youtube_tool(action="view", type="video", id="dQw4w9WgXcQ")`
 2. The video player is embedded directly in the chat (Rich UI) — a terminal
    result, no further LLM action needed.
+
+   The embed iframe is built directly from the video ID, **without calling
+   the YT DLP API** — YouTube blocks automated metadata extraction, but the
+   official `youtube.com/embed/<id>` iframe works regardless.
 
 ---
 
@@ -756,22 +750,22 @@ On errors:
 | "Show the longest videos about..." | `youtube_tool(action="search", type="video", query="...", max_results=5, sort="duration")` |
 | "Find playlists about machine learning" | `youtube_tool(action="search", type="playlist", query="machine learning", max_results=5)` |
 | "Find channels that teach Python" | `youtube_tool(action="search", type="channel", query="python", max_results=5)` |
-| "Show me what's on the @Fireship channel" | `youtube_tool(action="list", type="channel", handle="@Fireship", max_results=10, sort="views")` |
-| "List videos in this playlist..." | `youtube_tool(action="list", type="playlist", playlist_id="PLblh5JKOoLU...", max_results=20)` |
-| "How many views does this video have?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `views` |
-| "When was it published?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `upload_date` |
-| "Who uploaded it?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `channel` |
-| "What is this video about?" | `youtube_tool(action="get", type="video", video_id="dQw4w9WgXcQ")` → `description` |
+| "Show me what's on the @Fireship channel" | `youtube_tool(action="list", type="channel", id="@Fireship", max_results=10, sort="views")` |
+| "List videos in this playlist..." | `youtube_tool(action="list", type="playlist", id="PLblh5JKOoLU...", max_results=20)` |
+| "How many views does this video have?" | `youtube_tool(action="get", type="video", id="dQw4w9WgXcQ")` → `views` |
+| "When was it published?" | `youtube_tool(action="get", type="video", id="dQw4w9WgXcQ")` → `upload_date` |
+| "Who uploaded it?" | `youtube_tool(action="get", type="video", id="dQw4w9WgXcQ")` → `channel` |
+| "What is this video about?" | `youtube_tool(action="get", type="video", id="dQw4w9WgXcQ")` → `description` |
 | "How long is it?" | `youtube_tool(action="get", type="video", ...)` or search → `duration` |
-| "Play/show me this video" | `youtube_tool(action="view", type="video", video_id="dQw4w9WgXcQ")` → Rich UI embed in chat |
-| "Summarise this video" | `youtube_tool(action="get", type="transcript", video_id="...", language="en")` then LLM summarises |
-| "What did they say at minute 2?" | `youtube_tool(action="get", type="transcript", video_id="...", language="en")` → filter around 120s |
+| "Play/show me this video" | `youtube_tool(action="view", type="video", id="dQw4w9WgXcQ")` → Rich UI embed in chat |
+| "Summarise this video" | `youtube_tool(action="get", type="transcript", id="...", language="en")` then LLM summarises |
+| "What did they say at minute 2?" | `youtube_tool(action="get", type="transcript", id="...", language="en")` → filter around 120s |
 | "Give me the link to that video" | Reconstruct URL: `https://www.youtube.com/watch?v={id}` |
 
 **Flow tips for the LLM:**
 - For lists with sorting (`views`, `duration`), present results ordered from highest to lowest.
 - `likes` is only available via `action="get"` + `type="video"`, not via search. `upload_date` is now included in search results and video listings, so you can answer "when was it published?" without an extra `get+video` call.
-- When the user provides a video URL, extract the 11-character video ID after `v=` and use it as `video_id`.
+- When the user provides a video URL, extract the 11-character video ID after `v=` and use it as `id` (or pass the URL directly to `view`, which extracts it).
 - The API does not return `url` fields. Always construct URLs using the patterns in the URL Construction section.
 - Playlist and channel search results don't include per-video stats. Use `list` with the appropriate type to get those.
 - `channel` accepts @handle (`@statquest`), handle without @ (`statquest`), or UCID.
