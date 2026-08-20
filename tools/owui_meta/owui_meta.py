@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.18.0
+version: 0.19.0
 licence: MIT
 """
 
@@ -832,16 +832,35 @@ class Tools:
         tags = p.get("tags") or []
         if tags:
             lines.append("- Tags: " + ", ".join(tags))
-        for key, label in (
-            ("average_response_time", "Avg response time (s)"),
-            ("average_user_message_content_length", "Avg user msg length (chars)"),
-            ("average_assistant_message_content_length", "Avg assistant msg length (chars)"),
-            ("last_message_at", "Last message"),
+        for key, label, no_text_label in (
+            ("average_response_time", "Avg response time (s)", None),
+            ("average_user_message_content_length", "Avg user msg length (chars)", "(no text)"),
+            ("average_assistant_message_content_length", "Avg assistant msg length (chars)", "(no text)"),
+            ("last_message_at", "Last message", None),
         ):
+            if key not in p:
+                continue
             value = p.get(key)
-            if value is not None:
-                rendered = self._fmt_ts(value) if key == "last_message_at" else value
-                lines.append(f"- {label}: {rendered}")
+            if value is None:
+                if no_text_label is not None:
+                    lines.append(f"- {label}: {no_text_label}")
+                continue
+            rendered = self._fmt_ts(value) if key == "last_message_at" else value
+            lines.append(f"- {label}: {rendered}")
+        # Corrected-vs-backend note (Iteration 9 task 9.3): the raw
+        # stats/usage route reports 0.0 for assistant lengths on v0.10.2;
+        # the values above are recomputed from the chat's real message text.
+        corrected = []
+        for key, label in (
+            ("average_user_message_content_length", "user"),
+            ("average_assistant_message_content_length", "assistant"),
+        ):
+            backend = p.get(f"{key}_backend")
+            value = p.get(key)
+            if backend is not None and value is not None and backend != value:
+                corrected.append(f"{label} backend {backend} (0.0 = v0.10.2 bug)")
+        if corrected:
+            lines.append("- Note: " + "; ".join(corrected) + " — corrected above")
         lines.append(
             f"- Created: {self._fmt_ts(p.get('created_at'))} · "
             f"Updated: {self._fmt_ts(p.get('updated_at'))}"
@@ -1860,6 +1879,16 @@ class Tools:
         a failure of that route produces a clean error and never affects
         other methods.
 
+        Metric semantics (root-caused 2026-08-21, Iteration 9 task 9.3):
+        ``message_count`` counts every step on the main branch (including
+        textless reasoning steps); ``last_message_at`` is the last message's
+        timestamp and may differ from ``updated_at`` (the chat-row timestamp,
+        moved by renames/edits); ``history_*`` counts cover the whole message
+        tree. The two content-length averages are RECOMPUTED from the chat's
+        real message text (the EXPERIMENTAL route reports 0.0 for assistant
+        messages on v0.10.2 — a backend bug); the raw route values remain
+        available under ``…_backend``.
+
         :param chat_id: the chat's UUID.
         """
         output_format = self._resolve_output_format(__user__)
@@ -1910,7 +1939,55 @@ class Tools:
             )
             if k in found
         }
+        # The EXPERIMENTAL stats/usage route computes the length averages from
+        # the plain ``content`` string — empty for every v0.10.2 assistant
+        # message (text lives in output[].content[].text), so the assistant
+        # average is ALWAYS 0.0 regardless of real text (root-caused
+        # 2026-08-21, Iteration 9 task 9.3). Recompute both averages from the
+        # ChatResponse using the real message text; the raw backend values
+        # stay available under ``…_backend``. A fetch failure degrades to the
+        # backend values (never an error — this is enrichment, not the query).
+        lengths = await self._role_content_lengths(token, chat_id)
+        for role, key in (
+            ("user", "average_user_message_content_length"),
+            ("assistant", "average_assistant_message_content_length"),
+        ):
+            if key in stats:
+                stats[f"{key}_backend"] = stats[key]
+            if role in lengths:  # {} (fetch failed) → keep the backend values
+                stats[key] = lengths[role]
         return self._ok(stats, "chat_stats", output_format=output_format)
+
+    async def _role_content_lengths(self, token: str, chat_id: str) -> dict:
+        """Average real text length per role on the main branch (best-effort).
+
+        Returns ``{"user": float|None, "assistant": float|None}`` on success
+        (None = the role has no text-bearing messages, nothing to average —
+        never 0.0, which would masquerade as a measurement) or ``{}`` when
+        the chat fetch failed, so the caller keeps the backend values. This
+        enrichment must never break the stats call.
+        """
+        try:
+            _status, _ct, body = await self._api_get_json(
+                token, _ROUTE_CHAT.format(chat_id=chat_id)
+            )
+            raw = json.loads(body)
+        except Exception:
+            return {}
+        branch = self._main_branch_messages(raw)
+        by_role: dict[str, list[int]] = {}
+        for m in branch:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            text = self._message_text(m)
+            if role in ("user", "assistant") and text:
+                by_role.setdefault(role, []).append(len(text))
+        out: dict[str, Optional[float]] = {"user": None, "assistant": None}
+        for role, lengths in by_role.items():
+            if lengths:
+                out[role] = sum(lengths) / len(lengths)
+        return out
 
     async def get_my_folders(self, __request__: Any = None, __user__: dict = None,
                              __event_emitter__: Any = None) -> str:

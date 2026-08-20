@@ -240,7 +240,10 @@ async def test_get_chat_stats_finds_chat_across_irregular_pages():
     out = await tools.get_chat_stats(CHAT_ID, __request__=FakeRequest())
     # short pages (49 < 50) must NOT stop the iteration: pages 1, 2, 3 are
     # fetched, page 4 is empty (the declared total 149 > 148 accumulated).
-    assert [r.url.params["page"] for r in recorder.requests] == ["1", "2", "3", "4"]
+    # (Iteration 9 added a best-effort chat fetch for the recomputed length
+    # averages — filter the recorder to the stats/usage route.)
+    stats_requests = [r for r in recorder.requests if r.url.path == "/api/v1/chats/stats/usage"]
+    assert [r.url.params["page"] for r in stats_requests] == ["1", "2", "3", "4"]
     payload = json.loads(out)
     assert payload["id"] == CHAT_ID
     assert payload["message_count"] == 52

@@ -142,3 +142,119 @@ async def test_live_search_tag_consistent_with_get_my_chats_tag():
     n = min(len(by_search), len(by_list))
     # Both routes order by updated_at desc; the shared head must match.
     assert [c["id"] for c in by_search[:n]] == [c["id"] for c in by_list[:n]]
+
+
+# ── 9.3: chat stats — recomputed length averages (backend bug) ────────
+
+def _chat_response_payload(specs):
+    """Build a ChatResponse body for message specs [(role, text|None), ...].
+
+    ``None`` text = a textless step (e.g. a ``reasoning`` output), matching
+    the v0.10.2 shape: assistant text lives in ``output[].content[].text``
+    and plain ``content`` is empty.
+    """
+    messages = {}
+    prev = None
+    current = None
+    for i, (role, text) in enumerate(specs):
+        mid = f"m{i}"
+        if text is None:
+            msg = {"id": mid, "role": role, "parentId": prev, "content": "",
+                   "output": [{"type": "reasoning"}]}
+        else:
+            msg = {"id": mid, "role": role, "parentId": prev, "content": "",
+                   "output": [{"type": "message",
+                               "content": [{"type": "output_text", "text": text}]}]}
+        messages[mid] = msg
+        prev = mid
+        current = mid
+    return {"id": "chat1", "title": "T",
+            "chat": {"history": {"messages": messages, "currentId": current}}}
+
+
+def _stats_handler(chat_payload, stats_item):
+    def handler(request):
+        if request.url.path == "/api/v1/chats/stats/usage":
+            return json_response({"items": [stats_item], "total": 1})
+        if request.url.path == "/api/v1/chats/chat1":
+            return json_response(chat_payload)
+        raise AssertionError(f"unexpected path {request.url.path}")
+    return handler
+
+
+async def test_chat_stats_recomputes_length_averages():
+    user_texts = ["short", "a somewhat longer user message"]
+    asst_texts = ["assistant reply one", "assistant reply two is a bit longer"]
+    specs = [("user", t) for t in user_texts] + [("assistant", t) for t in asst_texts]
+    stats_item = {
+        "id": "chat1", "message_count": 4, "models": {}, "tags": [],
+        "history_message_count": 4, "history_user_message_count": 2,
+        "history_assistant_message_count": 2, "average_response_time": 1.5,
+        "average_user_message_content_length": 0.0,   # the v0.10.2 bug
+        "average_assistant_message_content_length": 0.0,
+        "last_message_at": 1000, "created_at": 100, "updated_at": 200,
+    }
+    tools = make_tools(_stats_handler(_chat_response_payload(specs), stats_item),
+                       base_url="http://webui.example.test", output_format="json")
+    data = json.loads(await tools.get_chat_stats("chat1", FakeRequest()))
+    exp_user = sum(len(t) for t in user_texts) / len(user_texts)
+    exp_asst = sum(len(t) for t in asst_texts) / len(asst_texts)
+    assert data["average_user_message_content_length"] == exp_user
+    assert data["average_assistant_message_content_length"] == exp_asst
+    # raw backend values preserved under …_backend
+    assert data["average_user_message_content_length_backend"] == 0.0
+    assert data["average_assistant_message_content_length_backend"] == 0.0
+
+
+async def test_chat_stats_no_text_yields_none_not_zero():
+    # Assistant with only reasoning output → recomputed average is None
+    # (never 0.0), so it cannot masquerade as a real measurement.
+    stats_item = {
+        "id": "chat1", "message_count": 2, "models": {}, "tags": [],
+        "average_user_message_content_length": 1.0,
+        "average_assistant_message_content_length": 0.0,
+        "last_message_at": 1, "created_at": 0, "updated_at": 1,
+    }
+    tools = make_tools(
+        _stats_handler(_chat_response_payload([("user", "hi"), ("assistant", None)]), stats_item),
+        base_url="http://webui.example.test", output_format="json",
+    )
+    data = json.loads(await tools.get_chat_stats("chat1", FakeRequest()))
+    assert data["average_user_message_content_length"] == 2.0
+    assert data["average_assistant_message_content_length"] is None
+    assert data["average_assistant_message_content_length_backend"] == 0.0
+
+
+async def test_chat_stats_markdown_notes_the_correction():
+    stats_item = {
+        "id": "chat1", "message_count": 2, "models": {}, "tags": [],
+        "average_user_message_content_length": 0.0,
+        "average_assistant_message_content_length": 0.0,
+        "last_message_at": 1, "created_at": 0, "updated_at": 1,
+    }
+    specs = [("user", "hello there"), ("assistant", "hi! how can I help today?")]
+    tools = make_tools(_stats_handler(_chat_response_payload(specs), stats_item),
+                       base_url="http://webui.example.test", output_format="markdown")
+    out = await tools.get_chat_stats("chat1", FakeRequest())
+    assert "Avg assistant msg length (chars): 25.0" in out
+    assert "corrected above" in out
+    assert "0.0 = v0.10.2 bug" in out
+
+
+async def test_chat_stats_keeps_backend_values_when_chat_fetch_fails():
+    def handler(request):
+        if request.url.path == "/api/v1/chats/stats/usage":
+            return json_response({"items": [{
+                "id": "chat1", "message_count": 1, "models": {}, "tags": [],
+                "average_user_message_content_length": 3.0,
+                "average_assistant_message_content_length": 0.0,
+                "last_message_at": 1, "created_at": 0, "updated_at": 1,
+            }], "total": 1})
+        if request.url.path == "/api/v1/chats/chat1":
+            return json_response({"error": "boom"}, status=500)
+        raise AssertionError(f"unexpected path {request.url.path}")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
+    data = json.loads(await tools.get_chat_stats("chat1", FakeRequest()))
+    # chat fetch failed → enrichment degrades to backend values, no error
+    assert data["average_user_message_content_length"] == 3.0
+    assert data["average_assistant_message_content_length"] == 0.0
