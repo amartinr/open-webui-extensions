@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** In progress — Iterations 0, 1, 3, 4, 6, 7 **done**; Iteration 2 **deferred to a future version**; Iteration 8 **planned (proposed 2026-08-20, backend-verified, not yet implemented)**; Iteration 5 **pending** (its live-validation findings were folded in manually, but the env-gated live suite + isolation tests are not yet committed)
+**Status:** In progress — Iterations 0, 1, 3, 4, 6, 7 and 8 (partial) **done**; Iteration 2 **deferred to a future version**; Iteration 8 **in progress — items 1, 7 (chat metadata/summary split) done, items 2–6 pending**; Iteration 5 **pending** (its live-validation findings were folded in manually, but the env-gated live suite + isolation tests are not yet committed)
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -265,7 +265,7 @@ Reviewed against Open WebUI source (`main` and the instance's v0.10.2) — not j
 - **Errors = `chat:message:error`** (the message error block, verified in the frontend `Chat.svelte`/`Error.svelte`), **never gated by `verbose`**, and **consolidated to at most one per tool call**: `_run` emits a single error on failure; a batch `delete_files` with per-file failures emits one "N of M file(s) could not be deleted" summary instead of one toast per file — the per-id detail stays in the returned text. This directly addresses the user's requirement: error visibility is reserved for real errors, and repeated failures never flood the user with toasts.
 - **Events never contain the token** (pinned by `test/test_events.py`: start+done, no-emitter no-op, `verbose=False` suppresses status but NOT errors, per-user override, single error on failure, single consolidated error on batch failures, no token in any event).
 
-## Iteration 8 — Chat organization metadata: tags, folders, archived & usage stats 📝 PLANNED (proposed 2026-08-20 — backend verified, not implemented)
+## Iteration 8 — Chat organization metadata: tags, folders, archived & usage stats 🚧 IN PROGRESS (items 1 & 7 done; 2–6 pending)
 
 **Commit:** `feat(owui_meta): surface chat tags, folders, archived chats and usage stats`
 
@@ -319,7 +319,22 @@ All probes ran with a user-role API key against `http://open-webui.private` (sam
 ### Tests
 - `test_route_map.py`: new cases — `get_my_tags` → `/api/v1/chats/all/tags`, `get_archived_chats` → `/api/v1/chats/archived`, `get_chat_stats` → `/api/v1/chats/stats/usage`, `get_my_folders` → `/api/v1/folders/` (slash asserted), and `get_my_chats` now sends `include_folders`/`include_pinned`.
 - `test_user_methods.py` / new `test_chat_metadata.py`: tags summarization (no user_id/meta leak), archived list, chat stats payload, folders 403 mapping, snippet surfaced in search, chat detail carries `folder_id` + `meta.tags`, invalid id rejected without request.
-- Full suite stays green; version bumped (`0.10.0 → 0.11.0`).
+- Full suite stays green; version bumped (`0.10.0 → 0.14.0`).
+
+### Progress log (2026-08-20)
+
+| Item | Status | Commit / version |
+|---|---|---|
+| 1. `get_my_chats` include_folders/include_pinned | ✅ DONE (tested live: the folder + pinned chats now appear) | `e65161d` → v0.11.0 |
+| 2. Tags surfaced (`get_my_tags`, `_summarize_chats` keeps tags) | ⏳ pending | — |
+| 3. `search_chats` UI prefixes + snippet | ⏳ pending | — |
+| 4. `get_archived_chats` | ⏳ pending | — |
+| 5. `get_chat_stats` (stats/usage, EXPERIMENTAL) | ⏳ pending | — |
+| 6. `get_my_folders` | ⏳ pending | — |
+| 7. Chat detail → **`get_chat_metadata`** (metadata only, no content) + **`get_chat_summary`** (metadata + head/tail snippet markdown-safe, fixed 3+3 constants) | ✅ DONE (tested live) | `a3f1e07`, `b813603`, `78d92de` → v0.14.0 |
+| — | Frontmatter version aligned to actual (was stuck at 0.12.0) | `fe00f43` |
+
+Remaining Iteration 8 items (2–6) implement the P1–P5 proposals corrected against the verified backend facts above.
 
 ## 8. Out of scope (per DESIGN §2)
 

@@ -3,7 +3,7 @@
 **Version:** 1.0
 **Date:** 2026-07-31
 **Author:** Abel (with technical assistance)
-**Status:** Design validated through real-world tests against the `open-webui.private` instance (v0.10.2)
+**Status:** Design validated through real-world tests against the `open-webui.private` instance (v0.10.2); implementation in progress — Iteration 8 (chat organization metadata) partially done (see PLAN.md progress log 2026-08-20)
 
 ---
 
@@ -185,28 +185,30 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 
 ### 6.1 Regular user (role `user`)
 
-| Tool method (suggested name) | Internal route |
-|---|---|
-| `get_my_profile()` | `GET /api/v1/auths` |
-| `get_models()` | `GET /api/models` |
-| `get_my_chats(limit)` | `GET /api/v1/chats` |
-| `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) |
-| `get_chat_metadata(chat_id)` | `GET /api/v1/chats/{id}` (metadata only: message_count, models, tags, folder, flags, dates; no message content in any format) |
-| `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results) |
-| `get_archived_chats()` | `GET /api/v1/chats/archived` (Iteration 8) |
-| `get_my_tags()` | `GET /api/v1/chats/all/tags` (Iteration 8 — tag catalog; `user_id`/`meta` not exposed) |
-| `get_chat_stats(chat_id)` | `GET /api/v1/chats/stats/usage` (Iteration 8 — **EXPERIMENTAL** endpoint; tags, message_count, models) |
-| `get_my_folders()` | `GET /api/v1/folders/` (Iteration 8 — trailing slash; may 403 if folders disabled on the instance) |
-| `get_shared_chats()` | `GET /api/v1/chats/shared` |
-| `get_pinned_chats()` | `GET /api/v1/chats/pinned` |
-| `get_my_files()` | `GET /api/v1/files` |
-| `get_file_content(file_id)` | `GET /api/v1/files/{id}/content` |
-| `delete_files(file_ids)` | per id: `GET /api/v1/files/{id}` + `DELETE /api/v1/files/{id}` (write, explicit — see §7.4) |
-| `get_my_prompts()` | `GET /api/v1/prompts` |
-| `get_my_tools()` | `GET /api/v1/tools` |
-| `get_knowledge_bases()` | `GET /api/v1/knowledge` |
-| `get_my_skills()` | `GET /api/v1/skills` |
-| `get_skill(skill_id)` | `GET /api/v1/skills/id/{skill_id}` |
+> **Implemented:** all rows below with a ✓ are live methods in the tool (v0.14.0). The remaining rows (marked “Iteration 8, pending”) are the planned P1–P5 extensions, backend-verified but not yet implemented.
+
+| Tool method (suggested name) | Internal route | Status |
+|---|---|---|
+| `get_my_profile()` | `GET /api/v1/auths` | ✓ |
+| `get_models()` | `GET /api/models` | ✓ |
+| `get_my_chats(limit)` | `GET /api/v1/chats` (with `include_folders`/`include_pinned`) | ✓ |
+| `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) | ✓ |
+| `get_chat_metadata(chat_id)` | `GET /api/v1/chats/{id}` (metadata only: message_count, models, tags, folder, flags, dates; no message content in any format) | ✓ |
+| `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results) | ✓ |
+| `get_archived_chats()` | `GET /api/v1/chats/archived` | Iteration 8, pending |
+| `get_my_tags()` | `GET /api/v1/chats/all/tags` (tag catalog; `user_id`/`meta` not exposed) | Iteration 8, pending |
+| `get_chat_stats(chat_id)` | `GET /api/v1/chats/stats/usage` (**EXPERIMENTAL** endpoint; tags, message_count, models) | Iteration 8, pending |
+| `get_my_folders()` | `GET /api/v1/folders/` (trailing slash; may 403 if folders disabled on the instance) | Iteration 8, pending |
+| `get_shared_chats()` | `GET /api/v1/chats/shared` | ✓ |
+| `get_pinned_chats()` | `GET /api/v1/chats/pinned` | ✓ |
+| `get_my_files()` | `GET /api/v1/files` | ✓ |
+| `get_file_content(file_id)` | `GET /api/v1/files/{id}/content` | ✓ |
+| `delete_files(file_ids)` | per id: `GET /api/v1/files/{id}` + `DELETE /api/v1/files/{id}` (write, explicit — see §7.4) | ✓ |
+| `get_my_prompts()` | `GET /api/v1/prompts` | ✓ |
+| `get_my_tools()` | `GET /api/v1/tools` | ✓ |
+| `get_knowledge_bases()` | `GET /api/v1/knowledge` | ✓ |
+| `get_my_skills()` | `GET /api/v1/skills` | ✓ |
+| `get_skill(skill_id)` | `GET /api/v1/skills/id/{skill_id}` | ✓ |
 
 ### 6.2 Admin only (role `admin`, with `__user__.role == 'admin'` check)
 
