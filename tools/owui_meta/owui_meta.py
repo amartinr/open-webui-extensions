@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.17.0
+version: 0.18.0
 licence: MIT
 """
 
@@ -1499,7 +1499,10 @@ class Tools:
         them from the default listing unless include_folders/include_pinned
         are sent — verified live 2026-08-20). Pass ``tag`` to filter the
         list to chats carrying that tag (server-side, pure tag filter — not
-        a text search; e.g. ``tag="tool"``).
+        a text search; e.g. ``tag="tool"``). Unlike search_chats, this tag
+        filter does NOT exclude archived chats. A ``tag`` filter with zero
+        matches triggers the backend's orphan-tag cleanup (the tag's catalog
+        entry is deleted — intended behavior; per-chat tags are untouched).
 
         :param limit: how many chats to return (default 10, max 100).
         :param sort_by: "updated_at" or "created_at" (default "updated_at").
@@ -1725,6 +1728,15 @@ class Tools:
         ``archived:true/false``, ``shared:true/false`` and ``tag:none``
         (chats with no tags) — e.g. ``search_chats("tag:budget")``. Results
         include a per-chat ``snippet`` of the matched message when present.
+        All prefixes combine with the text as AND (server-side scope
+        limiters, verified live 2026-08-21) — ``"foo tag:bar"`` matches only
+        chats matching ``foo`` that also carry the tag ``bar``.
+
+        Backend notes: (1) a LONE ``tag:`` query with zero matches triggers
+        the backend's orphan-tag cleanup — the tag's catalog entry is
+        deleted (intended behavior; per-chat tags are untouched); (2) search
+        excludes archived chats, so a tag used only on archived chats is
+        cleaned here while ``get_my_chats(tag=...)`` still sees it.
 
         :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted).
         """
