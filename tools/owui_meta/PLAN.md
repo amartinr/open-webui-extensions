@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** In progress — Iterations 0, 1, 3, 6 and 7 **done**; Iteration 2 **deferred to a future version**; Iterations 4–5 pending
+**Status:** In progress — Iterations 0, 1, 3, 4, 6, 7 **done**; Iteration 2 **deferred to a future version**; Iteration 8 **planned (proposed 2026-08-20, backend-verified, not yet implemented)**; Iteration 5 **pending** (its live-validation findings were folded in manually, but the env-gated live suite + isolation tests are not yet committed)
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -116,7 +116,7 @@ Implements DESIGN §8.6 across the list methods:
 
 **Definition of done:** a 100+ item dataset is queryable with filtering and sorting in bounded output — proven by tests (73 total green).
 
-## Iteration 4 — Status events (UX) ✅ DONE (commit pending)
+## Iteration 4 — Status events (UX) ✅ DONE (commit `3a04a52`)
 
 **Commit:** `feat(owui_meta): emit status events during execution`
 
@@ -194,12 +194,13 @@ These changes were not in the initial plan; they emerged during development / li
 | 10 | Scope decision (user) | **Admin-only methods deferred** (Iteration 2 removed from current scope) | The user decided not to implement admin methods for now; moved to a future version. Tracked in “Future versions”. | — |
 | 11 | Security review (user question) | **Profile endpoint echoes the token — field whitelist added** | `GET /api/v1/auths/` (`get_session_user`, v0.10.2) returns `token`/`token_type`/`expires_at` in its body (frontend session refresh). `get_my_profile` previously passed the raw body to `_ok`, so **json mode dumped the user's session credential into the model context**. Now `_get_my_profile` builds an explicit field whitelist; token fields never serialize, in either format. Regression test: `test_profile_token_echo_never_reaches_model`. | `49727a5` |
 | 12 | Security audit (user request) | **Whitelisted the last raw pass-throughs + documented secret-bearing GETs as never-allowed** | Audited every allowlisted endpoint against v0.10.2 source: no other token echoes. `get_chat` (json) dumped bookkeeping noise (`user_id`, `meta`, `tasks`, `summary`, `folder_id`) and `get_skill` (json) embedded the owner's `UserResponse` (another user's email for shared skills) — both now whitelisted. Also pinned in DESIGN §6.3: `auths/api_key`, `tools/id/{id}/valves(+/user)`, `tools/id/{id}`, `knowledge/external/connections*`, `*/admin/*` configs are **never** to be added to the allowlist (they return credentials). Tests: `test_get_skill_strips_owner_and_bookkeeping`, `test_get_chat_strips_bookkeeping_fields`. | `1ce2da9` |
-| 13 | Hardening (user question: “¿implementado?”) | **Output-boundary guards against accidental leaks** | Whitelists are per-method/manual; a future method or server field could leak. Added two structural guards: `_sanitize` (drops credential-named keys with string values; boolean flags like `api_keys` kept) applied in `_ok` for both formats, and `_run` redacting the raw token string from success and error output (`request=__request__` threaded through all 14 wrappers). Plus `test/test_security.py`: sanitizer unit, future-raw-pass-through simulation, token redaction inside a whitelisted field, redaction in the error path, static no-raw-body tripwire. | (this commit) |
+| 13 | Hardening (user question: “¿implementado?”) | **Output-boundary guards against accidental leaks** | Whitelists are per-method/manual; a future method or server field could leak. Added two structural guards: `_sanitize` (drops credential-named keys with string values; boolean flags like `api_keys` kept) applied in `_ok` for both formats, and `_run` redacting the raw token string from success and error output (`request=__request__` threaded through all 14 wrappers). Plus `test/test_security.py`: sanitizer unit, future-raw-pass-through simulation, token redaction inside a whitelisted field, redaction in the error path, static no-raw-body tripwire. | `9ae1506` |
 | 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite in Iteration 5 is still pending; these were one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
-| 14 | Design decision (user) | **`get_file_content` attaches files to the UI via the native `files` event** — image → inline preview + download, text → 100-char snippet (no dump), binary → note. Best-effort metadata call to `GET /api/v1/files/{id}` (added to the allowlist) for the attachment display name; best-effort `_emit_files` so a dead UI socket never breaks the tool call. Read opt-in (`max_chars`/`offset`) deferred — see §7. | Verified against Open WebUI source: the `files` event is persisted by `socket/main.py` and rendered by `ResponseMessage.svelte`/`FileItem.svelte`/`Image.svelte`; the item schema is pinned by `test/test_file_attachment.py`. See §7 design note. | (this commit) |
-| 15 | Design decision (user) | **File cleanup: `delete_files(file_ids)`** — the first write operation, an explicit exception to read-only v1. Accepts a list of ids (whole list validated up front; dedup; capped by `MAX_DELETE_FILES`); per file: GET metadata first (report what disappears; a 404 never reaches the DELETE), then `DELETE /api/v1/files/{id}` (backend re-verifies owner/admin/write, cleans KB + vector index). Per-file failures are reported by id without aborting the rest. A dedicated orphan-list method was considered then dropped by user decision (the model derives orphans from `get_my_files()` `origin_chat_id` + `get_my_chats()`). HTTP engine generalized (`_fetch`/`_fetch_with_retry` take a method; new `_api_delete_json`). | Open WebUI keeps chat-attached files when a chat is deleted (verified in v0.10.2 `chats.py`: `delete_chat_by_id` never touches `Files`) — the orphan-cleanup case. See §7 design note. | (this commit) |
-| 16 | Design decision (user) | **Iteration 4 status events + error consolidation** — `status` events (start/done) gated by a `verbose` valve (admin + per-user, per-user overrides); errors are `chat:message:error`, always shown, and consolidated to ONE per tool call (batch delete failures → single "N of M failed" summary). Logs explicitly parked by user decision (2026-08-03). | smart_fetch_url UX pattern (DESIGN §8.5); the user asked to reserve error visibility for real errors and never flood the user with repeated toasts. See §7 design note. | (this commit) |
-| 17 | Design decision (user, "Opción B") | **Images embedded via `embeds` (HTML) instead of `files`** — `get_file_content` emits `{"type":"embeds",...}` with an HTML `<img>` fragment for images (rendered inline in the message by `FullHeightIframe` srcdoc, like a snippet); text/binaries keep the `files` attachment. The returned note is anti-markdown (mirrors `generate_image`: the model must not embed/display the image again). `_emit_embeds` + `_image_embed_html` helpers added. | The user reported the image appeared "as markdown" (the model wrote it from our note); generate_image (files event) works, but the user chose the HTML-embed strategy over the anti-MD note alone. Verified `embeds` is a native persisted event in v0.10.2 (socket/main.py + Chat.svelte + ResponseMessage.svelte). See §7 design note. | (this commit) |
+| 14 | Design decision (user) | **`get_file_content` attaches files to the UI via the native `files` event** — image → inline preview + download, text → 100-char snippet (no dump), binary → note. Best-effort metadata call to `GET /api/v1/files/{id}` (added to the allowlist) for the attachment display name; best-effort `_emit_files` so a dead UI socket never breaks the tool call. Read opt-in (`max_chars`/`offset`) deferred — see §7. | Verified against Open WebUI source: the `files` event is persisted by `socket/main.py` and rendered by `ResponseMessage.svelte`/`FileItem.svelte`/`Image.svelte`; the item schema is pinned by `test/test_file_attachment.py`. See §7 design note. | `5865848` |
+| 15 | Design decision (user) | **File cleanup: `delete_files(file_ids)`** — the first write operation, an explicit exception to read-only v1. Accepts a list of ids (whole list validated up front; dedup; capped by `MAX_DELETE_FILES`); per file: GET metadata first (report what disappears; a 404 never reaches the DELETE), then `DELETE /api/v1/files/{id}` (backend re-verifies owner/admin/write, cleans KB + vector index). Per-file failures are reported by id without aborting the rest. A dedicated orphan-list method was considered then dropped by user decision (the model derives orphans from `get_my_files()` `origin_chat_id` + `get_my_chats()`). HTTP engine generalized (`_fetch`/`_fetch_with_retry` take a method; new `_api_delete_json`). | Open WebUI keeps chat-attached files when a chat is deleted (verified in v0.10.2 `chats.py`: `delete_chat_by_id` never touches `Files`) — the orphan-cleanup case. See §7 design note. | `02395a5` |
+| 16 | Design decision (user) | **Iteration 4 status events + error consolidation** — `status` events (start/done) gated by a `verbose` valve (admin + per-user, per-user overrides); errors are `chat:message:error`, always shown, and consolidated to ONE per tool call (batch delete failures → single "N of M failed" summary). Logs explicitly parked by user decision (2026-08-03). | smart_fetch_url UX pattern (DESIGN §8.5); the user asked to reserve error visibility for real errors and never flood the user with repeated toasts. See §7 design note. | `3a04a52` |
+| 17 | Design decision (user, "Opción B") | **Images embedded via `embeds` (HTML) instead of `files`** — `get_file_content` emits `{"type":"embeds",...}` with an HTML `<img>` fragment for images (rendered inline in the message by `FullHeightIframe` srcdoc, like a snippet); text/binaries keep the `files` attachment. The returned note is anti-markdown (mirrors `generate_image`: the model must not embed/display the image again). `_emit_embeds` + `_image_embed_html` helpers added. | The user reported the image appeared "as markdown" (the model wrote it from our note); generate_image (files event) works, but the user chose the HTML-embed strategy over the anti-MD note alone. Verified `embeds` is a native persisted event in v0.10.2 (socket/main.py + Chat.svelte + ResponseMessage.svelte). See §7 design note. | `95ff280` |
+| 18 | Docs (2026-08-03) | **Multi-embed rendering note** — record that N embeds stack vertically (each `my-2 w-full`), so a future gallery must emit ONE embed wrapping several `<img>`. | Verified in v0.10.2 `ResponseMessage.svelte` (flex-wrap container, full-width children). See §7 design note. | `a482b51` |
 
 **Unchanged commitments:** scope confined to `tools/owui_meta/`; one commit per iteration; Conventional Commits; all docs/code in English; no credentials ever configured or stored.
 
@@ -263,6 +264,60 @@ Reviewed against Open WebUI source (`main` and the instance's v0.10.2) — not j
 - **Progress = `status` events** (start `done=False`, completion `done=True` with the same action label — "Reading your profile…", "Querying your chats…", "Listing your files…"…), the `smart_fetch_url` UX pattern (DESIGN §8.5). Gated by a new `verbose` valve (admin + per-user; per-user overrides admin; default `True`) so quiet users can turn them off. Wired through `_run(emitter=…, action=…, verbose=…)` — every public wrapper passes `__event_emitter__`.
 - **Errors = `chat:message:error`** (the message error block, verified in the frontend `Chat.svelte`/`Error.svelte`), **never gated by `verbose`**, and **consolidated to at most one per tool call**: `_run` emits a single error on failure; a batch `delete_files` with per-file failures emits one "N of M file(s) could not be deleted" summary instead of one toast per file — the per-id detail stays in the returned text. This directly addresses the user's requirement: error visibility is reserved for real errors, and repeated failures never flood the user with toasts.
 - **Events never contain the token** (pinned by `test/test_events.py`: start+done, no-emitter no-op, `verbose=False` suppresses status but NOT errors, per-user override, single error on failure, single consolidated error on batch failures, no token in any event).
+
+## Iteration 8 — Chat organization metadata: tags, folders, archived & usage stats 📝 PLANNED (proposed 2026-08-20 — backend verified, not implemented)
+
+**Commit:** `feat(owui_meta): surface chat tags, folders, archived chats and usage stats`
+
+Implements the **P1–P5 proposals** (extension brief 2026-08-20), re-validated against the v0.10.2 source **and** live probes against the instance (2026-08-20). Several brief claims were **corrected** after verification — see “Backend facts verified live” below.
+
+### Backend facts verified live (2026-08-20)
+
+All probes ran with a user-role API key against `http://open-webui.private` (same instance DESIGN was validated against):
+
+| Claim (brief) | Verified reality |
+|---|---|
+| “List items expose `folder_id`/`pinned`/`archived`” | ❌ **False.** `GET /api/v1/chats/` returns `ChatTitleIdResponse` = `id, title, created_at, updated_at, last_read_at, snippet` only. `include_folders`/`include_pinned` change **which rows** the SQL returns — they add **no fields** |
+| “Default list shows everything” | ❌ **False.** The default list **excludes** chats inside folders and pinned chats. Live: p.1 default 60 vs `include_folders+include_pinned` 60 (**+43 delta**); p.2 default 19 vs 60 (**+60 delta**); `stats/usage` reports **147 total**. So `get_my_chats` was silently hiding ~⅓ of the user's chats — fixed in this iteration |
+| “Filter by tag via `/api/v1/chats/tags?tag=…`” | ❌ It is **`POST /api/v1/chats/tags`** with JSON body `{name, skip, limit}` (no body → 422; `GET` on the path → 401). Returns `ChatTitleIdResponse` |
+| “Backend has a tag-filtered endpoint” | ✅ Yes (`POST /chats/tags`). **But** `search?text=tag:<name>` returns the **same results** with zero new surface — preferred |
+| Tags are stored inline in `meta.tags` + a per-user `tag` catalog | ✅ Confirmed. `GET /api/v1/chats/all/tags` (no trailing slash) returns `TagModel` (`id, name, user_id, meta`); 19 tags live |
+| “UI search supports filter prefixes” | ✅ Confirmed and **already server-side**: `tag:`, `folder:`, `pinned:true/false`, `archived:true/false`, `shared:true/false`, plus `tag:none` (= chats with no tags). Live-verified each |
+| Search returns a `snippet` | ✅ Confirmed: `search?text=` populates `snippet` per result. The tool was **dropping it** in `_summarize_chats` — surfaced now |
+| “Items expose pinned/archived flags” | ❌ Only `ChatResponse` (detail by id) carries `pinned`, `archived`, `folder_id`, `meta.tags`. List items never do |
+| Chat usage stats | ✅ `GET /api/v1/chats/stats/usage` (`page`, `items_per_page`) → `{items, total}`; each item: `tags`, `message_count`, `models`, averages, `last_message_at`. **EXPERIMENTAL** (may be removed in future releases) |
+| Folders | ✅ `GET /api/v1/folders/` (**with** trailing slash) → `FolderNameIdResponse` (`id, name, meta, parent_id, is_expanded, created_at, updated_at`); gated by `folders.enable` + `features.folders` permission → may 403 depending on the instance (not gated on this one: 2 folders live) |
+
+**Slash map verified live** (new routes): `folders/` WITH slash; `chats/all/tags`, `chats/archived`, `chats/stats/usage` WITHOUT slash; `POST chats/tags` without slash.
+
+### Changes
+
+1. **`get_my_chats`**: add `include_folders` / `include_pinned` query params to `GET /api/v1/chats/` (they only filter rows server-side; item fields stay the same). This makes the tool see folder + pinned chats it was silently missing. Pass `include_folders=true&include_pinned=true`.
+2. **Tags surfaced**:
+   - `get_my_tags()` → `GET /api/v1/chats/all/tags` (TagModel: id, name; user_id/meta not exposed to the model). Lets the model answer “which tags do you use?”.
+   - `_summarize_chats` keeps `tags` when present (search results do not carry them — list items never do — but `stats/usage` items do).
+3. **`search_chats` align with UI prefixes (P3)**: no new endpoint needed — the backend already parses `tag:`, `folder:`, `pinned:`, `archived:`, `shared:`. The tool:
+   - passes `text` through unmodified (it already does),
+   - surfaces the per-result `snippet` field (was dropped),
+   - documents the prefixes in the method docstring so the model can use them.
+4. **`get_archived_chats()`** → `GET /api/v1/chats/archived` (no slash) — `ChatTitleIdResponse` list, same summarization as `get_my_chats`.
+5. **`get_chat_stats(chat_id)`** (P4) → `GET /api/v1/chats/stats/usage` filtered client-side by id: `tags`, `message_count`, `models`, averages, `last_message_at`. Route marked EXPERIMENTAL in the docstring; failure → clean error, never crashes other methods. **Not** the export route (`/stats/export` is excluded by the query-only rule).
+6. **`get_my_folders()`** (P4) → `GET /api/v1/folders/` (trailing slash): name + id. A 403 (folders disabled on the instance) maps to a readable error.
+7. **`get_chat` detail**: extend the field whitelist with `folder_id` and `meta.tags` (the ChatResponse carries them; they were dropped). No raw body ever reaches `_ok` (tripwire unchanged).
+8. **Docs**: DESIGN §5.1/§6.1/§9 updated with the verified endpoints and lessons; README lists the new methods; this plan.
+
+### Security & correctness (unchanged invariants)
+- All new endpoints **read-only**, allowlisted, typed params only; no URL-taking param.
+- Content-Type validation + slash map honored (`folders/` has the slash; the rest don't).
+- `_sanitize`/`_redact` at the output boundary; tripwire test still passes.
+- Pagination caps (`MAX_PAGES`, `DEFAULT_PAGE_SIZE`) respected for `stats/usage`; `total` reported.
+- `delete_files` remains the only write operation; untouched.
+- The EXPERIMENTAL `stats/usage` route is optional/failure-tolerant: if it 4xx/5xxs, the method reports a clean error instead of breaking the tool.
+
+### Tests
+- `test_route_map.py`: new cases — `get_my_tags` → `/api/v1/chats/all/tags`, `get_archived_chats` → `/api/v1/chats/archived`, `get_chat_stats` → `/api/v1/chats/stats/usage`, `get_my_folders` → `/api/v1/folders/` (slash asserted), and `get_my_chats` now sends `include_folders`/`include_pinned`.
+- `test_user_methods.py` / new `test_chat_metadata.py`: tags summarization (no user_id/meta leak), archived list, chat stats payload, folders 403 mapping, snippet surfaced in search, chat detail carries `folder_id` + `meta.tags`, invalid id rejected without request.
+- Full suite stays green; version bumped (`0.10.0 → 0.11.0`).
 
 ## 8. Out of scope (per DESIGN §2)
 

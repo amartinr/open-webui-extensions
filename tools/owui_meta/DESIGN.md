@@ -140,9 +140,14 @@ Sources: **real curl tests with a `user`-role API key** against `http://open-web
 |---|---|---|
 | Profile | `GET /api/v1/auths/` (trailing slash) | Full profile: id, name, email, role, permissions. **⚠️ The body ALSO echoes the request token** (`token`/`token_type`/`expires_at` — `get_session_user` supports the frontend's session refresh); the tool **field-whitelists** the profile and the token never reaches the model (§7.2) |
 | Models | `GET /api/models` | OpenAI-compatible: `{"data":[{id, name, owned_by, info…}]}` |
-| Chats | `GET /api/v1/chats/` (trailing slash) | Array of your chats `{id, title, updated_at, created_at, …}` |
-| Chats | `GET /api/v1/chats/{id}` | Full chat with message history |
-| Chats | `GET /api/v1/chats/search?text=…` | Search (parameter confirmed: `text`, not `q`); **no trailing slash** |
+| Chats | `GET /api/v1/chats/` (trailing slash) | Array of `ChatTitleIdResponse` — **only** `id, title, created_at, updated_at, last_read_at, snippet`. **No `meta`/tags/folder/pinned/archived in the items.** Default listing **excludes chats inside folders and pinned chats** (verified live 2026-08-20: p.1 default 60 vs `include_folders+include_pinned` 60, delta +43; p.2 19 vs 60, delta +60; total 147 per `stats/usage`). `include_folders`/`include_pinned` change which rows are returned, never the fields |
+| Chats | `GET /api/v1/chats/{id}` | Full chat with message history (`ChatResponse`: also `pinned`, `archived`, `folder_id`, `meta.tags`) |
+| Chats | `GET /api/v1/chats/search?text=…` (no trailing slash) | Search (parameter confirmed: `text`, not `q`). Populates a `snippet` per result. **Filter prefixes work server-side**: `tag:<name>`, `tag:none` (chats without tags), `folder:<name>`, `pinned:true/false`, `archived:true/false`, `shared:true/false` (verified live 2026-08-20) |
+| Chats | `GET /api/v1/chats/archived` (no trailing slash) | Archived chats, `ChatTitleIdResponse` list (verified live 2026-08-20) |
+| Chats | `GET /api/v1/chats/all/tags` (no trailing slash) | User's tag catalog: `TagModel` list `{id, name, user_id, meta}` (id = name lowercased, spaces→underscores; verified live 2026-08-20: 19 tags) |
+| Chats | `POST /api/v1/chats/tags` (no trailing slash, JSON body `{name, skip, limit}`) | Chats filtered by tag, `ChatTitleIdResponse` list. **POST** — GET on the path returns 401. Prefer `search?text=tag:<name>` (same results, zero new surface) |
+| Chats | `GET /api/v1/chats/stats/usage?page=&items_per_page=` (no trailing slash) | **EXPERIMENTAL** (may be removed in future releases). `{items, total}`; each item: `tags`, `message_count`, `models`, `history_*` counts, averages, `last_message_at` (verified live 2026-08-20: total 147) |
+| Folders | `GET /api/v1/folders/` (**trailing slash**) | `FolderNameIdResponse` `{id, name, meta, parent_id, is_expanded, created_at, updated_at}`. Gated by `folders.enable` + `features.folders` permission → may 403 per instance (not gated on this one; 2 folders live) |
 | Files | `GET /api/v1/files/` | `{"items":[{id, filename, meta, …}], "total": N}` |
 | Files | `GET /api/v1/files/{id}/content` | File binary (e.g. `image/png`) |
 | Workspace | `GET /api/v1/knowledge/` (trailing slash) | `{"items":[], "total":0}` |
@@ -186,7 +191,11 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `get_models()` | `GET /api/models` |
 | `get_my_chats(limit)` | `GET /api/v1/chats` |
 | `get_chat(chat_id)` | `GET /api/v1/chats/{id}` |
-| `search_chats(text)` | `GET /api/v1/chats/search?text=` |
+| `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results) |
+| `get_archived_chats()` | `GET /api/v1/chats/archived` (Iteration 8) |
+| `get_my_tags()` | `GET /api/v1/chats/all/tags` (Iteration 8 — tag catalog; `user_id`/`meta` not exposed) |
+| `get_chat_stats(chat_id)` | `GET /api/v1/chats/stats/usage` (Iteration 8 — **EXPERIMENTAL** endpoint; tags, message_count, models) |
+| `get_my_folders()` | `GET /api/v1/folders/` (Iteration 8 — trailing slash; may 403 if folders disabled on the instance) |
 | `get_shared_chats()` | `GET /api/v1/chats/shared` |
 | `get_pinned_chats()` | `GET /api/v1/chats/pinned` |
 | `get_my_files()` | `GET /api/v1/files` |
@@ -449,7 +458,8 @@ Implementation notes:
 5. **OpenAPI documentation is disabled** on the instance: the endpoint map was validated against the exact tag's source code (v0.10.2), which is the authoritative source.
 6. **Router prefixes are defined in `main.py`** (`include_router(..., prefix='/api/v1/…')`), not in each router: any version upgrade must be reviewed there.
 7. **Pagination is mandatory** (files POC): observed `pageSize` max 50, `total` in the response. `GET /api/v1/files/` returned 50 items with `total: 104`; 3 pages had to be iterated to list everything. Also, `content_type` and `size` (bytes) live in each item's `meta` — type/size filtering is done on the listing, without downloading binaries.
-8. **The trailing slash matters, and it is NOT uniform.** Verified live (2026-08-01): the **listing routes** (`/api/v1/auths/`, `/api/v1/chats/`, `/api/v1/files/`, `/api/v1/prompts/`, `/api/v1/tools/`, `/api/v1/knowledge/`, `/api/v1/users/`) require a **trailing slash** — without it they fall through to the SPA HTML catch-all (HTTP 200, `text/html`). But the **sub-resources** (`/api/v1/chats/search`, `/pinned`, `/shared`, `/api/v1/chats/{id}`, `/api/v1/files/{id}/content`) and `/api/models` must **NOT** have a trailing slash — with one they fall to the SPA catch-all too. The allowlist must fix the canonical form of each route individually, not rely on a uniform rule or redirects (FastAPI/Starlette does not 307-redirect here; the SPA catch-all absorbs the miss).
+8. **The trailing slash matters, and it is NOT uniform.** Verified live (2026-08-01): the **listing routes** (`/api/v1/auths/`, `/api/v1/chats/`, `/api/v1/files/`, `/api/v1/prompts/`, `/api/v1/tools/`, `/api/v1/knowledge/`, `/api/v1/users/`) require a **trailing slash** — without it they fall through to the SPA HTML catch-all (HTTP 200, `text/html`). But the **sub-resources** (`/api/v1/chats/search`, `/pinned`, `/shared`, `/api/v1/chats/{id}`, `/api/v1/files/{id}/content`) and `/api/models` must **NOT** have a trailing slash — with one they fall to the SPA catch-all too. The allowlist must fix the canonical form of each route individually, not rely on a uniform rule or redirects (FastAPI/Starlette does not 307-redirect here; the SPA catch-all absorbs the miss). **Same applies to the newer routes (2026-08-20):** `folders/` WITH slash; `chats/all/tags`, `chats/archived`, `chats/stats/usage` WITHOUT.
+9. **The chat list omits organization metadata by design.** `GET /api/v1/chats/` returns `ChatTitleIdResponse` only — no `meta`/tags/folder/pinned/archived on the items — and the default query **hides folder + pinned chats** unless `include_folders=true&include_pinned=true` (verified live 2026-08-20). Any tool feature needing per-chat organization state (tags, folder, flags) must source it from the detail endpoint (`ChatResponse` carries `meta.tags`, `folder_id`, `pinned`, `archived`), the tags catalog (`GET /api/v1/chats/all/tags`), the usage-stats endpoint (`GET /api/v1/chats/stats/usage` — tags + message_count), or the folders router (`GET /api/v1/folders/`) — never from the list items.
 
 ---
 
