@@ -190,7 +190,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `get_my_profile()` | `GET /api/v1/auths` |
 | `get_models()` | `GET /api/models` |
 | `get_my_chats(limit)` | `GET /api/v1/chats` |
-| `get_chat(chat_id)` | `GET /api/v1/chats/{id}` |
+| `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) |
 | `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results) |
 | `get_archived_chats()` | `GET /api/v1/chats/archived` (Iteration 8) |
 | `get_my_tags()` | `GET /api/v1/chats/all/tags` (Iteration 8 — tag catalog; `user_id`/`meta` not exposed) |
@@ -403,7 +403,7 @@ Implementation notes:
 - **Raw values, no parsing burden on the model:**
   - Sizes are shown as **raw integer bytes** (`8796`, `152340`) — never formatted with unit prefixes (`8.8 KB`). Sizes are stored as numbers in the backend API (`meta.size` is an `int`, see §8.7), and the tool passes them through as numbers. The column header states the unit (`Size (bytes)`) so the value stays unambiguous.
   - Timestamps are rendered as readable local dates/times (e.g. `2026-07-30 08:00`) instead of epoch integers — models handle ISO-like dates better than 10-digit epochs, and the raw epoch is preserved nowhere the model must use.
-  - **IDs are always present** in the table (e.g. a `ID` column), because the model needs them to call follow-up methods (`get_chat(id)`, `get_file_content(id)`).
+  - **IDs are always present** in the table (e.g. a `ID` column), because the model needs them to call follow-up methods (`get_chat_summary(id)`, `get_file_content(id)`).
 - **Details (profile, single items) → flat bullets** (`- Name: Abel`).
 - **File content → fenced block** with the content type as language hint (e.g. ` ```csv `). Binary content → a one-line note with metadata (no bytes).
 - **Chat history → heading + per-message blocks** (`**user** …` / `**assistant** …`).

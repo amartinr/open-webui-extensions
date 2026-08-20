@@ -53,14 +53,13 @@ MAX_DELETE_FILES = 50
 MAX_PAGES = 5
 DEFAULT_PAGE_SIZE = 50
 
-# Default/cap for the head/tail counts of the get_chat snippet (Iteration 8).
-# Default: first 3 + last 3 messages of the main branch, bounded so a single
-# call can never expand into a full conversation dump.
+# Default/cap for the head/tail counts of the get_chat_summary snippet (Iteration 8).
+# Fixed at 3+3 by design (user decision 2026-08-20): the model never chooses
+# these — the summary always shows the first 3 and last 3 messages.
 DEFAULT_SNIPPET_HEAD = 3
 DEFAULT_SNIPPET_TAIL = 3
-MAX_SNIPPET_HEAD_TAIL = 10
 
-# Per-message character budget for the get_chat snippet. Lines longer than
+# Per-message character budget for the get_chat_summary snippet. Lines longer than
 # this are truncated with an ellipsis; combined with head/tail caps this
 # keeps the whole snippet well under max_response_chars.
 MAX_SNIPPET_MESSAGE_CHARS = 160
@@ -993,17 +992,8 @@ class Tools:
             return None
 
     # ──────────────────────────────────────────────
-    #  Chat snippet helpers (Iteration 8: get_chat)
+    #  Chat snippet helpers (Iteration 8: get_chat_summary)
     # ──────────────────────────────────────────────
-
-    def _coerce_head_tail(self, value: Any, default: int = DEFAULT_SNIPPET_HEAD,
-                          cap: int = MAX_SNIPPET_HEAD_TAIL) -> int:
-        """Coerce a head/tail count for the chat snippet (0..cap)."""
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            number = default
-        return max(0, min(number, cap))
 
     @staticmethod
     def _message_text(message: dict) -> Optional[str]:
@@ -1388,26 +1378,22 @@ class Tools:
         chats = self._summarize_chats(sorted_items[:limit])
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_chat(self, chat_id: str, head: int = DEFAULT_SNIPPET_HEAD,
-                       tail: int = DEFAULT_SNIPPET_TAIL,
-                       __request__: Any = None, __user__: dict = None,
-                       __event_emitter__: Any = None) -> str:
-        """Get a compact snippet of one chat: summary, first N and last M messages.
+    async def get_chat_summary(self, chat_id: str, __request__: Any = None,
+                                __user__: dict = None,
+                                __event_emitter__: Any = None) -> str:
+        """Get a compact summary of one chat: metadata plus first and last messages.
 
-        Never dumps the full conversation. Each message is collapsed to a
-        single markdown-safe line (newlines become ' ⏎ ', code fences are
-        neutralized) and only the head and tail of the main branch are
-        returned, so the model sees what the chat is about without flooding
-        the context. Use larger head/tail to read a bit more.
+        Returns organization metadata (message count, models, tags, folder,
+        dates) and a short markdown snippet of the main branch: the first
+        and last DEFAULT_SNIPPET_HEAD/TAIL messages (fixed at 3), with an
+        ellipsis line for the middle. It never dumps the full conversation.
 
         :param chat_id: the chat's UUID.
-        :param head: how many leading messages to include (default 3, max 10).
-        :param tail: how many trailing messages to include (default 3, max 10).
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_chat(chat_id, head, tail, __request__, __user__=__user__,
-                            output_format=output_format),
+            self._get_chat_summary(chat_id, __request__, __user__=__user__,
+                                   output_format=output_format),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
@@ -1415,14 +1401,13 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_chat(self, chat_id: Any, head: Any = DEFAULT_SNIPPET_HEAD,
-                        tail: Any = DEFAULT_SNIPPET_TAIL,
-                        request: Any = None, __user__: Optional[dict] = None,
-                        output_format: Optional[str] = None) -> str:
+    async def _get_chat_summary(self, chat_id: Any, request: Any = None,
+                                __user__: Optional[dict] = None,
+                                output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         chat_id = self._require_id(chat_id, "chat_id")
-        head = self._coerce_head_tail(head)
-        tail = self._coerce_head_tail(tail)
+        head = DEFAULT_SNIPPET_HEAD
+        tail = DEFAULT_SNIPPET_TAIL
         _status, _ct, body = await self._api_get_json(
             token, _ROUTE_CHAT.format(chat_id=chat_id)
         )
@@ -1455,16 +1440,20 @@ class Tools:
             "share_id": raw.get("share_id"),
             "created_at": raw.get("created_at"),
             "updated_at": raw.get("updated_at"),
-            "head": [
+        }
+        if output_format != "json":
+            # The head/tail snippet is markdown-only. JSON mode carries only
+            # organization metadata — no message content (user decision
+            # 2026-08-20).
+            payload["head"] = [
                 {"role": m.get("role"), "text": self._normalize_snippet_text(self._message_text(m))}
                 for m in head_msgs
-            ],
-            "tail": [
+            ]
+            payload["tail"] = [
                 {"role": m.get("role"), "text": self._normalize_snippet_text(self._message_text(m))}
                 for m in tail_msgs
-            ],
-            "skipped": skipped,
-        }
+            ]
+            payload["skipped"] = skipped
         return self._ok(payload, "chat", output_format=output_format)
 
     async def search_chats(self, text: str, __request__: Any = None, __user__: dict = None,

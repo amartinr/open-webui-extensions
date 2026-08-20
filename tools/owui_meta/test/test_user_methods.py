@@ -156,38 +156,36 @@ async def test_get_my_chats_sends_include_flags():
     assert params["include_pinned"] == "true"
 
 
-async def test_get_chat_returns_snippet():
+async def test_get_chat_summary_json_has_no_message_content():
+    # USER DECISION (2026-08-20): JSON mode carries only organization
+    # metadata — no message content (no head/tail/omitted snippet). The
+    # head/tail snippet is markdown-only.
     tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
-    out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
+    out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["id"] == CHAT_ID
     assert payload["message_count"] == 3
-    assert payload["head"][0]["role"] == "user"
-    assert payload["head"][0]["text"] == "hi"
     assert payload["models"] == ["deepseek-v4-flash"]
     assert payload["tags"] == ["budget", "q1"]
     assert payload["folder_name"] == "Budget folder"
-    assert payload["skipped"] == 0
+    # no message content in json mode
+    for key in ("head", "tail", "skipped", "messages"):
+        assert key not in payload, f"json mode must not carry {key}"
 
 
-async def test_get_chat_snippet_normalizes_code_fences():
-    # SECURITY/ROBUSTNESS (Iteration 8): a message containing a code fence
-    # must never open a fence in the tool output. The snippet escapes every
-    # backtick and collapses newlines to ' ⏎ '.
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
-    out = await tools.get_chat(CHAT_ID, head=5, tail=0, __request__=FakeRequest())
-    payload = json.loads(out)
-    texts = [i["text"] for i in payload["head"]]
-    assert any("can you show code?" in t for t in texts)
-    assert all("```" not in t for t in texts)          # no raw triple fence
-    assert any("\\`\\`\\`" in t for t in texts)        # backticks escaped
-    assert any("⏎" in t for t in texts)                  # newlines collapsed
+async def test_get_chat_summary_markdown_has_snippet():
+    # The head/tail snippet is markdown-only (user decision 2026-08-20).
+    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
+    out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
+    assert "**User**: hi" in out
+    assert "**Chat: Budget planning**" in out
+    assert "can you show code?" in out
 
 
-async def test_get_chat_invalid_id_rejected_without_request():
+async def test_get_chat_summary_invalid_id_rejected_without_request():
     recorder = Recorder(api_handler)
     tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
-    out = await tools.get_chat("../../etc/passwd", __request__=FakeRequest())
+    out = await tools.get_chat_summary("../../etc/passwd", __request__=FakeRequest())
     assert "Invalid chat_id" in out
     assert recorder.requests == []
 
@@ -313,7 +311,7 @@ async def test_get_skill_strips_owner_and_bookkeeping():
     assert "owner-123" not in out
 
 
-async def test_get_chat_strips_bookkeeping_fields():
+async def test_get_chat_summary_strips_bookkeeping_fields():
     # SECURITY (whitelist): the full ChatResponse carries bookkeeping noise
     # (user_id, tasks, summary, last_read_at, the raw meta dict). Only
     # organization metadata and a bounded snippet are kept; json mode must
@@ -334,9 +332,10 @@ async def test_get_chat_strips_bookkeeping_fields():
         })
 
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
-    out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
+    out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
     payload = json.loads(out)
-    assert payload["head"][0]["text"] == "hola"  # conversation kept as snippet
+    # json mode carries NO message content (user decision 2026-08-20)
+    assert "head" not in payload and "tail" not in payload
     for noise in ("user_id", "tasks", "summary", "last_read_at"):
         assert noise not in payload, f"{noise} should be stripped"
     assert payload["folder_id"] == "f1"
@@ -344,7 +343,7 @@ async def test_get_chat_strips_bookkeeping_fields():
 
     # markdown mode shows the snippet as before
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
-    out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
+    out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
     assert "**User**: hola" in out
     assert "a summary" not in out
 

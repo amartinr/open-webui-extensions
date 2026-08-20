@@ -292,7 +292,7 @@ All probes ran with a user-role API key against `http://open-webui.private` (sam
 
 ### Changes
 
-1. **`get_my_chats`**: add `include_folders` / `include_pinned` query params to `GET /api/v1/chats/` (they only filter rows server-side; item fields stay the same). This makes the tool see folder + pinned chats it was silently missing. Pass `include_folders=true&include_pinned=true`.
+1. ✅ **`get_my_chats`** (DONE, commit `e65161d` v0.11.0): adds `include_folders` / `include_pinned` query params to `GET /api/v1/chats/` (they only filter rows server-side; item fields stay the same). This makes the tool see folder + pinned chats it was silently missing (~⅓ of the user's chats).
 2. **Tags surfaced**:
    - `get_my_tags()` → `GET /api/v1/chats/all/tags` (TagModel: id, name; user_id/meta not exposed to the model). Lets the model answer “which tags do you use?”.
    - `_summarize_chats` keeps `tags` when present (search results do not carry them — list items never do — but `stats/usage` items do).
@@ -303,7 +303,7 @@ All probes ran with a user-role API key against `http://open-webui.private` (sam
 4. **`get_archived_chats()`** → `GET /api/v1/chats/archived` (no slash) — `ChatTitleIdResponse` list, same summarization as `get_my_chats`.
 5. **`get_chat_stats(chat_id)`** (P4) → `GET /api/v1/chats/stats/usage` filtered client-side by id: `tags`, `message_count`, `models`, averages, `last_message_at`. Route marked EXPERIMENTAL in the docstring; failure → clean error, never crashes other methods. **Not** the export route (`/stats/export` is excluded by the query-only rule).
 6. **`get_my_folders()`** (P4) → `GET /api/v1/folders/` (trailing slash): name + id. A 403 (folders disabled on the instance) maps to a readable error.
-7. **`get_chat` detail**: extend the field whitelist with `folder_id` and `meta.tags` (the ChatResponse carries them; they were dropped). No raw body ever reaches `_ok` (tripwire unchanged).
+7. ✅ **`get_chat` → `get_chat_summary`** (DONE, commit `a3f1e07` v0.12.0, user decisions 2026-08-20): renamed (it never returns full content anymore). Now returns organization metadata (`message_count`, `models`, `tags`, folder name resolved via `GET /api/v1/folders/`, `pinned`/`archived`/`share_id`, dates) plus a markdown snippet of the **main branch** (walked from `currentId` back through `parentId` — the chat is a tree, not a list): the first and last `DEFAULT_SNIPPET_HEAD`/`DEFAULT_SNIPPET_TAIL` messages (**fixed at 3 each** by user decision — the model never passes head/tail, no parameters in the signature). Each message is collapsed to a single markdown-safe line: newlines → ` ⏎ `, every backtick escaped (a code fence in a message can never open a fence in the tool output), truncated to `MAX_SNIPPET_MESSAGE_CHARS`. Middle messages are replaced by an ellipsis line (`… ( N messages skipped ) …`). Fixes the v0.10.2 shape bugs of the old renderer: assistant text lives in `output[].content[].text` (plain `content` is usually empty) and multimodal parts (images) are dropped. Constants `DEFAULT_SNIPPET_HEAD/TAIL`, `MAX_SNIPPET_MESSAGE_CHARS` — no magic numbers. **JSON mode returns organization metadata only** — no message content (user decision 2026-08-20); the head/tail snippet is markdown-only.
 8. **Docs**: DESIGN §5.1/§6.1/§9 updated with the verified endpoints and lessons; README lists the new methods; this plan.
 
 ### Security & correctness (unchanged invariants)

@@ -90,7 +90,7 @@ async def test_multimodal_chat_content_renders_hierarchy():
             "created_at": 1, "updated_at": 2,
         })
 
-    out = await md_tools(handler).get_chat(CHAT_ID, __request__=FakeRequest())
+    out = await md_tools(handler).get_chat_summary(CHAT_ID, __request__=FakeRequest())
     assert "**Chat: Media**" in out
     assert "**Assistant**: here is the result" in out
     assert "data:image" not in out  # non-text parts dropped from the snippet
@@ -164,7 +164,7 @@ async def test_single_chat_renders_messages():
             "created_at": 1, "updated_at": 2,
         })
 
-    out = await md_tools(handler).get_chat(CHAT_ID, __request__=FakeRequest())
+    out = await md_tools(handler).get_chat_summary(CHAT_ID, __request__=FakeRequest())
     assert "**Chat: Budget planning**" in out
     assert "- Messages: 2" in out
     assert "**User**: hola" in out
@@ -187,12 +187,15 @@ async def test_snippet_skips_intermediate_messages():
             "created_at": 1, "updated_at": 10,
         })
 
-    out = await md_tools(handler).get_chat(CHAT_ID, head=2, tail=2, __request__=FakeRequest())
+    out = await md_tools(handler).get_chat_summary(CHAT_ID, __request__=FakeRequest())
     assert "**Chat: Long chat**" in out
     assert "- Messages: 10" in out
     assert "**User**: msg 1" in out
     assert "**Assistant**: msg 2" in out
-    assert "… ( 6 messages skipped ) …" in out
+    assert "**User**: msg 3" in out
+    # head=3 + tail=3 of 10 -> 4 skipped (fixed constants, user decision)
+    assert "… ( 4 messages skipped ) …" in out
+    assert "**Assistant**: msg 8" in out
     assert "**User**: msg 9" in out
     assert "**Assistant**: msg 10" in out
     # intermediate messages never appear

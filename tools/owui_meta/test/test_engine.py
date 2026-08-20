@@ -171,7 +171,7 @@ async def test_truncation_applies_to_markdown():
 
     tools = make_tools(handler, base_url="http://open-webui.private")
     tools.valves.max_response_chars = 500
-    out = await tools.get_chat("c1", head=10, tail=0, __request__=FakeRequest())
+    out = await tools.get_chat_summary("c1", __request__=FakeRequest())
     assert "truncated" in out
     assert len(out) <= 500 + 5
 
