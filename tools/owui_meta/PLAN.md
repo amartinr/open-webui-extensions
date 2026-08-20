@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3 and 9.4 DONE (v0.17.0–v0.20.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions)
+**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3 and 9.4 DONE (v0.17.0–v0.20.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions; **9.8 planned: `search_chats` requires a search term; 9.9 planned: unify the chat list methods into `get_chats(scope=…)` (default `"all"`); 9.10 planned: drop the `_my_` prefix from all method names**) — design decisions 2026-08-21
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -348,13 +348,13 @@ Iteration 8 is complete.
 
 ## Iteration 9 — Improvement pass: `tag:` semantics verified, image metadata, stats metrics, credential guard, chat date-range filter (2026-08-21)
 
-**Status:** ⏳ **PLANNED — live + source research COMPLETED 2026-08-21, implementation pending.** Written from the consolidated improvement brief (2026-08-21, incl. the date-range filter and the live-verified delimiter cases added after the previous deliverable). **Two brief claims were corrected after verification against the v0.10.2 source and live probes** (see “Backend facts verified live” below): Task 1 (`tag:` is ALREADY a scope limiter server-side) and Task 3 (root-caused: a backend bug in the assistant-length metric + distinct documented semantics for the other two). Implementation pending.
+**Status:** ⏳ **PLANNED — live + source research COMPLETED 2026-08-21, implementation pending.** Written from the consolidated improvement brief (2026-08-21, incl. the date-range filter and the live-verified delimiter cases added after the previous deliverable). **Two brief claims were corrected after verification against the v0.10.2 source and live probes** (see “Backend facts verified live” below): Task 1 (`tag:` is ALREADY a scope limiter server-side) and Task 3 (root-caused: a backend bug in the assistant-length metric + distinct documented semantics for the other two). **Task 9.7 added 2026-08-21** (user report): the `folder:` prefix is broken for real (multi-word) folder names — name resolution to the backend's underscore-normalized form; see §9.7. Implementation pending.
 
-**Backend facts verified live (2026-08-21)** — probes against the internal instance (`http://open-webui.private`, user-role key) + v0.10.2 source (`backend/open_webui/routers/chats.py`, `backend/open_webui/models/chats.py`):
+**Backend facts verified live (2026-08-21)** — probes against the internal instance (`http://open-webui.private`, user-role key) + v0.10.2 source (`backend/open_webui/routers/chats.py`, `backend/open_webui/models/chats.py`, `backend/open_webui/models/folders.py`):
 
 | Brief claim | Verified reality |
 |---|---|
-| “`pinned:`/`folder:` scope-limit; `tag:` does not (standalone filter that relaxes the text)” | ❌ **`tag:` is ALSO a scope limiter** (AND with free text). `"Open WebUI"` → 37; `"Open WebUI tag:comfyui"` → 1 (the one of the tag's 3 chats that contains “Open WebUI”); `"manchego tag:comfyui"` → 0 and `"zzz_nonexistent_xyz tag:comfyui"` → 0 (a standalone filter would have returned the tag's 3 chats). Source: `get_chats_by_user_id_and_search_text` strips all prefixes, then ANDs `title/content LIKE %text%` with `EXISTS(meta.tags = tag)` |
+| “`pinned:`/`folder:` scope-limit; `tag:` does not (standalone filter that relaxes the text)” | ❌ **`tag:` is ALSO a scope limiter** (AND with free text). `"Open WebUI"` → 37; `"Open WebUI tag:comfyui"` → 1 (the one of the tag's 3 chats that contains “Open WebUI”); `"manchego tag:comfyui"` → 0 and `"zzz_nonexistent_xyz tag:comfyui"` → 0 (a standalone filter would have returned the tag's 3 chats). Source: `get_chats_by_user_id_and_search_text` strips all prefixes, then ANDs `title/content LIKE %text%` with `EXISTS(meta.tags = tag)`. **⚠️ The brief's `folder:` evidence was MISREAD (see task 9.7):** `"Open WebUI folder:Open WebUI meta"` → 0 is the BROKEN multi-word folder parsing, not working scope limiting — the words after the first (`WebUI meta`) leak into the free text and the first word (`Open`) matches no folder exactly |
 | “Multi-tag behavior undefined (recommend AND)” | ✅ Backend is **AND** already: `and_(*[EXISTS(tag_i) for tag_i in tag_ids])` |
 | “`tag:` with zero matches” | ✅ **Intended orphan-tag cleanup** (not a bug): a tag query with zero results deletes the **catalog entry** (`Tags.delete_tag_by_name_and_user_id` — only the `tag` row: id/name/meta; per-chat inline `meta.tags` are untouched and recreate the entry on the next chat update). A typo'd/nonexistent tag deletes nothing (the lookup filters on the entry existing). Lazy GC — the UI removes tags through the same routes. **Tool-relevant nuance:** `search` scopes to non-archived chats (`Chat.archived == False`), so a tag living **only on archived chats** returns 0 there and the entry is cleaned, while `get_my_chats(tag=)` (`POST /chats/tags`) sees it — documented upstream asymmetry, no tool change |
 | “Snippets reflect the matched text” | ✅ `chat_search_content_text` strips prefixes before building the snippet. Caveat: snippets search only the **plain `content`** string, which is empty for v0.10.2 assistant messages (text lives in `output[].content[].text`) — assistant-matched snippets are often absent |
@@ -365,10 +365,11 @@ Five independent tasks (9.6 deferred by user decision 2026-08-21), all preservin
 
 ### 9.1 `search_chats` — `tag:` scope-limiter semantics: VERIFY + PIN (the backend already implements it) ✅ DONE (v0.18.0)
 
-**Context (verified live 2026-08-21):** the other UI prefixes scope-limit free text server-side:
-- `"Open WebUI"` → 37 chats; `"Open WebUI pinned:true"` → 0; `"Open WebUI folder:Open WebUI meta"` → 0.
-- `"Sulion"` → 1 chat (the pinned one); `"Sulion pinned:true"` → the same chat; `"Sulion folder:Open WebUI meta"` → 0.
+**Context (verified live 2026-08-21):** `pinned:` scope-limits free text server-side, and `tag:` too (corrected above):
+- `"Open WebUI"` → 37 chats; `"Open WebUI pinned:true"` → 0.
+- `"Sulion"` → 1 chat (the pinned one); `"Sulion pinned:true"` → the same chat.
 - `"manchego"` → 0 everywhere (term absent).
+- **`folder:` is NOT a working scope limiter for real folder names** — the brief's `"Open WebUI folder:Open WebUI meta"` → 0 was the broken multi-word parsing (leak + no match), see task 9.7.
 
 **Brief claim corrected:** the brief stated `tag:` does **not** scope-limit and acts as a standalone tag filter. **Verified false on this backend:** v0.10.2 `get_chats_by_user_id_and_search_text` strips every prefix, then **ANDs** the text search with the tag filter (`and_(*[EXISTS(json_each(meta.tags) = tag_i)])`). Live: `"manchego tag:comfyui"` → 0 and `"zzz_nonexistent_xyz tag:comfyui"` → 0 (a standalone filter would return the tag's 3 chats); `"Open WebUI tag:comfyui"` → 1 = the only tag chat containing “Open WebUI”. `tag:none` also works (`NOT EXISTS`). So **no scope-limiter code change is needed in `_search_chats`**.
 
@@ -472,6 +473,112 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 **Tests (when picked up again)** (`test/test_iteration9.py`): epoch + ISO inputs, half-open boundaries (midnight cases), partial-date ISO, month case (`2026-06-01` → `2026-07-01`), composition with tag and sort, invalid dates → clean error / ignored, backward compatibility (no new required params).
 
 **Tracked as future work:** see §7 “Future versions” below.
+
+### 9.7 `search_chats` — fix the `folder:` prefix (folder-name resolution) ⏳ PLANNED (2026-08-21)
+
+**User report (2026-08-21):** searching chats by folder does not work when the **folder name** is used instead of the id — impractical, terrible UX.
+
+**Root cause (verified live + v0.10.2 source `models/chats.py::get_chats_by_user_id_and_search_text` / `models/folders.py::search_folders_by_names`):**
+
+| Step | Behavior | Consequence |
+|---|---|---|
+| 1. Prefix parsing | the search text is split on **spaces**; only words starting with `folder:` become folder queries | `folder:Open WebUI meta` → folder query = **"Open"** only |
+| 2. Name matching | `search_folders_by_names` requires an **exact normalized match** of the full name (`[\s_]+`→space, lowercase) | "Open" ≠ "Open WebUI meta" (normalized "open webui meta") → **no folder match** |
+| 3. No match ⇒ no filter | `folder_ids = []` → the `folder_id.in_(...)` clause is skipped | the folder filter is silently NOT applied — the query behaves like a plain text search |
+| 4. Leak | the non-prefix words after `folder:` are **not** stripped from the free text | `folder:Open WebUI meta` searches the text "WebUI meta" (live: identical result to searching "WebUI meta" alone) |
+| 5. The id never works | the backend matches folder **names**, not ids | `folder:<uuid>` → no folder named like a uuid → no filter (live: 60 chats = full page, unfiltered) |
+
+**Live evidence (instance, 2026-08-21, folders "Open WebUI meta" and "IA generativa y formatos de cuantización de modelos"):**
+- `folder:Open WebUI meta` → 1 chat — the **same** chat as the plain text search "WebUI meta" (a leak artifact, NOT the folder's contents).
+- `folder:Open` / `folder:WebUI` / `folder:<uuid>` → 60 chats each (= full page, **no filter applied**).
+- `folder:open_webui_meta` (underscore-joined, normalized) → **works**: the backend normalizes `_`≡space, so the single token matches exactly. `folder:ia_generativa_y_formatos_de_cuantización_de_modelos` → 38 chats.
+- `GET /api/v1/chats/folder/{folder_id}` (the obvious id-based route) → **401** for the user role on this instance — cannot be used as the fix path.
+
+**Design (`_search_chats`, zero new routes — reuses the existing `folder:` filter):**
+1. Tokenize the input; find `folder:` tokens. **Greedily match the longest phrase** against the user's folders (fetch `GET /api/v1/folders/` — already allowlisted — once per call, normalized with the backend's own semantics) so multi-word names resolve: "folder:Open WebUI meta" → folder "Open WebUI meta".
+2. **Rewrite the query** to the single-token normalized form (`folder:<name with spaces→underscores>`, case-insensitive) — the backend's exact-normalized match then succeeds. **Strip the consumed words** from the free text (fixes the leak: "folder:Open WebUI meta" must NOT search "WebUI meta").
+3. **Unknown folder → clean error** (listing the user's folder names from step 1) instead of the current silent no-filter — the model/user learns the valid names (mirrors how tags are surfaced).
+4. Mixed text works as AND: `"foo folder:Open WebUI meta"` → `foo folder:open_webui_meta` (text AND folder, server-side).
+
+**Acceptance:** `search_chats("folder:<any folder name with spaces>")` returns exactly that folder's chats (no text leak, no silent no-filter); `folder:<unknown>` → readable error listing valid folders; single-word and underscore names keep working; combinable with free text as AND; no new routes.
+
+**Tests** (`test/test_iteration9.py`): mock — multi-word folder resolution, underscore rewrite, leak stripping, unknown-folder error, text+folder AND; live (env-gated) — the matrix above on the instance's real folders (name with spaces → folder's chats; id → error).
+
+### 9.8 `search_chats` — require a search term (design decision 2026-08-21)
+
+**Decision:** `search_chats(text)` must require a **textual search term**. A call whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must **error** — never return a full listing. The prefixes remain available as **optional refinements** that narrow an actual text search. Pure filtered listing belongs to the dedicated list tools (`get_my_chats`, `get_pinned_chats`, `get_archived_chats`, `get_my_folders`, `get_my_tags`) — never to `search_chats`.
+
+**Why (the mis-use that prompted it, live 2026-08-21):**
+- `search_chats("pinned:true")` and `search_chats("tag:none")` returned **full listings** — search silently doubling as listing, with the `tag:none` → dozens-of-chats surprise.
+- `search_chats("folder:Open WebUI meta")` (name) returned **1 chat** instead of the folder's chats — the worst of both worlds: neither a listing nor a search (the 9.7 bug).
+
+**Rationale:** separation of concerns (searching = text matching; listing = filtered collections); predictability ("nothing searched" must be distinguishable from "nothing found"); correct API usage (list concerns are already covered by explicit list tools).
+
+**Implementation (`_search_chats`):**
+1. Tokenize `text` by whitespace; separate UI-prefix tokens (`tag:`, `folder:`, `pinned:`, `archived:`, `shared:`) from text tokens.
+2. **No text token → `ToolError`** with a pointer to the list tools, e.g. `search_chats requires a text term; use get_chats(scope="pinned"|"shared"|"archived") or get_folders for filtered listings.`
+3. Otherwise proceed as today — 9.1 (tag AND passthrough) and 9.7 (folder-name resolution) apply to the remaining text + prefixes. Signature unchanged (`text` stays the only required param).
+
+**Synergies:** the **lone-`tag:` orphan-tag cleanup becomes unreachable via `search_chats`** (9.1's side-effect note simplifies: a pure-prefix call errors before the backend is hit); `get_chats(tag=)` (task 9.9) remains the listing path and keeps its documented cleanup side effect; the 9.7 folder fix stays needed for text+folder combos (`"ventilador folder:Open WebUI meta"`). With tasks 9.9/9.10, all list references here resolve to `get_chats(scope=…)` / `get_folders`.
+
+**Alternatives considered:**
+- *Return an empty result instead of an error* — **rejected**: "nothing searched" would be indistinguishable from "nothing found" (the exact predictability problem this decision fixes); an error teaches the model the correct tool.
+- *Keep `search_chats` as a hybrid search+listing* — rejected: the current state and the source of the confusion.
+- *Add a flag (e.g. `list_only`) to `search_chats`* — rejected: extra surface; the dedicated list tools already exist.
+
+**Acceptance:**
+- `search_chats("pinned:true")` → **error** (never a listing of pinned chats).
+- `search_chats("tag:comfyui")` / `search_chats("tag:none")` / `search_chats("folder:Open WebUI meta")` → **error**.
+- `search_chats("ventilador pinned:true")` → only pinned chats matching "ventilador" (prefix still narrows).
+- `search_chats("Open WebUI folder:Open WebUI meta")` → a real search (text AND folder, per 9.7).
+- Listing all chats / by tag / by folder / pinned → via `get_chats(scope=…)` (task 9.9) and `get_folders` (9.10), never via `search_chats`.
+
+**Tests updated** (`test/test_iteration9.py`, `test/test_live.py`):
+- `test_search_chats_tag_none_passthrough` (mock) → now expects the error.
+- `test_live_chats_tag_filter_matches_search_prefix` (`test_live.py`, uses lone `search_chats("tag:tool")`) → rework to text+tag (e.g. `"tool tag:tool"`) or compare `get_chats(tag=)` (9.9) with a text+tag search.
+- `test_live_search_tag_consistent_with_get_my_chats_tag` (lone `tag:`) → rework to text+tag vs `get_chats(tag=)`.
+- New: pure-prefix → error for each prefix; text+prefix works (AND).
+
+### 9.9 Unify the chat list methods into `get_chats(scope=…)` (design decision 2026-08-21)
+
+**Decision:** replace `get_my_chats`, `get_pinned_chats`, `get_shared_chats` and `get_archived_chats` with a **single `get_chats(scope=…)`**:
+
+```python
+get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=None, ...)
+```
+
+- `scope` is a `Literal["all", "pinned", "shared", "archived"]`. **Omitted → `"all"`** (user decision 2026-08-21): `get_chats()` behaves exactly like today's `get_my_chats()` (plain list with `include_folders`/`include_pinned` + optional `tag`).
+- **Why:** the four methods are the same resource (chats), the same result shape (`ChatTitleIdResponse`) and nearly the same params (`limit`/`sort_by`/`sort_order`/`tag`) — four near-identical tools made the model guess (e.g. `get_pinned` vs `get_shared`); one documented `Literal` scope removes the ambiguity.
+- **Naming:** no `_my_` prefix (task 9.10) — the tool only ever sees the requesting user's data.
+- **Backend unchanged:** same allowlisted routes per scope — `GET /api/v1/chats/` (+ `POST /chats/tags` for `tag=`), `/api/v1/chats/pinned`, `/api/v1/chats/shared`, `/api/v1/chats/archived`; same `_summarize_chats`/sorting/pagination/`max_response_chars`; the `"Archived chats"` label is kept for `scope="archived"`.
+- **Implementation:** one public `get_chats(scope=…)`; internal `_get_chats` dispatches on `scope` to the existing per-route logic; the three separate public methods are removed (breaking rename — the model picks up the new signature from the docstring; README notes old calls in stored history show as unresolved).
+
+**Acceptance:**
+- `get_chats()` ≡ today's `get_my_chats()` (default `scope="all"`).
+- `get_chats(scope="pinned")` ≡ `get_pinned_chats()`; `scope="shared"` ≡ `get_shared_chats()`; `scope="archived"` ≡ `get_archived_chats()` (label kept).
+- `tag=` composes with every scope (validated per route).
+- Invalid `scope` → clean `ToolError` listing the valid values.
+
+**Tests updated:** `test_route_map.py` (route per scope), `test_user_methods.py`, `test_iteration8.py` (archived), `test_iteration9.py` (tag filter), live suite — re-point to `get_chats(scope=…)`; add default-`all` and invalid-scope cases. The deferred date-range filter (9.6) applies to `get_chats(scope="all", …)` when implemented.
+
+### 9.10 Drop the `_my_` prefix from all method names (design decision 2026-08-21)
+
+**Decision:** remove `_my_` from every public method name — the tool only ever operates on the requesting user's data (token-scoped), so `my` is redundant noise:
+
+| Old | New |
+|---|---|
+| `get_my_profile` | `get_profile` |
+| `get_my_chats` | absorbed into `get_chats` (9.9) |
+| `get_my_files` | `get_files` (`get_file_content` unchanged) |
+| `get_my_prompts` | `get_prompts` |
+| `get_my_tools` | `get_tools` |
+| `get_my_skills` | `get_skills` |
+| `get_my_folders` | `get_folders` |
+| `get_my_tags` | `get_tags` |
+
+- **Compatibility note:** this is a breaking rename of the tool surface. Open WebUI tools have no server-side alias; stored chat history referencing the old names will render those tool calls as unresolved, and the model re-learns the new names from the updated docstrings. README documents this.
+- **Scope:** public API is the contract. The private `_get_my_*` implementations may be renamed alongside (cosmetic) or kept; the docstring contract test (`test_docstrings.py`) requires names to match signatures.
+- **Tests:** global find/replace of the public names across the suite (route-map, user methods, iteration8/9, live); docstring + output-format suites unaffected beyond the rename.
 
 ### Delivery
 

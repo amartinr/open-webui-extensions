@@ -3,7 +3,7 @@
 **Version:** 1.0
 **Date:** 2026-07-31
 **Author:** (with technical assistance)
-**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20). **Iteration 9 improvement pass designed 2026-08-21** (search `tag:` semantics verified — the backend already scope-limits; image header metadata; chat-stats metrics root-caused; fail-loud credential guard; `delete_files` sandbox test) — implementation not started; the **`get_my_chats` date-range filter is DEFERRED by user decision 2026-08-21** (design recorded in §8.9.6)
+**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20). **Iteration 9: tasks 8.9.1–8.9.4 DONE (v0.17.0–v0.20.0); 8.9.5 pending; 8.9.7–8.9.10 planned** (`folder:` search fix, mandatory search term, `get_chats(scope=…)` unification, `_my_`-prefix drop — design decisions 2026-08-21); **the `get_my_chats` date-range filter (8.9.6) is DEFERRED by user decision 2026-08-21** (applies to `get_chats(scope="all")` when 8.9.9 lands)
 
 ---
 
@@ -144,7 +144,7 @@ Sources: **real curl tests with a `user`-role API key** against the internal ins
 | Chats | `GET /api/v1/chats/{id}` | Full chat with message history (`ChatResponse`: also `pinned`, `archived`, `folder_id`, `meta.tags`) |
 | Chats | `GET /api/v1/chats/search?text=…` (no trailing slash) | Search (parameter confirmed: `text`, not `q`). Populates a `snippet` per result. **Filter prefixes work server-side**: `tag:<name>`, `tag:none` (chats without tags), `folder:<name>`, `pinned:true/false`, `archived:true/false`, `shared:true/false` (verified live 2026-08-20) |
 
-**Delimiter semantics — live-verified 2026-08-21 (§8.9.1):** `pinned:`, `folder:` and **`tag:`** all act as **scope limiters** over the free text (`"Open WebUI"` → 37 chats, `"Open WebUI pinned:true"` → 0, `"manchego tag:comfyui"` → 0); the brief's claim that `tag:` relaxes the text was **verified false** (see §8.9.1). Related intended behavior: a zero-match lone `tag:` query triggers the backend's **orphan-tag cleanup** (documented in §8.9.1 — not a bug).
+**Delimiter semantics — live-verified 2026-08-21 (§8.9.1):** `pinned:` and **`tag:`** act as **scope limiters** over the free text (`"Open WebUI"` → 37 chats, `"Open WebUI pinned:true"` → 0, `"manchego tag:comfyui"` → 0); the brief's claim that `tag:` relaxes the text was **verified false** (see §8.9.1). **`folder:` is NOT a usable scope limiter for real folder names** (verified live + source, §8.9.7): the prefix splits on spaces and requires an exact normalized name match, so multi-word folder names never filter (the leftover words leak into the text) and the folder id never works. A zero-match lone `tag:` query triggers the backend's **orphan-tag cleanup** (documented in §8.9.1 — not a bug).
 | Chats | `GET /api/v1/chats/archived` (no trailing slash) | Archived chats, `ChatTitleIdResponse` list (verified live 2026-08-20) |
 | Chats | `GET /api/v1/chats/all/tags` (no trailing slash) | User's tag catalog: `TagModel` list `{id, name, user_id, meta}` (id = name lowercased, spaces→underscores; verified live 2026-08-20: 19 tags) |
 | Chats | `POST /api/v1/chats/tags` (no trailing slash, JSON body `{name, skip, limit}`) | Chats filtered by tag, `ChatTitleIdResponse` list. **POST** — GET on the path returns 401. Prefer `search?text=tag:<name>` (same results, zero new surface) |
@@ -194,16 +194,17 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `get_my_profile()` | `GET /api/v1/auths` | ✓ |
 | `get_models()` | `GET /api/models` | ✓ |
 | `get_my_chats(limit, tag)` | `GET /api/v1/chats` (with `include_folders`/`include_pinned`); with `tag` → `POST /api/v1/chats/tags` (query-only: pure tag filter, `{name, skip, limit}`) | ✓ |
+| **`get_chats(scope="all"\|"pinned"\|"shared"\|"archived", …)`** (planned) | unifies the four chat list methods; omitted `scope` → `"all"` ≡ today's `get_my_chats`; routes unchanged per scope | ⏳ planned (8.9.9) |
 | `get_my_chats` date-range filter | *(not implemented)* — `created_after`/`created_before`/`updated_after`/`updated_before` params, design recorded in §8.9.6 | ⏸️ DEFERRED (2026-08-21) |
 | `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) | ✓ |
 | `get_chat_metadata(chat_id)` | `GET /api/v1/chats/{id}` (metadata only: message_count, models, tags, folder, flags, dates; no message content in any format) | ✓ |
 | `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results). **Planned (Iteration 9.1):** `tag:` becomes a scope limiter (AND with free text), consistent with `pinned:`/`folder:` — §8.9.1 | ✓ |
-| `get_archived_chats(limit)` | `GET /api/v1/chats/archived` (no pagination params; whole list sliced by `limit`) | ✓ |
+| `get_archived_chats(limit)` | `GET /api/v1/chats/archived` (no pagination params; whole list sliced by `limit`) — **→ `get_chats(scope="archived")` (8.9.9)** | ✓ |
 | `get_my_tags()` | `GET /api/v1/chats/all/tags` (tag catalog; `user_id`/`meta` not exposed) | ✓ |
 | `get_chat_stats(chat_id)` | `GET /api/v1/chats/stats/usage` (**EXPERIMENTAL** endpoint; tags, message_count, models, history counts, averages) | ✓ |
 | `get_my_folders()` | `GET /api/v1/folders/` (trailing slash; may 403 if folders disabled on the instance) | ✓ |
-| `get_shared_chats()` | `GET /api/v1/chats/shared` | ✓ |
-| `get_pinned_chats()` | `GET /api/v1/chats/pinned` | ✓ |
+| `get_shared_chats()` | `GET /api/v1/chats/shared` — **→ `get_chats(scope="shared")` (8.9.9)** | ✓ |
+| `get_pinned_chats()` | `GET /api/v1/chats/pinned` — **→ `get_chats(scope="pinned")` (8.9.9)** | ✓ |
 | `get_my_files()` | `GET /api/v1/files` | ✓ |
 | `get_file_content(file_id)` | `GET /api/v1/files/{id}/content` | ✓ |
 | `delete_files(file_ids)` | per id: `GET /api/v1/files/{id}` + `DELETE /api/v1/files/{id}` (write, explicit — see §7.4) | ✓ |
@@ -336,7 +337,7 @@ The `files`/`embeds` events are persisted by the backend into the message's fiel
    - Files: `content_type` (e.g. `image/*`), `size` range (`min_size`, `max_size` bytes), partial `filename`.
    - Chats: textual search (`/api/v1/chats/search?text=…`) and/or status filter (`pinned`, `archived`, `shared`).
    - Workspace: search by name/description when the endpoint supports it.
-   - **Date-range filter for chats (design recorded, DEFERRED 2026-08-21):** `created_after`/`created_before`/`updated_after`/`updated_before` on `get_my_chats`, applied **client-side** after the tag fetch / page iteration and before sort + slice (the API exposes no date filter). Full design in §8.9.6; postponed by user decision.
+   - **Date-range filter for chats (design recorded, DEFERRED 2026-08-21):** `created_after`/`created_before`/`updated_after`/`updated_before` on `get_chats(scope="all", …)` (post-8.9.9 name), applied **client-side** after the tag fetch / page iteration and before sort + slice (the API exposes no date filter). Full design in §8.9.6; postponed by user decision.
 4. **Client vs. server filtering strategy** — apply **server-side filtering whenever the endpoint supports it** (less data transferred, cheaper). Local filtering (in the tool) remains only for criteria the API does not expose (e.g. minimum size when the listing already carries `meta.size`).
 5. **Truncation and summarization** — lists returned to the model must be **summarized** (e.g. top N results + `total`), not full dumps, to avoid saturating the context (see also `max_response_chars` in §8.2).
 
@@ -468,6 +469,10 @@ Consolidated improvement plan written 2026-08-21 (the same brief whose findings 
 | 8.9.4 | Credential non-exposure: fail-loud sanitizer + allowlist tripwire test | ✅ DONE (v0.17.0) |
 | 8.9.5 | `delete_files` destructive live test (optional, sandbox only, env-gated) | ⏳ pending |
 | 8.9.6 | `get_my_chats` date-range filter | ⏸️ **DEFERRED** (2026-08-21) |
+| 8.9.7 | `search_chats` `folder:` prefix — fix folder-NAME search (multi-word names broken; user report 2026-08-21) | ⏳ planned |
+| 8.9.8 | `search_chats` must **require a search term** (design decision 2026-08-21) — pure-prefix calls error, never list | ⏳ planned |
+| 8.9.9 | Unify the chat list methods into **`get_chats(scope="all"\|"pinned"\|"shared"\|"archived")`** (default `"all"`) — replace `get_my_chats`/`get_pinned_chats`/`get_shared_chats`/`get_archived_chats` | ⏳ planned |
+| 8.9.10 | Drop the **`_my_`** prefix from all method names (`get_my_profile`→`get_profile`, `get_my_files`→`get_files`, …) | ⏳ planned |
 
 ### 8.9.1 Search: `tag:` scope-limiter semantics — VERIFY + PIN (backend already implements it)
 
@@ -553,10 +558,39 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 8. **The trailing slash matters, and it is NOT uniform.** Verified live (2026-08-01): the **listing routes** (`/api/v1/auths/`, `/api/v1/chats/`, `/api/v1/files/`, `/api/v1/prompts/`, `/api/v1/tools/`, `/api/v1/knowledge/`, `/api/v1/users/`) require a **trailing slash** — without it they fall through to the SPA HTML catch-all (HTTP 200, `text/html`). But the **sub-resources** (`/api/v1/chats/search`, `/pinned`, `/shared`, `/api/v1/chats/{id}`, `/api/v1/files/{id}/content`) and `/api/models` must **NOT** have a trailing slash — with one they fall to the SPA catch-all too. The allowlist must fix the canonical form of each route individually, not rely on a uniform rule or redirects (FastAPI/Starlette does not 307-redirect here; the SPA catch-all absorbs the miss). **Same applies to the newer routes (2026-08-20):** `folders/` WITH slash; `chats/all/tags`, `chats/archived`, `chats/stats/usage` WITHOUT.
 9. **The chat list omits organization metadata by design.** `GET /api/v1/chats/` returns `ChatTitleIdResponse` only — no `meta`/tags/folder/pinned/archived on the items — and the default query **hides folder + pinned chats** unless `include_folders=true&include_pinned=true` (verified live 2026-08-20). Any tool feature needing per-chat organization state (tags, folder, flags) must source it from the detail endpoint (`ChatResponse` carries `meta.tags`, `folder_id`, `pinned`, `archived`), the tags catalog (`GET /api/v1/chats/all/tags`), the usage-stats endpoint (`GET /api/v1/chats/stats/usage` — tags + message_count), or the folders router (`GET /api/v1/folders/`) — never from the list items.
 10. **Search filter prefixes are scope limiters — including `tag:` (verified live + v0.10.2 source, 2026-08-21).** The brief claimed `tag:` was a standalone filter; **verified false**: `get_chats_by_user_id_and_search_text` strips all prefixes and ANDs the text search with `EXISTS(meta.tags = …)`; multi-tag is AND; `tag:none` is `NOT EXISTS`. Live: `"manchego tag:comfyui"` → 0 (a standalone filter would return the tag's 3 chats). No client-side normalization is needed. **Related intended behavior (documented, not a bug):** a `tag:` query with zero matches triggers the backend's **orphan-tag cleanup** — the catalog entry is deleted (per-chat inline `meta.tags` untouched; a typo'd tag deletes nothing). Tool-relevant nuance: `search` excludes archived chats, `POST /chats/tags` does not, so a tag used only on archived chats is cleaned via `search_chats("tag:X")` yet visible via `get_my_chats(tag=)` — documented upstream asymmetry (Iteration 9 task 1, §8.9.1).
+11. **The `folder:` search prefix is broken for multi-word folder names (verified live + source, 2026-08-21).** `get_chats_by_user_id_and_search_text` splits the text on spaces, so `folder:Open WebUI meta` queries only `"Open"`; `search_folders_by_names` requires an **exact normalized match** of the full name (`[\s_]+`→space, lowercase) → no match → the folder filter is silently skipped and the leftover words leak into the free text; the folder **id never matches** (names only). The backend's own normalization makes the **underscore-joined single token** work (`folder:open_webui_meta`, `_`≡space — live: 38 chats). `GET /api/v1/chats/folder/{id}` → 401 for the user role on this instance. The tool must resolve folder names client-side (greedy phrase match + underscore rewrite + leak stripping + clean error for unknown folders) — Iteration 9 task 9.7 (§8.9.7).
 
 ---
 
 ## 10. Tests performed (evidence)
+
+### 8.9.7 Search: `folder:` prefix — folder-name resolution ⏳ PLANNED (2026-08-21)
+
+**User report:** searching chats by folder does not work with the **folder name** — impractical, terrible UX.
+
+**Root cause (verified live + v0.10.2 source):** the search text is split on spaces, so `folder:Open WebUI meta` sends only `"Open"` as the folder query; `search_folders_by_names` requires an **exact normalized match** (`[\s_]+`→space, lowercase) of the full name → no match → the folder filter is silently skipped and the leftover words (`WebUI meta`) leak into the free text. The folder **id never works** (the backend matches names, not ids). Live: `folder:Open` / `folder:WebUI` / `folder:<uuid>` → full unfiltered page (60); `folder:Open WebUI meta` → the same result as the plain text search "WebUI meta" (a leak artifact). `GET /api/v1/chats/folder/{id}` (the id-based route) → 401 for the user role on this instance.
+
+**Design (`_search_chats`, zero new routes):** greedy multi-word phrase matching against the user's folders (`GET /api/v1/folders/`, already allowlisted; backend normalization semantics) → **rewrite to the underscore-normalized single token** (`folder:open_webui_meta` — the backend treats `_`≡space, so it matches exactly; verified live: 38 chats for the long folder name) → **strip the consumed words** from the free text (kills the leak) → **unknown folder → clean error listing the valid names** (no more silent no-filter). Mixed text stays AND (`"foo folder:Open WebUI meta"` → `foo folder:open_webui_meta`).
+
+### 8.9.8 `search_chats` — search term required (design decision 2026-08-21)
+
+**Decision:** `search_chats(text)` must require a **textual search term**. Calls whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must **error** — never return a full listing. The prefixes stay as **optional refinements** of an actual text search; pure filtered listing belongs to the list tools (`get_chats(scope=…)`, `get_folders`, … — see 8.9.9/8.9.10), never to `search_chats`.
+
+**Why:** `search_chats` was being (mis)used as a filtered listing — `"pinned:true"` / `"tag:none"` returned full listings, and `"folder:Open WebUI meta"` returned 1 chat instead of the folder's (the 9.7 bug). Searching (text matching) and listing (filtered collections) must stay separate: predictable ("nothing searched" ≠ "nothing found") and correct API usage (list tools already exist).
+
+**Implementation (`_search_chats`):** tokenize by whitespace; if no token survives after removing the UI prefixes (`tag:`/`folder:`/`pinned:`/`archived:`/`shared:`) → **`ToolError`** pointing to the list tools; otherwise proceed (9.1 tag AND + 9.7 folder resolution apply to the remaining text + prefixes). Signature unchanged.
+
+**Alternatives considered:** empty result instead of error (rejected — indistinguishable from "nothing found"); keep hybrid search+listing (rejected — the current confusing state); a `list_only` flag (rejected — redundant with list tools).
+
+**Synergies:** the lone-`tag:` **orphan-tag cleanup becomes unreachable via `search_chats`** (pure-prefix calls error before the backend — simplifies §8.9.1); `get_chats(tag=)` keeps its documented cleanup side effect; the 9.7 folder fix remains needed for text+folder combos.
+
+### 8.9.9 Unify chat listing into `get_chats(scope=…)` (design decision 2026-08-21)
+
+**Decision:** replace `get_my_chats`/`get_pinned_chats`/`get_shared_chats`/`get_archived_chats` with one **`get_chats(scope="all"|"pinned"|"shared"|"archived", limit=10, sort_by="updated_at", sort_order="desc", tag=None)`**. **Omitted `scope` → `"all"`** (user decision): `get_chats()` ≡ today's `get_my_chats()` (list with `include_folders`/`include_pinned` + optional `tag`). The four methods are the same resource with the same result shape and near-identical params — a single documented `Literal` scope kills the model's guessing (`get_pinned` vs `get_shared`). Backend/allowlist unchanged per scope (chats listing + `POST /chats/tags`, `/chats/pinned`, `/chats/shared`, `/chats/archived`); `"Archived chats"` label kept; invalid `scope` → clean `ToolError`. The deferred date-range filter (8.9.6) applies to `scope="all"`.
+
+### 8.9.10 Drop the `_my_` prefix from method names (design decision 2026-08-21)
+
+**Decision:** rename all `get_my_*` public methods to `get_*` (`get_profile`, `get_files`, `get_prompts`, `get_tools`, `get_skills`, `get_folders`, `get_tags`; `get_my_chats` absorbed into `get_chats` — 8.9.9). The tool only ever sees the requesting user's data (token-scoped), so `my` is redundant. **Breaking change** (no server-side alias in Open WebUI tools): stored history referencing the old names shows unresolved calls; the model re-learns the new names from the docstrings; README documents it.
 
 ### 10.1 Connectivity (no credentials)
 | Test | Result |
