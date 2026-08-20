@@ -76,12 +76,16 @@ WITH_SLASH = {
     "/api/v1/tools/",
     "/api/v1/knowledge/",
     "/api/v1/skills/",
+    "/api/v1/folders/",
 }
 WITHOUT_SLASH = {
     "/api/models",
     "/api/v1/chats/search",
     "/api/v1/chats/pinned",
     "/api/v1/chats/shared",
+    "/api/v1/chats/all/tags",
+    "/api/v1/chats/archived",
+    "/api/v1/chats/stats/usage",
     f"/api/v1/chats/{CHAT_ID}",
     f"/api/v1/files/{FILE_ID}/content",
     f"/api/v1/skills/id/{SKILL_ID}",
@@ -102,6 +106,7 @@ async def test_listing_routes_have_trailing_slash():
         ("get_my_tools", (), "/api/v1/tools/"),
         ("get_knowledge_bases", (), "/api/v1/knowledge/"),
         ("get_my_skills", (), "/api/v1/skills/"),
+        ("get_my_folders", (), "/api/v1/folders/"),
     ]
     for method, args, route in cases:
         seen = await _run_and_record(method, args, route)
@@ -116,6 +121,9 @@ async def test_subresource_routes_without_trailing_slash():
         ("search_chats", ("budget",), "/api/v1/chats/search"),
         ("get_pinned_chats", (), "/api/v1/chats/pinned"),
         ("get_shared_chats", (), "/api/v1/chats/shared"),
+        ("get_my_tags", (), "/api/v1/chats/all/tags"),
+        ("get_archived_chats", (), "/api/v1/chats/archived"),
+        ("get_chat_stats", (CHAT_ID,), "/api/v1/chats/stats/usage"),
         ("get_chat_summary", (CHAT_ID,), f"/api/v1/chats/{CHAT_ID}"),
         ("get_chat_metadata", (CHAT_ID,), f"/api/v1/chats/{CHAT_ID}"),
         ("get_file_content", (FILE_ID,), f"/api/v1/files/{FILE_ID}/content"),

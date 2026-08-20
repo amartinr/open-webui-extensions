@@ -146,7 +146,7 @@ Sources: **real curl tests with a `user`-role API key** against `http://open-web
 | Chats | `GET /api/v1/chats/archived` (no trailing slash) | Archived chats, `ChatTitleIdResponse` list (verified live 2026-08-20) |
 | Chats | `GET /api/v1/chats/all/tags` (no trailing slash) | User's tag catalog: `TagModel` list `{id, name, user_id, meta}` (id = name lowercased, spaces→underscores; verified live 2026-08-20: 19 tags) |
 | Chats | `POST /api/v1/chats/tags` (no trailing slash, JSON body `{name, skip, limit}`) | Chats filtered by tag, `ChatTitleIdResponse` list. **POST** — GET on the path returns 401. Prefer `search?text=tag:<name>` (same results, zero new surface) |
-| Chats | `GET /api/v1/chats/stats/usage?page=&items_per_page=` (no trailing slash) | **EXPERIMENTAL** (may be removed in future releases). `{items, total}`; each item: `tags`, `message_count`, `models`, `history_*` counts, averages, `last_message_at` (verified live 2026-08-20: total 147) |
+| Chats | `GET /api/v1/chats/stats/usage?page=&pageSize=` (no trailing slash) | **EXPERIMENTAL** (may be removed in future releases). `{items, total}`; each item: `tags`, `message_count`, `models`, `history_*` counts, averages, `last_message_at` (verified live 2026-08-20: total 149). **Pagination quirk:** `pageSize` is IGNORED (always ≤ 50 rows/page, irregular sizes — live 50/49/49 then an empty page) so the tool iterates until an empty page or the declared total (`short_page_stops=False`), never stopping on a short page |
 | Folders | `GET /api/v1/folders/` (**trailing slash**) | `FolderNameIdResponse` `{id, name, meta, parent_id, is_expanded, created_at, updated_at}`. Gated by `folders.enable` + `features.folders` permission → may 403 per instance (not gated on this one; 2 folders live) |
 | Files | `GET /api/v1/files/` | `{"items":[{id, filename, meta, …}], "total": N}` |
 | Files | `GET /api/v1/files/{id}/content` | File binary (e.g. `image/png`) |
@@ -185,7 +185,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 
 ### 6.1 Regular user (role `user`)
 
-> **Implemented:** all rows below with a ✓ are live methods in the tool (v0.14.0). The remaining rows (marked “Iteration 8, pending”) are the planned P1–P5 extensions, backend-verified but not yet implemented.
+> **Implemented:** all rows below are live methods in the tool (v0.15.0). Iteration 8 (tags, folders, archived, usage stats) is complete.
 
 | Tool method (suggested name) | Internal route | Status |
 |---|---|---|
@@ -195,10 +195,10 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) | ✓ |
 | `get_chat_metadata(chat_id)` | `GET /api/v1/chats/{id}` (metadata only: message_count, models, tags, folder, flags, dates; no message content in any format) | ✓ |
 | `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results) | ✓ |
-| `get_archived_chats()` | `GET /api/v1/chats/archived` | Iteration 8, pending |
-| `get_my_tags()` | `GET /api/v1/chats/all/tags` (tag catalog; `user_id`/`meta` not exposed) | Iteration 8, pending |
-| `get_chat_stats(chat_id)` | `GET /api/v1/chats/stats/usage` (**EXPERIMENTAL** endpoint; tags, message_count, models) | Iteration 8, pending |
-| `get_my_folders()` | `GET /api/v1/folders/` (trailing slash; may 403 if folders disabled on the instance) | Iteration 8, pending |
+| `get_archived_chats(limit)` | `GET /api/v1/chats/archived` (no pagination params; whole list sliced by `limit`) | ✓ |
+| `get_my_tags()` | `GET /api/v1/chats/all/tags` (tag catalog; `user_id`/`meta` not exposed) | ✓ |
+| `get_chat_stats(chat_id)` | `GET /api/v1/chats/stats/usage` (**EXPERIMENTAL** endpoint; tags, message_count, models, history counts, averages) | ✓ |
+| `get_my_folders()` | `GET /api/v1/folders/` (trailing slash; may 403 if folders disabled on the instance) | ✓ |
 | `get_shared_chats()` | `GET /api/v1/chats/shared` | ✓ |
 | `get_pinned_chats()` | `GET /api/v1/chats/pinned` | ✓ |
 | `get_my_files()` | `GET /api/v1/files` | ✓ |

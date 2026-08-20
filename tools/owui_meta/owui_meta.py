@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.14.0
+version: 0.15.0
 licence: MIT
 """
 
@@ -90,6 +90,9 @@ _ROUTE_KNOWLEDGE = "/api/v1/knowledge/"
 _ROUTE_SKILLS = "/api/v1/skills/"
 _ROUTE_SKILL = "/api/v1/skills/id/{skill_id}"
 _ROUTE_FOLDERS = "/api/v1/folders/"
+_ROUTE_CHATS_ALL_TAGS = "/api/v1/chats/all/tags"
+_ROUTE_CHATS_ARCHIVED = "/api/v1/chats/archived"
+_ROUTE_CHATS_STATS_USAGE = "/api/v1/chats/stats/usage"
 
 # Content types that are useful as text when reading a file's content.
 _TEXT_CONTENT_TYPES = frozenset({
@@ -639,6 +642,12 @@ class Tools:
             return self._render_chat(payload)
         if kind == "chat_metadata":
             return self._render_chat_metadata(payload)
+        if kind == "tags":
+            return self._render_tags(payload)
+        if kind == "chat_stats":
+            return self._render_chat_stats(payload)
+        if kind == "folders":
+            return self._render_folders(payload)
         if kind == "files":
             return self._render_files(payload)
         if kind == "files_deleted":
@@ -686,15 +695,20 @@ class Tools:
         items = p.get("chats", [])
         count = p.get("count", len(items))
         query = p.get("query")
-        head = (
-            f"**Search results for '{query}': {count}**"
-            if query
-            else self._summary_header("Chats", count, p.get("total"))
-        )
-        table = self._md_table(
-            ["Title", "Updated", "ID"],
-            [[m.get("title"), self._fmt_ts(m.get("updated_at")), m.get("id")] for m in items],
-        )
+        if query:
+            head = f"**Search results for '{query}': {count}**"
+        else:
+            head = self._summary_header(p.get("label", "Chats"), count, p.get("total"))
+        # Search results carry a ``snippet`` (the matched message fragment);
+        # list endpoints never do. Show it as an extra column only when the
+        # call was a search AND at least one result has a snippet.
+        show_snippet = bool(query) and any(m.get("snippet") for m in items)
+        headers = ["Title", "Updated", "ID"]
+        rows = [[m.get("title"), self._fmt_ts(m.get("updated_at")), m.get("id")] for m in items]
+        if show_snippet:
+            headers.append("Snippet")
+            rows = [row + [m.get("snippet")] for row, m in zip(rows, items)]
+        table = self._md_table(headers, rows)
         return head + "\n\n" + table
 
     def _render_chat(self, p: dict) -> str:
@@ -758,6 +772,58 @@ class Tools:
             f"Updated: {self._fmt_ts(p.get('updated_at'))}"
         )
         return "\n".join(lines).rstrip()
+
+    def _render_tags(self, p: dict) -> str:
+        items = p.get("tags", [])
+        head = self._summary_header("Tags", p.get("count", len(items)))
+        table = self._md_table(
+            ["Name", "ID"],
+            [[t.get("name"), t.get("id")] for t in items],
+        )
+        return head + "\n\n" + table
+
+    def _render_chat_stats(self, p: dict) -> str:
+        lines = [f"**Chat stats**", ""]
+        lines.append(f"- Messages: {p.get('message_count', 0)}")
+        models = p.get("models") or {}
+        if models:
+            lines.append("- Models: " + ", ".join(f"{k} (×{v})" for k, v in sorted(models.items())))
+        tags = p.get("tags") or []
+        if tags:
+            lines.append("- Tags: " + ", ".join(tags))
+        for key, label in (
+            ("average_response_time", "Avg response time (s)"),
+            ("average_user_message_content_length", "Avg user msg length (chars)"),
+            ("average_assistant_message_content_length", "Avg assistant msg length (chars)"),
+            ("last_message_at", "Last message"),
+        ):
+            value = p.get(key)
+            if value is not None:
+                rendered = self._fmt_ts(value) if key == "last_message_at" else value
+                lines.append(f"- {label}: {rendered}")
+        lines.append(
+            f"- Created: {self._fmt_ts(p.get('created_at'))} · "
+            f"Updated: {self._fmt_ts(p.get('updated_at'))}"
+        )
+        return "\n".join(lines).rstrip()
+
+    def _render_folders(self, p: dict) -> str:
+        items = p.get("folders", [])
+        head = self._summary_header("Folders", p.get("count", len(items)))
+        table = self._md_table(
+            ["Name", "Parent", "Expanded", "Created", "ID"],
+            [
+                [
+                    f.get("name"),
+                    f.get("parent_id") or "—",
+                    "yes" if f.get("is_expanded") else "no",
+                    self._fmt_ts(f.get("created_at")),
+                    f.get("id"),
+                ]
+                for f in items
+            ],
+        )
+        return head + "\n\n" + table
 
     def _render_files(self, p: dict) -> str:
         items = p.get("files", [])
@@ -1133,13 +1199,20 @@ class Tools:
 
     async def _fetch_all_pages(self, token: str, path: str, page_size: int = DEFAULT_PAGE_SIZE,
                                params: Optional[dict] = None,
-                               max_pages: int = MAX_PAGES) -> tuple[list, int]:
+                               max_pages: int = MAX_PAGES,
+                               short_page_stops: bool = True) -> tuple[list, int]:
         """Fetch a paginated listing transparently, up to ``max_pages``.
 
-        Iterates pages until the server reports everything (``total``) or a
-        short page (fewer items than ``page_size``), bounded by ``max_pages``.
-        Returns ``(all_items, total)`` where ``total`` is the server's declared
-        total when known, otherwise the number of items fetched.
+        Iterates pages until the server reports everything (``total``), a
+        short page (fewer items than ``page_size``) or an empty page,
+        bounded by ``max_pages``. ``short_page_stops=False`` disables the
+        short-page heuristic for routes that IGNORE ``pageSize`` and return
+        irregularly-sized pages (verified live 2026-08-20: the EXPERIMENTAL
+        ``/api/v1/chats/stats/usage`` returns 50/49/49 rows then an empty
+        page while declaring ``total`` 149) — those routes end only on an
+        empty page or the declared total. Returns ``(all_items, total)``
+        where ``total`` is the server's declared total when known, otherwise
+        the number of items fetched.
         """
         all_items: list = []
         server_total: Optional[int] = None
@@ -1153,7 +1226,9 @@ class Tools:
             if isinstance(payload, dict) and "total" in payload:
                 server_total = total
             all_items.extend(items)
-            if not items or len(items) < page_size:
+            if not items:
+                break
+            if short_page_stops and len(items) < page_size:
                 break
             if server_total is not None and len(all_items) >= server_total:
                 break
@@ -1249,11 +1324,26 @@ class Tools:
     # ──────────────────────────────────────────────
 
     def _summarize_chats(self, items: list) -> list[dict]:
-        return [
-            {k: item.get(k) for k in ("id", "title", "created_at", "updated_at")}
-            for item in items
-            if isinstance(item, dict)
-        ]
+        """Summarize chat list items (ChatTitleIdResponse shape).
+
+        List endpoints only ever carry id/title/dates, but two sources add
+        more fields the model needs: search results carry a ``snippet`` (the
+        matched message fragment) and stats/usage items carry ``tags``.
+        Both are kept when present so callers can render them.
+        """
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            chat = {k: item.get(k) for k in ("id", "title", "created_at", "updated_at")}
+            tags = item.get("tags")
+            if tags:
+                chat["tags"] = tags
+            snippet = item.get("snippet")
+            if snippet:
+                chat["snippet"] = snippet
+            out.append(chat)
+        return out
 
     def _summarize_models(self, items: list) -> list[dict]:
         return [
@@ -1403,6 +1493,36 @@ class Tools:
         chats = self._summarize_chats(sorted_items[:limit])
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
+    async def get_my_tags(self, __request__: Any = None, __user__: dict = None,
+                          __event_emitter__: Any = None) -> str:
+        """List the tags the requesting user has used on chats (name and id).
+
+        Reads ``GET /api/v1/chats/all/tags``. The per-tag user_id and meta
+        bookkeeping are not exposed — only name and id, enough to answer
+        "which tags do you use?" and to feed ``search_chats`` prefixes.
+        """
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_my_tags(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+            request=__request__,
+            emitter=__event_emitter__,
+            action="Reading your tags…",
+            verbose=self._resolve_verbose(__user__),
+        )
+
+    async def _get_my_tags(self, request: Any, __user__: Optional[dict] = None,
+                           output_format: Optional[str] = None) -> str:
+        token = self._require_token(request)
+        _status, _ct, body = await self._api_get_json(token, _ROUTE_CHATS_ALL_TAGS)
+        items, _total = self._extract_items(json.loads(body))
+        tags = [
+            {"id": t.get("id"), "name": t.get("name")}
+            for t in items
+            if isinstance(t, dict)
+        ]
+        return self._ok({"count": len(tags), "tags": tags}, "tags", output_format=output_format)
+
     async def get_chat_metadata(self, chat_id: str, __request__: Any = None,
                                  __user__: dict = None,
                                  __event_emitter__: Any = None) -> str:
@@ -1522,7 +1642,13 @@ class Tools:
                            __event_emitter__: Any = None) -> str:
         """Search the requesting user's chats for a text fragment.
 
-        :param text: the search term (matched against chat titles and messages).
+        The backend supports the UI filter prefixes, all server-side:
+        ``tag:name``, ``folder:name``, ``pinned:true/false``,
+        ``archived:true/false``, ``shared:true/false`` and ``tag:none``
+        (chats with no tags) — e.g. ``search_chats("tag:budget")``. Results
+        include a per-chat ``snippet`` of the matched message when present.
+
+        :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted).
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
@@ -1597,6 +1723,137 @@ class Tools:
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
+
+    async def get_archived_chats(self, limit: int = 10, __request__: Any = None,
+                                 __user__: dict = None,
+                                 __event_emitter__: Any = None) -> str:
+        """List chats the requesting user has archived.
+
+        Reads ``GET /api/v1/chats/archived`` (a plain ChatTitleIdResponse
+        list, no server-side pagination).
+
+        :param limit: how many chats to return (default 10, max 100).
+        """
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_archived_chats(limit, __request__, __user__=__user__,
+                                     output_format=output_format),
+            output_format=output_format,
+            request=__request__,
+            emitter=__event_emitter__,
+            action="Reading archived chats…",
+            verbose=self._resolve_verbose(__user__),
+        )
+
+    async def _get_archived_chats(self, limit: Any, request: Any,
+                                  __user__: Optional[dict] = None,
+                                  output_format: Optional[str] = None) -> str:
+        token = self._require_token(request)
+        limit = self._coerce_limit(limit)
+        _status, _ct, body = await self._api_get_json(token, _ROUTE_CHATS_ARCHIVED)
+        items, total = self._extract_items(json.loads(body))
+        chats = self._summarize_chats(items)[:limit]
+        return self._ok({
+            "label": "Archived chats",
+            "count": len(chats),
+            "total": total,
+            "chats": chats,
+        }, "chats", output_format=output_format)
+
+    async def get_chat_stats(self, chat_id: str, __request__: Any = None,
+                             __user__: dict = None,
+                             __event_emitter__: Any = None) -> str:
+        """Get usage statistics for one chat: message counts, models, tags, averages.
+
+        Reads the EXPERIMENTAL ``/api/v1/chats/stats/usage`` route, filtered
+        client-side by id — it may change or disappear in a future release;
+        a failure of that route produces a clean error and never affects
+        other methods.
+
+        :param chat_id: the chat's UUID.
+        """
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_chat_stats(chat_id, __request__, __user__=__user__,
+                                 output_format=output_format),
+            output_format=output_format,
+            request=__request__,
+            emitter=__event_emitter__,
+            action="Reading chat usage stats…",
+            verbose=self._resolve_verbose(__user__),
+        )
+
+    async def _get_chat_stats(self, chat_id: Any, request: Any = None,
+                              __user__: Optional[dict] = None,
+                              output_format: Optional[str] = None) -> str:
+        token = self._require_token(request)
+        chat_id = self._require_id(chat_id, "chat_id")
+        # The stats route IGNORES pageSize — it always returns up to 50 rows
+        # per page, in irregular sizes (verified live 2026-08-20: pages of
+        # 50/49/49 then an empty page while declaring total 149), so short
+        # pages must NOT stop the iteration; only an empty page or the
+        # declared total ends it, bounded by MAX_PAGES.
+        items, _total = await self._fetch_all_pages(
+            token, _ROUTE_CHATS_STATS_USAGE, page_size=DEFAULT_PAGE_SIZE,
+            short_page_stops=False,
+        )
+        found = next(
+            (s for s in items if isinstance(s, dict) and s.get("id") == chat_id),
+            None,
+        )
+        if found is None:
+            raise ToolError(
+                f"No usage statistics found for chat {chat_id} (the "
+                "stats/usage route is EXPERIMENTAL and may not cover "
+                "every chat)."
+            )
+        stats = {
+            k: found.get(k)
+            for k in (
+                "id", "message_count", "models", "tags",
+                "history_message_count", "history_user_message_count",
+                "history_assistant_message_count",
+                "average_response_time",
+                "average_user_message_content_length",
+                "average_assistant_message_content_length",
+                "last_message_at", "created_at", "updated_at",
+            )
+            if k in found
+        }
+        return self._ok(stats, "chat_stats", output_format=output_format)
+
+    async def get_my_folders(self, __request__: Any = None, __user__: dict = None,
+                             __event_emitter__: Any = None) -> str:
+        """List the folders the requesting user has created (name, id, parent).
+
+        Reads ``GET /api/v1/folders/`` (trailing slash required). The route
+        is gated by the folders feature: on an instance where folders are
+        disabled the backend returns 403, which maps to a readable
+        Forbidden error.
+        """
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_my_folders(__request__, __user__=__user__, output_format=output_format),
+            output_format=output_format,
+            request=__request__,
+            emitter=__event_emitter__,
+            action="Reading your folders…",
+            verbose=self._resolve_verbose(__user__),
+        )
+
+    async def _get_my_folders(self, request: Any, __user__: Optional[dict] = None,
+                              output_format: Optional[str] = None) -> str:
+        token = self._require_token(request)
+        _status, _ct, body = await self._api_get_json(token, _ROUTE_FOLDERS)
+        items, _total = self._extract_items(json.loads(body))
+        folders = [
+            {k: f.get(k)
+             for k in ("id", "name", "parent_id", "is_expanded",
+                       "created_at", "updated_at")}
+            for f in items
+            if isinstance(f, dict)
+        ]
+        return self._ok({"count": len(folders), "folders": folders}, "folders", output_format=output_format)
 
     async def get_my_files(
         self,

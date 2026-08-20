@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** In progress — Iterations 0, 1, 3, 4, 6, 7 and 8 (partial) **done**; Iteration 2 **deferred to a future version**; Iteration 8 **in progress — items 1, 7 (chat metadata/summary split) done, items 2–6 pending**; Iteration 5 **pending** (its live-validation findings were folded in manually, but the env-gated live suite + isolation tests are not yet committed)
+**Status:** In progress — Iterations 0, 1, 3, 4, 6, 7 and 8 **done** (Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; Iteration 5 **pending** (its live-validation findings were folded in manually, but the env-gated live suite + isolation tests are not yet committed)
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -265,7 +265,7 @@ Reviewed against Open WebUI source (`main` and the instance's v0.10.2) — not j
 - **Errors = `chat:message:error`** (the message error block, verified in the frontend `Chat.svelte`/`Error.svelte`), **never gated by `verbose`**, and **consolidated to at most one per tool call**: `_run` emits a single error on failure; a batch `delete_files` with per-file failures emits one "N of M file(s) could not be deleted" summary instead of one toast per file — the per-id detail stays in the returned text. This directly addresses the user's requirement: error visibility is reserved for real errors, and repeated failures never flood the user with toasts.
 - **Events never contain the token** (pinned by `test/test_events.py`: start+done, no-emitter no-op, `verbose=False` suppresses status but NOT errors, per-user override, single error on failure, single consolidated error on batch failures, no token in any event).
 
-## Iteration 8 — Chat organization metadata: tags, folders, archived & usage stats 🚧 IN PROGRESS (items 1 & 7 done; 2–6 pending)
+## Iteration 8 — Chat organization metadata: tags, folders, archived & usage stats ✅ DONE (2026-08-20)
 
 **Commit:** `feat(owui_meta): surface chat tags, folders, archived chats and usage stats`
 
@@ -285,7 +285,7 @@ All probes ran with a user-role API key against `http://open-webui.private` (sam
 | “UI search supports filter prefixes” | ✅ Confirmed and **already server-side**: `tag:`, `folder:`, `pinned:true/false`, `archived:true/false`, `shared:true/false`, plus `tag:none` (= chats with no tags). Live-verified each |
 | Search returns a `snippet` | ✅ Confirmed: `search?text=` populates `snippet` per result. The tool was **dropping it** in `_summarize_chats` — surfaced now |
 | “Items expose pinned/archived flags” | ❌ Only `ChatResponse` (detail by id) carries `pinned`, `archived`, `folder_id`, `meta.tags`. List items never do |
-| Chat usage stats | ✅ `GET /api/v1/chats/stats/usage` (`page`, `items_per_page`) → `{items, total}`; each item: `tags`, `message_count`, `models`, averages, `last_message_at`. **EXPERIMENTAL** (may be removed in future releases) |
+| Chat usage stats | ✅ `GET /api/v1/chats/stats/usage` (`page`, `pageSize`) → `{items, total}`; each item: `tags`, `message_count`, `models`, `history_*` counts, averages, `last_message_at`. **EXPERIMENTAL** (may be removed in future releases). **Pagination quirk (verified live): `pageSize` is IGNORED** — always ≤ 50 rows/page in irregular sizes (live: 50/49/49 then an empty page with declared total 149), so the tool iterates until an empty page or the declared total (`short_page_stops=False`), never stopping on a short page |
 | Folders | ✅ `GET /api/v1/folders/` (**with** trailing slash) → `FolderNameIdResponse` (`id, name, meta, parent_id, is_expanded, created_at, updated_at`); gated by `folders.enable` + `features.folders` permission → may 403 depending on the instance (not gated on this one: 2 folders live) |
 
 **Slash map verified live** (new routes): `folders/` WITH slash; `chats/all/tags`, `chats/archived`, `chats/stats/usage` WITHOUT slash; `POST chats/tags` without slash.
@@ -293,16 +293,16 @@ All probes ran with a user-role API key against `http://open-webui.private` (sam
 ### Changes
 
 1. ✅ **`get_my_chats`** (DONE, commit `e65161d` v0.11.0): adds `include_folders` / `include_pinned` query params to `GET /api/v1/chats/` (they only filter rows server-side; item fields stay the same). This makes the tool see folder + pinned chats it was silently missing (~⅓ of the user's chats).
-2. **Tags surfaced**:
+2. ✅ **Tags surfaced** (commit pending, v0.15.0):
    - `get_my_tags()` → `GET /api/v1/chats/all/tags` (TagModel: id, name; user_id/meta not exposed to the model). Lets the model answer “which tags do you use?”.
-   - `_summarize_chats` keeps `tags` when present (search results do not carry them — list items never do — but `stats/usage` items do).
-3. **`search_chats` align with UI prefixes (P3)**: no new endpoint needed — the backend already parses `tag:`, `folder:`, `pinned:`, `archived:`, `shared:`. The tool:
+   - `_summarize_chats` keeps `tags` and `snippet` when present (search results carry `snippet`; list items never carry either, but `stats/usage` items carry `tags`).
+3. ✅ **`search_chats` align with UI prefixes (P3)**: no new endpoint needed — the backend already parses `tag:`, `folder:`, `pinned:`, `archived:`, `shared:`. The tool:
    - passes `text` through unmodified (it already does),
-   - surfaces the per-result `snippet` field (was dropped),
+   - surfaces the per-result `snippet` field (was dropped) — rendered as an extra table column only for search results that have one,
    - documents the prefixes in the method docstring so the model can use them.
-4. **`get_archived_chats()`** → `GET /api/v1/chats/archived` (no slash) — `ChatTitleIdResponse` list, same summarization as `get_my_chats`.
-5. **`get_chat_stats(chat_id)`** (P4) → `GET /api/v1/chats/stats/usage` filtered client-side by id: `tags`, `message_count`, `models`, averages, `last_message_at`. Route marked EXPERIMENTAL in the docstring; failure → clean error, never crashes other methods. **Not** the export route (`/stats/export` is excluded by the query-only rule).
-6. **`get_my_folders()`** (P4) → `GET /api/v1/folders/` (trailing slash): name + id. A 403 (folders disabled on the instance) maps to a readable error.
+4. ✅ **`get_archived_chats(limit)`** → `GET /api/v1/chats/archived` (no slash) — `ChatTitleIdResponse` list (no server-side pagination), same summarization as `get_my_chats`, sliced by `limit`, header “Archived chats”.
+5. ✅ **`get_chat_stats(chat_id)`** (P4) → `GET /api/v1/chats/stats/usage` iterated client-side (see the pageSize quirk above) and filtered by id: `tags`, `message_count`, `models`, `history_*` counts, averages, `last_message_at`, dates. Route marked EXPERIMENTAL in the docstring; not-found and route failure → clean error, never crashes other methods. **Not** the export route (`/stats/export` is excluded by the query-only rule).
+6. ✅ **`get_my_folders()`** (P4) → `GET /api/v1/folders/` (trailing slash): id, name, parent_id, is_expanded, dates (`meta`/icon not exposed). A 403 (folders disabled on the instance) maps to a readable error.
 7. ✅ **`get_chat` → `get_chat_summary` + `get_chat_metadata`** (DONE, commits `a3f1e07` v0.12.0 / `b813603` v0.13.0, user decisions 2026-08-20): `get_chat` was renamed (it never returns full content anymore) and **split into two distinct methods**:
    - **`get_chat_metadata(chat_id)`** — organization metadata only (`id`, `title`, `message_count`, `models`, `tags`, `folder_id`/`folder_name`, `pinned`, `archived`, `share_id`, dates). **No message content in any format** — the light "chat data" query.
    - **`get_chat_summary(chat_id)`** — the same metadata plus a markdown snippet of the **main branch** (walked from `currentId` back through `parentId` — the chat is a tree, not a list): the first and last `DEFAULT_SNIPPET_HEAD`/`DEFAULT_SNIPPET_TAIL` messages (**fixed at 3 each** by user decision — the model never passes head/tail, no parameters in the signature). Each message is collapsed to a single markdown-safe line: newlines → ` ⏎ `, every backtick escaped (a code fence in a message can never open a fence in the tool output), truncated to `MAX_SNIPPET_MESSAGE_CHARS`. Middle messages are replaced by an ellipsis line (`… ( N messages skipped ) …`); small chats (≤ 6 messages) show all without the ellipsis. The head/tail snippet is included in JSON too (it is the summary). Fixes the v0.10.2 shape bugs of the old renderer: assistant text lives in `output[].content[].text` (plain `content` is usually empty) and multimodal parts (images) are dropped. Constants `DEFAULT_SNIPPET_HEAD/TAIL`, `MAX_SNIPPET_MESSAGE_CHARS` — no magic numbers. Shared metadata extraction lives in `_chat_metadata_payload` (used by both methods).
@@ -312,29 +312,30 @@ All probes ran with a user-role API key against `http://open-webui.private` (sam
 - All new endpoints **read-only**, allowlisted, typed params only; no URL-taking param.
 - Content-Type validation + slash map honored (`folders/` has the slash; the rest don't).
 - `_sanitize`/`_redact` at the output boundary; tripwire test still passes.
-- Pagination caps (`MAX_PAGES`, `DEFAULT_PAGE_SIZE`) respected for `stats/usage`; `total` reported.
+- Pagination caps (`MAX_PAGES`, `DEFAULT_PAGE_SIZE`) respected for `stats/usage`; the pageSize-ignored quirk is handled by `short_page_stops=False` (only an empty page or the declared total ends the iteration).
 - `delete_files` remains the only write operation; untouched.
-- The EXPERIMENTAL `stats/usage` route is optional/failure-tolerant: if it 4xx/5xxs, the method reports a clean error instead of breaking the tool.
+- The EXPERIMENTAL `stats/usage` route is optional/failure-tolerant: if it 4xx/5xxs or the chat has no entry, the method reports a clean error instead of breaking the tool.
 
 ### Tests
 - `test_route_map.py`: new cases — `get_my_tags` → `/api/v1/chats/all/tags`, `get_archived_chats` → `/api/v1/chats/archived`, `get_chat_stats` → `/api/v1/chats/stats/usage`, `get_my_folders` → `/api/v1/folders/` (slash asserted), and `get_my_chats` now sends `include_folders`/`include_pinned`.
-- `test_user_methods.py` / new `test_chat_metadata.py`: tags summarization (no user_id/meta leak), archived list, chat stats payload, folders 403 mapping, snippet surfaced in search, chat detail carries `folder_id` + `meta.tags`, invalid id rejected without request.
-- Full suite stays green; version bumped (`0.10.0 → 0.14.0`).
+- `test/test_iteration8.py` (new): tags summarization (no user_id/meta leak), search snippet surfaced (JSON + markdown snippet column), archived list (label + limit), chat stats across the irregular 50/49/49/empty pagination (4 pages fetched), stats not-found clean error, invalid id rejected without request, folders field whitelist + 403 mapping.
+- Full suite: **129 passed**; version bumped to v0.15.0. Live smoke (2026-08-20) against the instance: tags (19), archived (0), folders (2), chat stats (52-message chat found), search `tag:tool` (3) and snippet column — all working.
 
 ### Progress log (2026-08-20)
 
 | Item | Status | Commit / version |
 |---|---|---|
 | 1. `get_my_chats` include_folders/include_pinned | ✅ DONE (tested live: the folder + pinned chats now appear) | `e65161d` → v0.11.0 |
-| 2. Tags surfaced (`get_my_tags`, `_summarize_chats` keeps tags) | ⏳ pending | — |
-| 3. `search_chats` UI prefixes + snippet | ⏳ pending | — |
-| 4. `get_archived_chats` | ⏳ pending | — |
-| 5. `get_chat_stats` (stats/usage, EXPERIMENTAL) | ⏳ pending | — |
-| 6. `get_my_folders` | ⏳ pending | — |
+| 2. Tags surfaced (`get_my_tags`, `_summarize_chats` keeps tags/snippet) | ✅ DONE (tested live: 19 tags) | v0.15.0 |
+| 3. `search_chats` UI prefixes + snippet | ✅ DONE (tested live: `tag:tool` → 3, snippet column rendered) | v0.15.0 |
+| 4. `get_archived_chats` | ✅ DONE (tested live: 0 archived) | v0.15.0 |
+| 5. `get_chat_stats` (stats/usage, EXPERIMENTAL, pageSize-ignored pagination) | ✅ DONE (tested live: 52-message chat found) | v0.15.0 |
+| 6. `get_my_folders` | ✅ DONE (tested live: 2 folders) | v0.15.0 |
 | 7. Chat detail → **`get_chat_metadata`** (metadata only, no content) + **`get_chat_summary`** (metadata + head/tail snippet markdown-safe, fixed 3+3 constants) | ✅ DONE (tested live) | `a3f1e07`, `b813603`, `78d92de` → v0.14.0 |
 | — | Frontmatter version aligned to actual (was stuck at 0.12.0) | `fe00f43` |
+| — | Frontmatter version bumped to 0.15.0 (Iteration 8 complete) | v0.15.0 |
 
-Remaining Iteration 8 items (2–6) implement the P1–P5 proposals corrected against the verified backend facts above.
+Iteration 8 is complete. Next candidates: Iteration 5 (live-validation suite + isolation tests) or future P-series proposals.
 
 ## 8. Out of scope (per DESIGN §2)
 

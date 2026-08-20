@@ -60,7 +60,20 @@ Import `owui_meta.py` into Open WebUI at **Workspace → Tools → +** and attac
 List methods support **pagination, sorting and filtering** (client-side, since the API does not expose them):
 
 - `get_my_files(limit=50, sort_by="size" | "created_at" | "filename", sort_order="asc" | "desc", content_type="image/*", min_size=100000, max_size=1000000, filename="report")` — size in raw bytes.
-- `get_my_chats(limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc")`.
+- `get_my_chats(limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc")` — includes folder + pinned chats (the backend hides them from the default listing).
+
+Chat organization (Iteration 8) is covered by dedicated methods:
+
+- `get_my_tags()` — the tag catalog (`name` + `id`), to answer “which tags do you use?”.
+- `get_archived_chats(limit=10)` — archived chats.
+- `get_chat_stats(chat_id)` — usage stats for one chat (message counts, models, tags, averages) from the **EXPERIMENTAL** `stats/usage` route; failure of that route is a clean error, never a crash.
+- `get_my_folders()` — folders (`name`, `parent`, `expanded`, dates); a 403 on instances where folders are disabled maps to a readable error.
+- `search_chats(text)` accepts the UI filter prefixes server-side: `tag:name`, `folder:name`, `pinned:true/false`, `archived:true/false`, `shared:true/false`, `tag:none` — and surfaces the per-result `snippet`.
+
+Chat detail comes in two flavors:
+
+- `get_chat_metadata(chat_id)` — organization metadata only (message count, models, tags, folder, pinned/archived, dates); **no message content in any format**.
+- `get_chat_summary(chat_id)` — the same metadata plus a markdown snippet of the first and last 3 messages of the main branch (ellipsis for the middle); never the full conversation.
 
 The tool iterates pages transparently (bounded by `MAX_PAGES`) and returns a **summarized** result: top N items + counts, never a full dump.
 
