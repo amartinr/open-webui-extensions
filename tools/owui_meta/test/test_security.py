@@ -39,7 +39,7 @@ def test_sanitize_drops_secret_keys_keeps_flags():
         "client_secret": "cs",
         "config": {"client_secret": "nested-cs", "ok": 1},
         "api_keys": True,                 # boolean permission FLAG — kept
-        "name": "Abel",
+        "name": "John Doe",
     }
     out = tools._ok(payload, "profile", output_format="json")
     data = json.loads(out)
@@ -48,7 +48,7 @@ def test_sanitize_drops_secret_keys_keeps_flags():
     assert "config" in data and "client_secret" not in data["config"]
     assert data["config"]["ok"] == 1
     assert data["api_keys"] is True       # flag survives
-    assert data["name"] == "Abel"
+    assert data["name"] == "John Doe"
 
     # markdown also goes through the sanitizer before rendering
     out = tools._ok(payload, "profile", output_format="markdown")
@@ -62,7 +62,7 @@ async def test_sanitize_protects_against_future_raw_pass_through():
     # exact auths() shape: token echo + profile.
     raw_body = {
         "token": "sk-echoed", "token_type": "Bearer", "expires_at": 1,
-        "id": "u1", "name": "Abel", "role": "user",
+        "id": "u1", "name": "John Doe", "role": "user",
         "permissions": {"features": {"api_keys": True}},
     }
 
@@ -70,12 +70,12 @@ async def test_sanitize_protects_against_future_raw_pass_through():
         return json_response(raw_body)
 
     # markdown
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_my_profile(FakeRequest(token="sk-echoed"))
     assert "sk-echoed" not in out
 
     # json
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_profile(FakeRequest(token="sk-echoed"))
     assert "sk-echoed" not in out
 
@@ -92,7 +92,7 @@ async def test_token_string_redacted_even_inside_whitelisted_field():
         return json_response({"id": "u1", "name": secret, "role": "user"})
 
     for fmt in ("markdown", "json"):
-        tools = make_tools(handler, base_url="http://open-webui.private", output_format=fmt)
+        tools = make_tools(handler, base_url="http://webui.example.test", output_format=fmt)
         out = await tools.get_my_profile(FakeRequest(token=secret))
         assert secret not in out, f"token leaked in {fmt} mode"
         assert "[REDACTED]" in out
@@ -105,7 +105,7 @@ async def test_token_redacted_in_error_path():
     def handler(request):
         raise httpx.ConnectError(f"could not connect with {secret}", request=request)
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_my_profile(FakeRequest(token=secret))
     assert secret not in out
 

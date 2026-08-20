@@ -83,7 +83,7 @@ async def test_delete_files_batch_uses_delete_method_per_file():
         seen.append((request.method, request.url.path))
         return handler(request)
 
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     out = await tools.delete_files([FILE_ID, FILE_ID_2], __request__=FakeRequest())
 
     # per file: one GET (metadata) + one DELETE (no trailing slash)
@@ -127,7 +127,7 @@ async def test_delete_files_partial_failure_reports_per_id():
             return json_response({"message": "File deleted successfully"})
         return json_response({"unexpected": path}, status=404)
 
-    tools = make_tools(h, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(h, base_url="http://webui.example.test", output_format="json")
     out = await tools.delete_files([FILE_ID, FILE_ID_3], __request__=FakeRequest())
 
     payload = json.loads(out)
@@ -141,7 +141,7 @@ async def test_delete_files_partial_failure_reports_per_id():
 
 async def test_delete_files_markdown_summary():
     handler = make_delete_handler({FILE_ID: ("a.pdf", True)})
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.delete_files([FILE_ID], __request__=FakeRequest())
     assert "**Deleted 1 of 1 files**" in out
     assert "| deleted | a.pdf |" in out
@@ -155,7 +155,7 @@ async def test_delete_files_404_on_metadata_never_calls_delete():
         calls.append(request.method)
         return json_response({"detail": "nope"}, status=404)
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.delete_files([FILE_ID], __request__=FakeRequest())
 
     payload = json.loads(out)
@@ -166,7 +166,7 @@ async def test_delete_files_404_on_metadata_never_calls_delete():
 
 async def test_delete_files_403_on_delete_maps_to_forbidden():
     handler = make_delete_handler({FILE_ID: ("a.pdf", False)})
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.delete_files([FILE_ID], __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["failed_count"] == 1
@@ -180,7 +180,7 @@ async def test_delete_files_whole_list_validated_before_any_request():
         calls.append(request.url.path)
         return json_response({"ok": True})
 
-    tools = make_tools(handler, base_url="http://open-webui.private")
+    tools = make_tools(handler, base_url="http://webui.example.test")
     # one good id + one invalid id -> the whole call is rejected, nothing runs
     out = await tools.delete_files([FILE_ID, "bad/id/../x"], __request__=FakeRequest())
     assert calls == []
@@ -188,20 +188,20 @@ async def test_delete_files_whole_list_validated_before_any_request():
 
 
 async def test_delete_files_rejects_non_list():
-    tools = make_tools(lambda r: json_response({"ok": True}), base_url="http://open-webui.private")
+    tools = make_tools(lambda r: json_response({"ok": True}), base_url="http://webui.example.test")
     out = await tools.delete_files(FILE_ID, __request__=FakeRequest())
     assert "expected a non-empty list" in out
 
 
 async def test_delete_files_rejects_empty_list():
-    tools = make_tools(lambda r: json_response({"ok": True}), base_url="http://open-webui.private")
+    tools = make_tools(lambda r: json_response({"ok": True}), base_url="http://webui.example.test")
     out = await tools.delete_files([], __request__=FakeRequest())
     assert "expected a non-empty list" in out
 
 
 async def test_delete_files_dedupes_and_caps():
     handler = make_delete_handler({FILE_ID: ("a.pdf", True)})
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     # duplicates collapse into one DELETE
     out = await tools.delete_files([FILE_ID, FILE_ID, FILE_ID], __request__=FakeRequest())
     payload = json.loads(out)

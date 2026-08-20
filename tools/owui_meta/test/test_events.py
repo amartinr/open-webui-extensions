@@ -53,7 +53,7 @@ def files_handler():
 
 async def test_success_emits_start_and_done_status():
     emitter = FakeEmitter()
-    tools = make_tools(files_handler(), base_url="http://open-webui.private")
+    tools = make_tools(files_handler(), base_url="http://webui.example.test")
     out = await tools.get_my_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
     statuses = [e for e in emitter.events if e["type"] == "status"]
@@ -65,14 +65,14 @@ async def test_success_emits_start_and_done_status():
 
 
 async def test_no_emitter_skips_events():
-    tools = make_tools(files_handler(), base_url="http://open-webui.private")
+    tools = make_tools(files_handler(), base_url="http://webui.example.test")
     out = await tools.get_my_files(__request__=FakeRequest())  # no emitter
     assert "**Files: 1" in out  # still works, no events
 
 
 async def test_verbose_false_suppresses_status_events():
     emitter = FakeEmitter()
-    tools = make_tools(files_handler(), base_url="http://open-webui.private")
+    tools = make_tools(files_handler(), base_url="http://webui.example.test")
     tools.valves.verbose = False
     out = await tools.get_my_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
@@ -82,7 +82,7 @@ async def test_verbose_false_suppresses_status_events():
 
 async def test_user_valve_verbose_overrides_admin():
     emitter = FakeEmitter()
-    tools = make_tools(files_handler(), base_url="http://open-webui.private")
+    tools = make_tools(files_handler(), base_url="http://webui.example.test")
     tools.valves.verbose = False
     tools.user_valves.verbose = True  # per-user override
 
@@ -101,7 +101,7 @@ async def test_failure_emits_single_error_event():
         return json_response({"unexpected": request.url.path}, status=500)
 
     emitter = FakeEmitter()
-    tools = make_tools(handler, base_url="http://open-webui.private")
+    tools = make_tools(handler, base_url="http://webui.example.test")
     out = await tools.get_my_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
     errors = [e for e in emitter.events if e["type"] == "chat:message:error"]
@@ -116,7 +116,7 @@ async def test_error_event_shown_even_when_verbose_false():
         return json_response({"unexpected": request.url.path}, status=500)
 
     emitter = FakeEmitter()
-    tools = make_tools(handler, base_url="http://open-webui.private")
+    tools = make_tools(handler, base_url="http://webui.example.test")
     tools.valves.verbose = False
     await tools.get_my_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
@@ -145,7 +145,7 @@ async def test_batch_delete_failures_emit_single_consolidated_error():
         return json_response({"unexpected": path}, status=404)
 
     emitter = FakeEmitter()
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.delete_files([FILE_ID, FILE_ID_2], __request__=FakeRequest(),
                                    __event_emitter__=emitter)
 
@@ -165,7 +165,7 @@ async def test_events_never_contain_the_token():
     def handler(request):
         return json_response({"unexpected": request.url.path}, status=500)
 
-    tools = make_tools(handler, base_url="http://open-webui.private")
+    tools = make_tools(handler, base_url="http://webui.example.test")
     await tools.get_my_files(__request__=FakeRequest(token=secret), __event_emitter__=emitter)
 
     blob = json.dumps([e for e in emitter.events])

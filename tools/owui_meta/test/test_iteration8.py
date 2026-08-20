@@ -63,7 +63,7 @@ def api_handler(request):
 # ── get_my_tags (item 2) ────────────────────────────────────────────────
 
 async def test_get_my_tags_summarizes_id_and_name_only():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_tags(__request__=FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 4
@@ -75,7 +75,7 @@ async def test_get_my_tags_summarizes_id_and_name_only():
 
 
 async def test_get_my_tags_markdown_table():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_my_tags(__request__=FakeRequest())
     assert "**Tags: 4**" in out
     assert "| Name | ID |" in out
@@ -85,7 +85,7 @@ async def test_get_my_tags_markdown_table():
 # ── search_chats prefixes + snippet (item 3) ────────────────────────────
 
 async def test_search_chats_surfaces_snippet():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.search_chats("Presupuestos", __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["chats"][0]["snippet"] == "...the Presupuestos Generales del Estado..."
@@ -93,7 +93,7 @@ async def test_search_chats_surfaces_snippet():
 
 
 async def test_search_chats_markdown_renders_snippet_column():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.search_chats("Presupuestos", __request__=FakeRequest())
     assert "**Search results for 'Presupuestos': 1**" in out
     assert "| Title | Updated | ID | Snippet |" in out
@@ -103,7 +103,7 @@ async def test_search_chats_markdown_renders_snippet_column():
 # ── get_archived_chats (item 4) ─────────────────────────────────────────
 
 async def test_get_archived_chats_summarizes_with_label():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_archived_chats(__request__=FakeRequest())
     payload = json.loads(out)
     assert payload["label"] == "Archived chats"
@@ -114,7 +114,7 @@ async def test_get_archived_chats_summarizes_with_label():
 
 
 async def test_get_archived_chats_applies_limit():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_archived_chats(limit=1, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 1
@@ -122,7 +122,7 @@ async def test_get_archived_chats_applies_limit():
 
 
 async def test_get_archived_chats_markdown_header():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_archived_chats(__request__=FakeRequest())
     assert "**Archived chats: 2**" in out
 
@@ -169,7 +169,7 @@ def irregular_stats_handler():
 
 async def test_get_chat_stats_finds_chat_across_irregular_pages():
     recorder = Recorder(irregular_stats_handler())
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_chat_stats(CHAT_ID, __request__=FakeRequest())
     # short pages (49 < 50) must NOT stop the iteration: pages 1, 2, 3 are
     # fetched, page 4 is empty (the declared total 149 > 148 accumulated).
@@ -187,7 +187,7 @@ async def test_get_chat_stats_finds_chat_across_irregular_pages():
 
 async def test_get_chat_stats_markdown_renders_bullets():
     recorder = Recorder(irregular_stats_handler())
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_chat_stats(CHAT_ID, __request__=FakeRequest())
     assert "**Chat stats**" in out
     assert "- Messages: 52" in out
@@ -197,7 +197,7 @@ async def test_get_chat_stats_markdown_renders_bullets():
 
 
 async def test_get_chat_stats_not_found_clean_error():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     # api_handler's stats/usage returns an empty items list
     out = await tools.get_chat_stats("does-not-exist", __request__=FakeRequest())
     payload = json.loads(out)
@@ -207,7 +207,7 @@ async def test_get_chat_stats_not_found_clean_error():
 
 async def test_get_chat_stats_invalid_id_rejected_without_request():
     recorder = Recorder(api_handler)
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_chat_stats("../../etc/passwd", __request__=FakeRequest())
     assert "Invalid chat_id" in out
     assert recorder.requests == []
@@ -216,7 +216,7 @@ async def test_get_chat_stats_invalid_id_rejected_without_request():
 # ── get_my_folders (item 6) ─────────────────────────────────────────────
 
 async def test_get_my_folders_whitelists_fields():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_folders(__request__=FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 2
@@ -232,7 +232,7 @@ async def test_get_my_folders_whitelists_fields():
 
 
 async def test_get_my_folders_markdown_table_with_parent_and_expanded():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_my_folders(__request__=FakeRequest())
     assert "**Folders: 2**" in out
     assert "| Name | Parent | Expanded | Created | ID |" in out
@@ -244,6 +244,6 @@ async def test_get_my_folders_403_maps_to_readable_error():
     def forbidden(request):
         return json_response({"detail": "folders disabled"}, status=403)
 
-    tools = make_tools(forbidden, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(forbidden, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_my_folders(__request__=FakeRequest())
     assert "Forbidden" in out

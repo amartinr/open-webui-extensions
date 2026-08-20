@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** In progress — Iterations 0, 1, 3, 4, 6, 7 and 8 **done** (Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; Iteration 5 **pending** (its live-validation findings were folded in manually, but the env-gated live suite + isolation tests are not yet committed)
+**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -128,15 +128,21 @@ Implements DESIGN §8.6 across the list methods:
 
 **Definition of done:** tool execution is visible in the UI; error events are consolidated (never flooding); event payloads are token-free (tested).
 
-## Iteration 5 — Live validation & isolation tests
+## Iteration 5 — Live validation & isolation tests ✅ DONE (2026-08-20)
 
 **Commit:** `test(owui_meta): add live integration and isolation tests`
 
-- Env-gated live suite (`test/test_live.py`, skipped unless `OWUI_META_LIVE_URL` / `OWUI_META_LIVE_TOKEN` are set) re-validating the §5 endpoint map: profile, models, chats + `search?text=`, files + content, knowledge, prompts, tools; blocked `/users` for a user role; SPA-HTML trap for a nonexistent route.
-- **Isolation test** (`test/test_isolation.py`): two real users each see only their own data (§7.3).
-- Finalize `README.md` (usage, valves, security model, validation status) and mark DESIGN.md status.
+- Env-gated live suite (`test/test_live.py`, 18 tests; skipped unless `OWUI_META_LIVE_URL` / `OWUI_META_LIVE_TOKEN` are set, e.g. `source /tmp/owui_live.env`) re-validating the §5 endpoint map against the real instance: profile (the `/auths/` token echo never reaches the model), models, chats list + `search?text=` with UI prefixes (`tag:`, `pinned:`, `archived:`, `tag:none`), chat metadata/summary (no message content in metadata), tags (no `user_id` leak), archived chats, folders (or readable 403), `stats/usage` (the pageSize-ignored quirk asserted on live data), files + content snippet, workspace resources (prompts, tools, knowledge, skills), shared/pinned. Traps only live data exposes: SPA-HTML catch-all (no-slash variants never return JSON — today nginx answers 200 text/html or 301), and `/api/v1/users/` blocked for a user role (401/403, isolation). Output-boundary guard on real data: the token never appears in any method's output.
+- **Isolation tests** (`test/test_isolation.py`): mock-level — each request sends its own token (no caching across calls), two interleaved `Tools` instances share no state; live-level — every file returned for a token belongs to that token's `user_id` (single user), and with a second real token (`OWUI_META_LIVE_TOKEN2`) the two users' file sets are disjoint (skipped when the second token is absent).
+- **Personal data hygiene:** all mock profile data now uses fictitious values (`John Doe` / `john.doe@example.com`); the real token lives only in the environment, never in the repo.
+- **Infrastructure hygiene:** the internal hostname (and its DNS evidence) is not referenced in the repo anymore — live tests resolve the instance exclusively from `OWUI_META_LIVE_URL`; mock tests use a fictitious placeholder base URL (`http://webui.example.test`).
 
-**Definition of done:** live suite passes against the instance (or documents concrete failures as follow-ups); README complete.
+**Findings from the first live run (fixed in the suite, not the tool):**
+- `/api/v1/files` (no slash) no longer returns SPA 200 but **301 from nginx** — the invariant pinned is “never JSON”, not “always 200 HTML”.
+- `search_chats("archived:true")` returns 0 results → markdown renders `(none)` without a table; the suite tolerates empty results.
+- `tag:none` returns ~60 chats → the response exceeds `max_response_chars` and is truncated; the suite uses markdown mode and tolerates truncation (expected behavior).
+
+**Definition of done:** live suite passes against the instance — 148 passed / 1 skipped (second-user test needs `OWUI_META_LIVE_TOKEN2`); without the env the suite is cleanly skipped (131 passed / 18 skipped).
 
 ## Iteration 6 — Markdown-first output (pulled forward per user request) ✅ DONE (commits `3b27b22`, `e5a10ab`, `436ead7`, `2823c35`)
 
@@ -195,7 +201,7 @@ These changes were not in the initial plan; they emerged during development / li
 | 11 | Security review (user question) | **Profile endpoint echoes the token — field whitelist added** | `GET /api/v1/auths/` (`get_session_user`, v0.10.2) returns `token`/`token_type`/`expires_at` in its body (frontend session refresh). `get_my_profile` previously passed the raw body to `_ok`, so **json mode dumped the user's session credential into the model context**. Now `_get_my_profile` builds an explicit field whitelist; token fields never serialize, in either format. Regression test: `test_profile_token_echo_never_reaches_model`. | `49727a5` |
 | 12 | Security audit (user request) | **Whitelisted the last raw pass-throughs + documented secret-bearing GETs as never-allowed** | Audited every allowlisted endpoint against v0.10.2 source: no other token echoes. `get_chat` (json) dumped bookkeeping noise (`user_id`, `meta`, `tasks`, `summary`, `folder_id`) and `get_skill` (json) embedded the owner's `UserResponse` (another user's email for shared skills) — both now whitelisted. Also pinned in DESIGN §6.3: `auths/api_key`, `tools/id/{id}/valves(+/user)`, `tools/id/{id}`, `knowledge/external/connections*`, `*/admin/*` configs are **never** to be added to the allowlist (they return credentials). Tests: `test_get_skill_strips_owner_and_bookkeeping`, `test_get_chat_strips_bookkeeping_fields`. | `1ce2da9` |
 | 13 | Hardening (user question: “¿implementado?”) | **Output-boundary guards against accidental leaks** | Whitelists are per-method/manual; a future method or server field could leak. Added two structural guards: `_sanitize` (drops credential-named keys with string values; boolean flags like `api_keys` kept) applied in `_ok` for both formats, and `_run` redacting the raw token string from success and error output (`request=__request__` threaded through all 14 wrappers). Plus `test/test_security.py`: sanitizer unit, future-raw-pass-through simulation, token redaction inside a whitelisted field, redaction in the error path, static no-raw-body tripwire. | `9ae1506` |
-| 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite in Iteration 5 is still pending; these were one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
+| 9 | Live validation | **Manual live tests** against the instance using a real (non-persisted) token: confirmed the route map, `/users` blocked for user role, `search?text=` format, NDJSON for `chats/all` | The live suite is now committed as Iteration 5 (2026-08-20): `test/test_live.py` + `test/test_isolation.py`; these were the original one-off curl checks whose findings were folded into the fixes above. | — (findings in commits 1–3) |
 | 14 | Design decision (user) | **`get_file_content` attaches files to the UI via the native `files` event** — image → inline preview + download, text → 100-char snippet (no dump), binary → note. Best-effort metadata call to `GET /api/v1/files/{id}` (added to the allowlist) for the attachment display name; best-effort `_emit_files` so a dead UI socket never breaks the tool call. Read opt-in (`max_chars`/`offset`) deferred — see §7. | Verified against Open WebUI source: the `files` event is persisted by `socket/main.py` and rendered by `ResponseMessage.svelte`/`FileItem.svelte`/`Image.svelte`; the item schema is pinned by `test/test_file_attachment.py`. See §7 design note. | `5865848` |
 | 15 | Design decision (user) | **File cleanup: `delete_files(file_ids)`** — the first write operation, an explicit exception to read-only v1. Accepts a list of ids (whole list validated up front; dedup; capped by `MAX_DELETE_FILES`); per file: GET metadata first (report what disappears; a 404 never reaches the DELETE), then `DELETE /api/v1/files/{id}` (backend re-verifies owner/admin/write, cleans KB + vector index). Per-file failures are reported by id without aborting the rest. A dedicated orphan-list method was considered then dropped by user decision (the model derives orphans from `get_my_files()` `origin_chat_id` + `get_my_chats()`). HTTP engine generalized (`_fetch`/`_fetch_with_retry` take a method; new `_api_delete_json`). | Open WebUI keeps chat-attached files when a chat is deleted (verified in v0.10.2 `chats.py`: `delete_chat_by_id` never touches `Files`) — the orphan-cleanup case. See §7 design note. | `02395a5` |
 | 16 | Design decision (user) | **Iteration 4 status events + error consolidation** — `status` events (start/done) gated by a `verbose` valve (admin + per-user, per-user overrides); errors are `chat:message:error`, always shown, and consolidated to ONE per tool call (batch delete failures → single "N of M failed" summary). Logs explicitly parked by user decision (2026-08-03). | smart_fetch_url UX pattern (DESIGN §8.5); the user asked to reserve error visibility for real errors and never flood the user with repeated toasts. See §7 design note. | `3a04a52` |
@@ -273,7 +279,7 @@ Implements the **P1–P5 proposals** (extension brief 2026-08-20), re-validated 
 
 ### Backend facts verified live (2026-08-20)
 
-All probes ran with a user-role API key against `http://open-webui.private` (same instance DESIGN was validated against):
+All probes ran with a user-role API key against the internal instance (same instance DESIGN was validated against):
 
 | Claim (brief) | Verified reality |
 |---|---|

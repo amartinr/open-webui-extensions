@@ -2,8 +2,8 @@
 
 **Version:** 1.0
 **Date:** 2026-07-31
-**Author:** Abel (with technical assistance)
-**Status:** Design validated through real-world tests against the `open-webui.private` instance (v0.10.2); implementation in progress — Iteration 8 (chat organization metadata) partially done (see PLAN.md progress log 2026-08-20)
+**Author:** (with technical assistance)
+**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20)
 
 ---
 
@@ -132,7 +132,7 @@ Open WebUI's own code already reads this key to generate notification URLs (`pub
 
 ## 5. Verified endpoint map (instance v0.10.2)
 
-Sources: **real curl tests with a `user`-role API key** against `http://open-webui.private/`, and **source-code extraction of the v0.10.2 tag** (routers + `main.py` prefixes).
+Sources: **real curl tests with a `user`-role API key** against the internal instance, and **source-code extraction of the v0.10.2 tag** (routers + `main.py` prefixes).
 
 ### 5.1 ✅ Verified working (role `user`)
 
@@ -407,7 +407,7 @@ Implementation notes:
   - Sizes are shown as **raw integer bytes** (`8796`, `152340`) — never formatted with unit prefixes (`8.8 KB`). Sizes are stored as numbers in the backend API (`meta.size` is an `int`, see §8.7), and the tool passes them through as numbers. The column header states the unit (`Size (bytes)`) so the value stays unambiguous.
   - Timestamps are rendered as readable local dates/times (e.g. `2026-07-30 08:00`) instead of epoch integers — models handle ISO-like dates better than 10-digit epochs, and the raw epoch is preserved nowhere the model must use.
   - **IDs are always present** in the table (e.g. a `ID` column), because the model needs them to call follow-up methods (`get_chat_summary(id)`, `get_file_content(id)`).
-- **Details (profile, single items) → flat bullets** (`- Name: Abel`).
+- **Details (profile, single items) → flat bullets** (`- Name: John Doe`).
 - **File content → fenced block** with the content type as language hint (e.g. ` ```csv `). Binary content → a one-line note with metadata (no bytes).
 - **Chat history → heading + per-message blocks** (`**user** …` / `**assistant** …`).
 - **Errors → plain-text one-liners**, not JSON: `Error: Not authenticated: …`.
@@ -471,7 +471,6 @@ Implementation notes:
 ### 10.1 Connectivity (no credentials)
 | Test | Result |
 |---|---|
-| DNS `open-webui.private` | ✅ `172.16.1.1` |
 | `GET /health` | ✅ 200 (0.08 s) |
 | `GET /api/version` | ✅ `{"version":"0.10.2"}` |
 | `GET /api/config` | ✅ public (auth active, signup off) |
@@ -480,12 +479,12 @@ Implementation notes:
 ### 10.2 Authentication (with `sk-…` API key, role `user`)
 | Test | Result |
 |---|---|
-| `GET /api/v1/auths` | ✅ profile "Abel", role `user`, email `amartinr@lowendlab.com`, full permissions |
+| `GET /api/v1/auths` | ✅ profile "John Doe", role `user`, email `john.doe@example.com`, full permissions |
 | `GET /api/models` | ✅ visible models (e.g. `deepseek-v4-coding-assistant`) |
-| `GET /api/v1/chats` | ✅ only Abel's chats |
+| `GET /api/v1/chats` | ✅ only the requester's chats |
 | `GET /api/v1/chats/{id}` | ✅ full chat with history |
 | `GET /api/v1/chats/search?text=gastos` | ⏳ format pending confirmation (parameter `text` confirmed by 422) |
-| `GET /api/v1/files` | ✅ only Abel's files |
+| `GET /api/v1/files` | ✅ only the requester's files |
 | `GET /api/v1/files/{id}/content` | ✅ `image/png` 8796 B |
 | `GET /api/v1/knowledge` | ✅ `{"items":[],"total":0}` |
 | `GET /api/v1/prompts` | ✅ prompts (e.g. "Get current news") |
@@ -493,6 +492,10 @@ Implementation notes:
 | `GET /api/v1/users` (user role) | ✅ 401 no permission (isolation) |
 | `GET /api/v1/chats/{nonexistent UUID}` | ✅ 401 not found (no leak) |
 | `POST /api/v1/retrieval/query` | ✅ 405 (RAG non-operational, out of scope) |
+
+---
+
+The manual evidence above is now also enforced **automatically** by the env-gated live suite `test/test_live.py` + isolation checks `test/test_isolation.py` (Iteration 5, committed 2026-08-20): re-validates the endpoint map, the `/auths/` token-echo protection, SPA-HTML/redirect traps, `/users` blocked for a user role, per-user data scoping, and the no-token-in-output guard — against a live instance when `OWUI_META_LIVE_URL` / `OWUI_META_LIVE_TOKEN` are set (e.g. `source /tmp/owui_live.env`), skipped otherwise.
 
 ---
 

@@ -24,8 +24,8 @@ def api_handler(request):
     if path == "/api/v1/auths/":
         return json_response({
             "id": "16dcaa6d-7122-4cd5-bc01-823064998d75",
-            "name": "Abel",
-            "email": "amartinr@lowendlab.com",
+            "name": "John Doe",
+            "email": "john.doe@example.com",
             "role": "user",
             "permissions": {"chat": {"controls": True}},
         })
@@ -114,15 +114,15 @@ def api_handler(request):
 
 
 async def test_get_my_profile():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_profile(FakeRequest())
     payload = json.loads(out)
-    assert payload["name"] == "Abel"
+    assert payload["name"] == "John Doe"
     assert payload["role"] == "user"
 
 
 async def test_get_models_summarizes():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_models(FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 1
@@ -133,7 +133,7 @@ async def test_get_models_summarizes():
 
 async def test_get_my_chats_sends_page_size_and_summarizes():
     recorder = Recorder(api_handler)
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_chats(limit=5, __request__=FakeRequest())
     # transparent pagination: page_size = min(max(limit, 20), 50)
     assert recorder.requests[0].url.params["pageSize"] == "20"
@@ -149,7 +149,7 @@ async def test_get_my_chats_sends_include_flags():
     # pinned chats from the default listing unless include_folders/include_pinned
     # are sent. The tool must always send both so the model sees the real set.
     recorder = Recorder(api_handler)
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     await tools.get_my_chats(limit=5, __request__=FakeRequest())
     params = recorder.requests[0].url.params
     assert params["include_folders"] == "true"
@@ -159,7 +159,7 @@ async def test_get_my_chats_sends_include_flags():
 async def test_get_chat_metadata_json_has_no_message_content():
     # USER DECISION (2026-08-20): get_chat_metadata returns organization
     # metadata only — no message content in any format (the light query).
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_chat_metadata(CHAT_ID, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["id"] == CHAT_ID
@@ -174,7 +174,7 @@ async def test_get_chat_metadata_json_has_no_message_content():
 
 async def test_get_chat_summary_markdown_has_snippet():
     # The head/tail snippet is part of the summary (markdown).
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
     assert "**User**: hi" in out
     assert "**Chat: Budget planning**" in out
@@ -185,7 +185,7 @@ async def test_get_chat_summary_markdown_has_snippet():
 
 async def test_get_chat_summary_invalid_id_rejected_without_request():
     recorder = Recorder(api_handler)
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_chat_summary("../../etc/passwd", __request__=FakeRequest())
     assert "Invalid chat_id" in out
     assert recorder.requests == []
@@ -193,7 +193,7 @@ async def test_get_chat_summary_invalid_id_rejected_without_request():
 
 async def test_search_chats_sends_text_param():
     recorder = Recorder(api_handler)
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     out = await tools.search_chats("budget", __request__=FakeRequest())
     assert recorder.requests[0].url.path == "/api/v1/chats/search"
     assert recorder.requests[0].url.params["text"] == "budget"
@@ -203,13 +203,13 @@ async def test_search_chats_sends_text_param():
 
 
 async def test_search_chats_requires_text():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.search_chats("   ", __request__=FakeRequest())
     assert "non-empty 'text'" in out
 
 
 async def test_get_shared_and_pinned_chats():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     shared = json.loads(await tools.get_shared_chats(__request__=FakeRequest()))
     pinned = json.loads(await tools.get_pinned_chats(__request__=FakeRequest()))
     assert shared["chats"][0]["id"] == "sh1"
@@ -217,7 +217,7 @@ async def test_get_shared_and_pinned_chats():
 
 
 async def test_get_my_files_includes_meta_and_total():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_files(__request__=FakeRequest())
     payload = json.loads(out)
     assert payload["total"] == 104
@@ -229,7 +229,7 @@ async def test_get_my_files_includes_meta_and_total():
 
 
 async def test_get_file_content_text_file():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["content_type"] == "text/plain"
@@ -240,7 +240,7 @@ async def test_get_file_content_binary_file_returns_note():
     def handler(request):
         return binary_response(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100, "image/png")
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["content_type"] == "image/png"
@@ -249,14 +249,14 @@ async def test_get_file_content_binary_file_returns_note():
 
 
 async def test_get_my_prompts():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_prompts(FakeRequest())
     payload = json.loads(out)
     assert payload["prompts"][0]["command"] == "/news"
 
 
 async def test_get_my_tools():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_tools(FakeRequest())
     payload = json.loads(out)
     assert payload["tools"][0]["name"] == "Enhance Image"
@@ -264,7 +264,7 @@ async def test_get_my_tools():
 
 
 async def test_get_knowledge_bases():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_knowledge_bases(FakeRequest())
     payload = json.loads(out)
     assert payload["total"] == 1
@@ -272,7 +272,7 @@ async def test_get_knowledge_bases():
 
 
 async def test_get_my_skills_summarizes_without_content():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_skills(FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 2
@@ -284,7 +284,7 @@ async def test_get_my_skills_summarizes_without_content():
 
 
 async def test_get_skill_returns_full_detail():
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_skill("sk1", __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["id"] == "sk1"
@@ -296,7 +296,7 @@ async def test_get_skill_strips_owner_and_bookkeeping():
     # SECURITY (whitelist): the raw SkillAccessResponse embeds the OWNER's
     # UserResponse (email!) for shared skills, plus access_grants/write_access
     # bookkeeping. None of it must reach the model — in any output format.
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_skill("sk1", __request__=FakeRequest())
     assert "owner@example.com" not in out
     payload = json.loads(out)
@@ -306,7 +306,7 @@ async def test_get_skill_strips_owner_and_bookkeeping():
     assert "write_access" not in payload
 
     # markdown mode also clean
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_skill("sk1", __request__=FakeRequest())
     assert "owner@example.com" not in out
     assert "owner-123" not in out
@@ -332,7 +332,7 @@ async def test_get_chat_summary_strips_bookkeeping_fields():
             },
         })
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_chat_metadata(CHAT_ID, __request__=FakeRequest())
     payload = json.loads(out)
     # get_chat_metadata carries NO message content (user decision 2026-08-20)
@@ -343,7 +343,7 @@ async def test_get_chat_summary_strips_bookkeeping_fields():
     assert payload["tags"] == ["t1"]
 
     # get_chat_summary (markdown) shows the snippet
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
     assert "**User**: hola" in out
     assert "a summary" not in out
@@ -351,7 +351,7 @@ async def test_get_chat_summary_strips_bookkeeping_fields():
 
 async def test_get_skill_invalid_id_rejected_without_request():
     recorder = Recorder(api_handler)
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_skill("../../etc/passwd", __request__=FakeRequest())
     assert "Invalid skill_id" in out
     assert recorder.requests == []
@@ -360,6 +360,6 @@ async def test_get_skill_invalid_id_rejected_without_request():
 async def test_methods_work_without_request_object_when_token_present():
     # __request__ is injected by the harness; a plain dict-like object with
     # state.token is the only thing the engine actually needs.
-    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_models(FakeRequest(token="sk-x"))
     assert json.loads(out)["count"] == 1

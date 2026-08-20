@@ -62,7 +62,7 @@ def api_with_metadata(filename):
 async def test_text_file_emits_file_attachment():
     emitter = FakeEmitter()
     tools = make_tools(api_with_metadata("notes.txt"),
-                       base_url="http://open-webui.private", output_format="json")
+                       base_url="http://webui.example.test", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
     assert len(emitter.events) >= 1
@@ -91,7 +91,7 @@ async def test_image_file_emits_embeds_html_preview():
         return binary_response(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50, "image/png")
 
     emitter = FakeEmitter()
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
     # images use the embeds mechanism (HTML inline, like a snippet) — NOT files
@@ -120,7 +120,7 @@ async def test_generic_binary_emits_file_attachment():
         return binary_response(b"%PDF-1.4\n%fake", "application/pdf")
 
     emitter = FakeEmitter()
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
     item = emitter.files_event()["data"]["files"][0]
@@ -144,7 +144,7 @@ async def test_text_snippet_truncated_at_100_chars():
         return binary_response(long_text.encode(), "text/plain")
 
     emitter = FakeEmitter()
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
     payload = json.loads(out)
@@ -161,7 +161,7 @@ async def test_attachment_name_falls_back_to_file_id():
         return binary_response(b"some text", "text/plain")
 
     emitter = FakeEmitter()
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=emitter)
 
     item = emitter.files_event()["data"]["files"][0]
@@ -170,7 +170,7 @@ async def test_attachment_name_falls_back_to_file_id():
 
 async def test_no_emitter_still_returns_result():
     tools = make_tools(api_with_metadata("notes.txt"),
-                       base_url="http://open-webui.private", output_format="json")
+                       base_url="http://webui.example.test", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest())  # no __event_emitter__
     payload = json.loads(out)
     assert payload["content"] == "hello file content"
@@ -182,7 +182,7 @@ async def test_emitter_failure_does_not_break_tool_call():
             raise RuntimeError("ui socket gone")
 
     tools = make_tools(api_with_metadata("notes.txt"),
-                       base_url="http://open-webui.private", output_format="json")
+                       base_url="http://webui.example.test", output_format="json")
     out = await tools.get_file_content(FILE_ID, __request__=FakeRequest(), __event_emitter__=BrokenEmitter())
     payload = json.loads(out)
     assert payload["content"] == "hello file content"

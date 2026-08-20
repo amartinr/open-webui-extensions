@@ -48,7 +48,7 @@ async def test_pagination_iterates_pages_until_total():
         return make_file(f"f{i:03d}", f"file-{i}.txt", "text/plain", 100 + i, 1700000000 + i)
 
     recorder = Recorder(paginated_files_handler(104, 50, factory))
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     tools.valves.max_response_chars = 100_000
     out = await tools.get_my_files(limit=200, __request__=FakeRequest())
     payload = json.loads(out)
@@ -63,7 +63,7 @@ async def test_pagination_stops_on_short_page():
         return make_file(f"f{i}", f"file-{i}.txt", "text/plain", i, 1700000000 + i)
 
     recorder = Recorder(paginated_files_handler(12, 20, factory))
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_files(limit=50, __request__=FakeRequest())
     assert len(recorder.requests) == 1
     assert json.loads(out)["count"] == 12
@@ -75,7 +75,7 @@ async def test_pagination_respects_max_pages_cap():
         return make_file(f"f{i}", f"file-{i}.txt", "text/plain", i, 1700000000 + i)
 
     recorder = Recorder(paginated_files_handler(5000, 50, factory))
-    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     tools.valves.max_response_chars = 100_000
     out = await tools.get_my_files(limit=50, __request__=FakeRequest())
     assert len(recorder.requests) == 5  # MAX_PAGES
@@ -96,7 +96,7 @@ async def test_files_sort_by_size_asc():
     def handler(request):
         return json_response({"items": items, "total": 3})
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_files(limit=10, sort_by="size", sort_order="asc", __request__=FakeRequest())
     payload = json.loads(out)
     assert [f["filename"] for f in payload["files"]] == ["small.txt", "mid.png", "big.bin"]
@@ -112,7 +112,7 @@ async def test_files_sort_by_filename_desc():
     def handler(request):
         return json_response({"items": items, "total": 3})
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_files(limit=10, sort_by="filename", sort_order="desc", __request__=FakeRequest())
     assert [f["filename"] for f in json.loads(out)["files"]] == ["cherry.txt", "banana.txt", "apple.txt"]
 
@@ -125,7 +125,7 @@ async def test_chats_sort_by_created_at_asc():
             {"id": "c3", "title": "mid", "created_at": 200, "updated_at": 300},
         ])
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_chats(limit=10, sort_by="created_at", sort_order="asc", __request__=FakeRequest())
     assert [c["id"] for c in json.loads(out)["chats"]] == ["c1", "c3", "c2"]
 
@@ -142,7 +142,7 @@ async def test_files_filter_by_content_type_wildcard():
     def handler(request):
         return json_response({"items": items, "total": 3})
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_files(
         limit=10, content_type="image/*", sort_order="asc", __request__=FakeRequest()
     )
@@ -161,7 +161,7 @@ async def test_files_filter_by_size_range_and_name():
     def handler(request):
         return json_response({"items": items, "total": 3})
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_files(
         limit=10, min_size=6000, max_size=8000, filename="report", __request__=FakeRequest()
     )
@@ -178,7 +178,7 @@ async def test_files_filter_matched_count_reported():
     def handler(request):
         return json_response({"items": items, "total": 2})
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     out = await tools.get_my_files(limit=10, content_type="image/png", __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 1
@@ -194,7 +194,7 @@ async def test_invalid_sort_by_falls_back_to_default():
     def handler(request):
         return json_response({"items": items, "total": 2})
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     # invalid sort_by → defaults to created_at desc → b (created 200) first
     out = await tools.get_my_files(limit=10, sort_by="bogus", __request__=FakeRequest())
     assert json.loads(out)["files"][0]["filename"] == "a.txt"
@@ -210,6 +210,6 @@ async def test_markdown_render_shows_matched_and_top():
     def handler(request):
         return json_response({"items": items, "total": 3})
 
-    tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
+    tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     out = await tools.get_my_files(limit=2, sort_by="created_at", sort_order="asc", __request__=FakeRequest())
     assert "**Files: 3** (showing top 2)" in out

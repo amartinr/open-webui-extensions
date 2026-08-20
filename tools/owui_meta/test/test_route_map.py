@@ -49,7 +49,7 @@ def assert_route(tools, method, args, expected):
     """Run a method and assert it requested exactly ``expected``."""
     recorder = generic_handler([expected], fallback=lambda r: json_response({"unexpected": r.url.path}, status=200))
     tools._transport = __import__("httpx").MockTransport(recorder)
-    tools._base_url_override = "http://open-webui.private"
+    tools._base_url_override = "http://webui.example.test"
     out = getattr(tools, method)(*args, __request__=FakeRequest())
     # ensure coroutine runs (async in pytest-asyncio auto mode)
     import asyncio
@@ -62,7 +62,7 @@ def assert_route(tools, method, args, expected):
 
 async def _run_and_record(method, args, expected):
     recorder = generic_handler([expected], fallback=lambda r: json_response({"unexpected": r.url.path}, status=200))
-    tools = make_tools(recorder, base_url="http://open-webui.private")
+    tools = make_tools(recorder, base_url="http://webui.example.test")
     await getattr(tools, method)(*args, __request__=FakeRequest())
     return recorder.seen
 
