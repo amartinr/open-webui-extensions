@@ -117,6 +117,7 @@ async def test_subresource_routes_without_trailing_slash():
         ("get_pinned_chats", (), "/api/v1/chats/pinned"),
         ("get_shared_chats", (), "/api/v1/chats/shared"),
         ("get_chat_summary", (CHAT_ID,), f"/api/v1/chats/{CHAT_ID}"),
+        ("get_chat_metadata", (CHAT_ID,), f"/api/v1/chats/{CHAT_ID}"),
         ("get_file_content", (FILE_ID,), f"/api/v1/files/{FILE_ID}/content"),
         ("get_skill", (SKILL_ID,), f"/api/v1/skills/id/{SKILL_ID}"),
     ]

@@ -173,6 +173,27 @@ async def test_single_chat_renders_messages():
     assert "… (" not in out
 
 
+async def test_chat_metadata_renders_bullets_without_content():
+    def handler(request):
+        return json_response({
+            "id": CHAT_ID, "title": "Budget planning",
+            "chat": {"models": ["m1"], "history": {"currentId": "m1", "messages": {
+                "m1": {"id": "m1", "role": "user", "content": "hola", "parentId": None, "timestamp": 1},
+            }}},
+            "meta": {"tags": ["budget"]}, "folder_id": None, "pinned": False, "archived": False,
+            "created_at": 1, "updated_at": 2,
+        })
+
+    out = await md_tools(handler).get_chat_metadata(CHAT_ID, __request__=FakeRequest())
+    assert "**Chat: Budget planning**" in out
+    assert "- Messages: 1" in out
+    assert "Models: m1" in out
+    assert "Tags: budget" in out
+    # no message content in the metadata view
+    assert "**User**" not in out
+    assert "hola" not in out
+
+
 async def test_snippet_skips_intermediate_messages():
     def handler(request):
         msgs = {

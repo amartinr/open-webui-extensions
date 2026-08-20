@@ -637,6 +637,8 @@ class Tools:
             return self._render_chats(payload)
         if kind == "chat":
             return self._render_chat(payload)
+        if kind == "chat_metadata":
+            return self._render_chat_metadata(payload)
         if kind == "files":
             return self._render_files(payload)
         if kind == "files_deleted":
@@ -732,6 +734,29 @@ class Tools:
             lines.append("")
         for item in p.get("tail", []):
             lines.append(f"{role_label(item.get('role'))}: {item.get('text', '')}")
+        return "\n".join(lines).rstrip()
+
+    def _render_chat_metadata(self, p: dict) -> str:
+        """Render the organization metadata of a chat as plain bullets.
+
+        No message content — this is the metadata-only view.
+        """
+        lines = [f"**Chat: {p.get('title', '(untitled)')}**", ""]
+        meta = f"- Messages: {p.get('message_count', 0)}"
+        models = p.get("models") or []
+        if models:
+            meta += " · Models: " + ", ".join(models)
+        tags = p.get("tags") or []
+        if tags:
+            meta += " · Tags: " + ", ".join(tags)
+        lines.append(meta)
+        folder = p.get("folder_name") or p.get("folder_id")
+        if folder:
+            lines.append(f"- Folder: {folder}")
+        lines.append(
+            f"- Created: {self._fmt_ts(p.get('created_at'))} · "
+            f"Updated: {self._fmt_ts(p.get('updated_at'))}"
+        )
         return "\n".join(lines).rstrip()
 
     def _render_files(self, p: dict) -> str:
@@ -1378,6 +1403,36 @@ class Tools:
         chats = self._summarize_chats(sorted_items[:limit])
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
+    async def get_chat_metadata(self, chat_id: str, __request__: Any = None,
+                                 __user__: dict = None,
+                                 __event_emitter__: Any = None) -> str:
+        """Get the organization metadata of one chat (no message content).
+
+        Returns id, title, message count, models, tags, folder, pinned/
+        archived state, share id and dates. No message content in any
+        output format — this is the light "chat data" query.
+
+        :param chat_id: the chat's UUID.
+        """
+        output_format = self._resolve_output_format(__user__)
+        return await self._run(
+            self._get_chat_metadata(chat_id, __request__, __user__=__user__,
+                                    output_format=output_format),
+            output_format=output_format,
+            request=__request__,
+            emitter=__event_emitter__,
+            action="Reading chat metadata…",
+            verbose=self._resolve_verbose(__user__),
+        )
+
+    async def _get_chat_metadata(self, chat_id: Any, request: Any = None,
+                                 __user__: Optional[dict] = None,
+                                 output_format: Optional[str] = None) -> str:
+        token = self._require_token(request)
+        chat_id = self._require_id(chat_id, "chat_id")
+        payload, _ = await self._chat_metadata_payload(token, chat_id)
+        return self._ok(payload, "chat_metadata", output_format=output_format)
+
     async def get_chat_summary(self, chat_id: str, __request__: Any = None,
                                 __user__: dict = None,
                                 __event_emitter__: Any = None) -> str:
@@ -1408,25 +1463,45 @@ class Tools:
         chat_id = self._require_id(chat_id, "chat_id")
         head = DEFAULT_SNIPPET_HEAD
         tail = DEFAULT_SNIPPET_TAIL
+        payload, raw = await self._chat_metadata_payload(token, chat_id)
+        branch = self._main_branch_messages(raw)
+        with_text = [m for m in branch if self._message_text(m)]
+        count = payload["message_count"]
+        head_msgs = with_text[:head]
+        tail_msgs = with_text[count - tail:] if count > head + tail else []
+        skipped = max(0, count - head - tail)
+        # The head/tail snippet is part of the summary (markdown and json),
+        # never the full conversation.
+        payload["head"] = [
+            {"role": m.get("role"), "text": self._normalize_snippet_text(self._message_text(m))}
+            for m in head_msgs
+        ]
+        payload["tail"] = [
+            {"role": m.get("role"), "text": self._normalize_snippet_text(self._message_text(m))}
+            for m in tail_msgs
+        ]
+        payload["skipped"] = skipped
+        return self._ok(payload, "chat", output_format=output_format)
+
+    async def _chat_metadata_payload(self, token: str, chat_id: str) -> tuple:
+        """Fetch one chat and build the shared organization-metadata payload.
+
+        Returns (payload, raw) so callers can extend it (summary adds the
+        head/tail snippet). Field whitelist: the full ChatResponse carries
+        bookkeeping noise (user_id, tasks, summary, last_read_at, the raw
+        meta dict) that the model does not need — no raw body ever reaches
+        _ok (pinned by the static tripwire).
+        """
         _status, _ct, body = await self._api_get_json(
             token, _ROUTE_CHAT.format(chat_id=chat_id)
         )
         raw = json.loads(body)
-        # Field whitelist (defense in depth): the full ChatResponse carries
-        # bookkeeping noise (user_id, tasks, summary, last_read_at, the raw
-        # meta dict) that the model does not need. Only organization metadata
-        # and a bounded snippet of the main branch are derived — no raw body
-        # ever reaches _ok (pinned by the static tripwire).
-        branch = self._main_branch_messages(raw)
-        with_text = [m for m in branch if self._message_text(m)]
-        count = len(with_text)
-        head_msgs = with_text[:head]
-        tail_msgs = with_text[count - tail:] if count > head + tail else []
-        skipped = max(0, count - head - tail)
         chat_obj = raw.get("chat") or {}
         meta = raw.get("meta") or {}
         folder_id = raw.get("folder_id")
         folder_name = await self._folder_name(token, folder_id)
+        branch = self._main_branch_messages(raw)
+        count = len([m for m in branch if self._message_text(m)])
         payload = {
             "id": raw.get("id"),
             "title": raw.get("title"),
@@ -1441,20 +1516,7 @@ class Tools:
             "created_at": raw.get("created_at"),
             "updated_at": raw.get("updated_at"),
         }
-        if output_format != "json":
-            # The head/tail snippet is markdown-only. JSON mode carries only
-            # organization metadata — no message content (user decision
-            # 2026-08-20).
-            payload["head"] = [
-                {"role": m.get("role"), "text": self._normalize_snippet_text(self._message_text(m))}
-                for m in head_msgs
-            ]
-            payload["tail"] = [
-                {"role": m.get("role"), "text": self._normalize_snippet_text(self._message_text(m))}
-                for m in tail_msgs
-            ]
-            payload["skipped"] = skipped
-        return self._ok(payload, "chat", output_format=output_format)
+        return payload, raw
 
     async def search_chats(self, text: str, __request__: Any = None, __user__: dict = None,
                            __event_emitter__: Any = None) -> str:

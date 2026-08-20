@@ -156,30 +156,31 @@ async def test_get_my_chats_sends_include_flags():
     assert params["include_pinned"] == "true"
 
 
-async def test_get_chat_summary_json_has_no_message_content():
-    # USER DECISION (2026-08-20): JSON mode carries only organization
-    # metadata — no message content (no head/tail/omitted snippet). The
-    # head/tail snippet is markdown-only.
+async def test_get_chat_metadata_json_has_no_message_content():
+    # USER DECISION (2026-08-20): get_chat_metadata returns organization
+    # metadata only — no message content in any format (the light query).
     tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
-    out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
+    out = await tools.get_chat_metadata(CHAT_ID, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["id"] == CHAT_ID
     assert payload["message_count"] == 3
     assert payload["models"] == ["deepseek-v4-flash"]
     assert payload["tags"] == ["budget", "q1"]
     assert payload["folder_name"] == "Budget folder"
-    # no message content in json mode
+    # no message content
     for key in ("head", "tail", "skipped", "messages"):
-        assert key not in payload, f"json mode must not carry {key}"
+        assert key not in payload, f"metadata must not carry {key}"
 
 
 async def test_get_chat_summary_markdown_has_snippet():
-    # The head/tail snippet is markdown-only (user decision 2026-08-20).
+    # The head/tail snippet is part of the summary (markdown).
     tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="markdown")
     out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
     assert "**User**: hi" in out
     assert "**Chat: Budget planning**" in out
     assert "can you show code?" in out
+    # small chat (3 messages) -> no ellipsis, all shown
+    assert "… (" not in out
 
 
 async def test_get_chat_summary_invalid_id_rejected_without_request():
@@ -332,16 +333,16 @@ async def test_get_chat_summary_strips_bookkeeping_fields():
         })
 
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
-    out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
+    out = await tools.get_chat_metadata(CHAT_ID, __request__=FakeRequest())
     payload = json.loads(out)
-    # json mode carries NO message content (user decision 2026-08-20)
+    # get_chat_metadata carries NO message content (user decision 2026-08-20)
     assert "head" not in payload and "tail" not in payload
     for noise in ("user_id", "tasks", "summary", "last_read_at"):
         assert noise not in payload, f"{noise} should be stripped"
     assert payload["folder_id"] == "f1"
     assert payload["tags"] == ["t1"]
 
-    # markdown mode shows the snippet as before
+    # get_chat_summary (markdown) shows the snippet
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
     out = await tools.get_chat_summary(CHAT_ID, __request__=FakeRequest())
     assert "**User**: hola" in out

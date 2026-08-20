@@ -191,6 +191,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `get_models()` | `GET /api/models` |
 | `get_my_chats(limit)` | `GET /api/v1/chats` |
 | `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) |
+| `get_chat_metadata(chat_id)` | `GET /api/v1/chats/{id}` (metadata only: message_count, models, tags, folder, flags, dates; no message content in any format) |
 | `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results) |
 | `get_archived_chats()` | `GET /api/v1/chats/archived` (Iteration 8) |
 | `get_my_tags()` | `GET /api/v1/chats/all/tags` (Iteration 8 — tag catalog; `user_id`/`meta` not exposed) |
