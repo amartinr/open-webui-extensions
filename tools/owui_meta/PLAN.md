@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**
+**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — improvement plan written 2026-08-21, live + source research completed (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric), implementation not started** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions)
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -218,6 +218,7 @@ These changes were not in the initial plan; they emerged during development / li
 Work intentionally postponed to a future version of the tool (not part of the current branch scope):
 
 - **Admin-only methods** (former Iteration 2, DESIGN §6.2): `list_users`, `get_user`, `list_all_chats`, `get_admin_config` — with the runtime role gate (`__user__.role == 'admin'` before any HTTP call). Deferred by user decision (2026-08-01).
+- **`get_my_chats` date-range filter** (former Iteration 9 task 9.6, DESIGN §8.10): `created_after`/`created_before`/`updated_after`/`updated_before` params (epoch or ISO values, half-open `[after, before)` ranges, applied client-side before sort/slice, composable with `tag`/`sort_by`/`sort_order`). Design complete and recorded; **deferred by user decision (2026-08-21)** — the manual workaround (sort by `created_at` asc + pick the range) remains the current path.
 - Anything else not explicitly in the current iterations (per DESIGN §2 / out-of-scope list below).
 
 ---
@@ -343,7 +344,142 @@ All probes ran with a user-role API key against the internal instance (same inst
 | — | Frontmatter version aligned to actual (was stuck at 0.12.0) | `fe00f43` |
 | — | Frontmatter version bumped to 0.15.0 (Iteration 8 complete) | v0.15.0 |
 
-Iteration 8 is complete. Next candidates: Iteration 5 (live-validation suite + isolation tests) or future P-series proposals.
+Iteration 8 is complete.
+
+## Iteration 9 — Improvement pass: `tag:` semantics verified, image metadata, stats metrics, credential guard, chat date-range filter (2026-08-21)
+
+**Status:** ⏳ **PLANNED — live + source research COMPLETED 2026-08-21, implementation pending.** Written from the consolidated improvement brief (2026-08-21, incl. the date-range filter and the live-verified delimiter cases added after the previous deliverable). **Two brief claims were corrected after verification against the v0.10.2 source and live probes** (see “Backend facts verified live” below): Task 1 (`tag:` is ALREADY a scope limiter server-side) and Task 3 (root-caused: a backend bug in the assistant-length metric + distinct documented semantics for the other two). Implementation pending.
+
+**Backend facts verified live (2026-08-21)** — probes against the internal instance (`http://open-webui.private`, user-role key) + v0.10.2 source (`backend/open_webui/routers/chats.py`, `backend/open_webui/models/chats.py`):
+
+| Brief claim | Verified reality |
+|---|---|
+| “`pinned:`/`folder:` scope-limit; `tag:` does not (standalone filter that relaxes the text)” | ❌ **`tag:` is ALSO a scope limiter** (AND with free text). `"Open WebUI"` → 37; `"Open WebUI tag:comfyui"` → 1 (the one of the tag's 3 chats that contains “Open WebUI”); `"manchego tag:comfyui"` → 0 and `"zzz_nonexistent_xyz tag:comfyui"` → 0 (a standalone filter would have returned the tag's 3 chats). Source: `get_chats_by_user_id_and_search_text` strips all prefixes, then ANDs `title/content LIKE %text%` with `EXISTS(meta.tags = tag)` |
+| “Multi-tag behavior undefined (recommend AND)” | ✅ Backend is **AND** already: `and_(*[EXISTS(tag_i) for tag_i in tag_ids])` |
+| “`tag:` with zero matches” | ✅ **Intended orphan-tag cleanup** (not a bug): a tag query with zero results deletes the **catalog entry** (`Tags.delete_tag_by_name_and_user_id` — only the `tag` row: id/name/meta; per-chat inline `meta.tags` are untouched and recreate the entry on the next chat update). A typo'd/nonexistent tag deletes nothing (the lookup filters on the entry existing). Lazy GC — the UI removes tags through the same routes. **Tool-relevant nuance:** `search` scopes to non-archived chats (`Chat.archived == False`), so a tag living **only on archived chats** returns 0 there and the entry is cleaned, while `get_my_chats(tag=)` (`POST /chats/tags`) sees it — documented upstream asymmetry, no tool change |
+| “Snippets reflect the matched text” | ✅ `chat_search_content_text` strips prefixes before building the snippet. Caveat: snippets search only the **plain `content`** string, which is empty for v0.10.2 assistant messages (text lives in `output[].content[].text`) — assistant-matched snippets are often absent |
+| “`get_chat_stats` anomaly: 52 vs 50, assistant avg 0.0, last_message_at ≠ updated_at” | ✅ **Fully root-caused** (see 9.3): `message_count` = `len(get_message_list(messages_map, currentId))` counts ALL branch steps (52, incl. 2 assistant `reasoning` steps with empty `content`); the tool counts only text-bearing messages (50). Assistant avg is a **backend bug**: `len(message.get('content',''))` over the plain `content` — empty for every assistant message in v0.10.2 → `0.0` always. `last_message_at` = timestamp of the last branch message; `updated_at` = chat row (moves on renames/edits) — different semantics, both legitimate |
+| “`history_message_count` == `message_count`?” | ❌ Not always: `history_message_count = len(messages_map)` counts the WHOLE tree (all branches); `message_count` counts only the main branch. Equal here (52/52) only because the chat has no alternate branches |
+
+Five independent tasks (9.6 deferred by user decision 2026-08-21), all preserving the read-only + allowlist security model (§2). Ships as up to five commits (one per task), frontmatter `version:` bumped per commit and aligned at the end (→ v0.17.0+); DESIGN/README updated per task; the live matrix re-run at the end (see Delivery).
+
+### 9.1 `search_chats` — `tag:` scope-limiter semantics: VERIFY + PIN (the backend already implements it)
+
+**Context (verified live 2026-08-21):** the other UI prefixes scope-limit free text server-side:
+- `"Open WebUI"` → 37 chats; `"Open WebUI pinned:true"` → 0; `"Open WebUI folder:Open WebUI meta"` → 0.
+- `"Sulion"` → 1 chat (the pinned one); `"Sulion pinned:true"` → the same chat; `"Sulion folder:Open WebUI meta"` → 0.
+- `"manchego"` → 0 everywhere (term absent).
+
+**Brief claim corrected:** the brief stated `tag:` does **not** scope-limit and acts as a standalone tag filter. **Verified false on this backend:** v0.10.2 `get_chats_by_user_id_and_search_text` strips every prefix, then **ANDs** the text search with the tag filter (`and_(*[EXISTS(json_each(meta.tags) = tag_i)])`). Live: `"manchego tag:comfyui"` → 0 and `"zzz_nonexistent_xyz tag:comfyui"` → 0 (a standalone filter would return the tag's 3 chats); `"Open WebUI tag:comfyui"` → 1 = the only tag chat containing “Open WebUI”. `tag:none` also works (`NOT EXISTS`). So **no scope-limiter code change is needed in `_search_chats`**.
+
+**What remains (the real work):**
+1. **Pin the semantics with tests** — mock + env-gated live cases proving text+tag is AND, multi-tag is AND, `tag:none` is untouched, and results match `get_my_chats(tag="…")`.
+2. **Document the orphan-tag cleanup (no code — it is intended behavior):** a `tag:` query with zero matches triggers the backend's **deliberate lazy GC**: the catalog entry (`tag` row: id/name/meta) is deleted; per-chat inline `meta.tags` are untouched (they recreate the entry when the chat is updated); a typo'd/nonexistent tag deletes nothing. The tool must **not** guard or block it (blocking would break intended behavior). Two documentation notes only: (a) `search_chats` / `get_my_chats(tag=)` are read-only *queries* but can carry this write side effect — worth a docstring line so it is never a surprise; (b) **archived asymmetry:** `search` excludes archived chats (`Chat.archived == False`), `POST /chats/tags` does not — a tag used only on archived chats is cleaned via `search_chats("tag:X")` yet still visible via `get_my_chats(tag=)`. Upstream semantics; documented, not fixed.
+3. **Snippet caveat (document):** the backend builds the snippet from the plain `content` string only — for v0.10.2 assistant messages (text in `output[].content[].text`) the snippet is usually absent even when the match is in the assistant text. Not a tool bug; do not compensate.
+
+**Acceptance:** tests pin the AND semantics; the orphan-tag cleanup and the archived asymmetry are documented in the docstrings (no behavioral guard added).
+
+**Acceptance:** tests pin that `search_chats("foo tag:bar")` returns only chats matching `foo` **and** carrying `bar`; multi-tag is AND; `tag:none` unchanged; a lone unknown `tag:` query does not delete the tag (per chosen mitigation); the side effect is documented in the docstring.
+
+**Tests** (`test/test_iteration9.py`): mock — text+tag intersection, tag with no text, multi-tag AND, `tag:none` passthrough, unknown lone `tag:` no-delete; live (env-gated) — the delimiter matrix above plus `"Open WebUI tag:comfyui"`, `"manchego tag:comfyui"`, and a `tag:`-catalog-preservation check.
+
+### 9.2 `get_file_content` — image header metadata
+
+**Context:** for images the tool currently returns only name/MIME/size/id (+ inline embed). The model cannot answer "what resolution/format is this image?".
+
+**Design:** **stdlib-only** header parser (`struct`, `binascii`) over the already-downloaded body (`_api_get_raw`), reading **only the first `IMAGE_HEADER_PREFIX_BYTES` (8192) bytes** — headers and the first TIFF IFD fit; parse cost is O(1) regardless of file size (no performance degradation on large files); **never pixel data, never the full buffer**.
+
+| Format | Header source | Fields |
+|---|---|---|
+| PNG | IHDR | width, height, bit depth, color type → color mode (gray/RGB/palette/gray+alpha/RGBA), alpha (types 4/6) |
+| JPEG | SOF0–SOF15, APP0 JFIF | width, height, precision, component count/IDs → colorspace (gray vs YCbCr), subsampling (cheap) |
+| GIF | logical screen descriptor + image blocks | width, height, bits/pixel, frame count, alpha (transparent-color index present) |
+| WebP | RIFF (VP8X / VP8 / VP8L) | width, height, alpha flag, compression (lossy / lossless / extended) |
+| BMP | BITMAPINFOHEADER | width, height, bpp, compression |
+| TIFF | first IFD0 entries | width, height, bits per sample, samples per pixel, photometric → color mode |
+
+Output fields (all optional; `None` on parse failure — a bad header never errors the call): `width`, `height`, `bit_depth`, `color_mode`, `has_alpha`, `real_format` (from the signature — may differ from the reported MIME, e.g. server says `image/x-png`, signature says PNG), plus cheap per-format details (JPEG subsampling, WebP compression, GIF frame count). Non-image files unaffected. **No dependency change:** PLAN §1 keeps stdlib + httpx; Pillow (already bundled by Open WebUI for image handling) is documented as the future scale-out path if more formats are ever needed.
+
+**Rendering:** the markdown binary renderer gains a line `Image: 1024×768 px, RGB, 8-bit, alpha: no (PNG)`; json carries the same fields. The "embedded in the conversation / do not re-embed" note stays.
+
+**Acceptance:** images return the new fields alongside existing metadata; non-images unchanged; parse failures degrade to nulls without erroring; no pixel data anywhere.
+
+**Tests** (`test/test_iteration9.py`): synthetic PNG/JPEG/GIF/WebP/BMP/TIFF headers → correct fields; truncated/garbage prefix → nulls, no error; MIME mismatch (server `image/x-png`, signature PNG); large file with short prefix (no full-buffer read); non-image binary → no new fields; markdown + json rendering.
+
+### 9.3 `get_chat_stats` — root-cause the metric divergence
+
+**Status: RESOLVED (2026-08-21)** — divergence fully root-caused against the v0.10.2 source (`routers/chats.py::get_session_user_chat_usage_stats`) and live probes of the anomaly chat.
+
+**Verified root cause (live chat `cc7caaa6-fc56-4117-a685-c2e7955fb2ac` — 52 branch steps: 26 user + 26 assistant, of which 24 assistant carry readable text, 2 are pure `reasoning` steps with `content=''`):**
+
+| Metric | Stats value | Source in v0.10.2 | Explanation | Action |
+|---|---|---|---|---|
+| `message_count` | 52 | `len(get_message_list(messages_map, currentId))` — the **main branch**, including every step | The tool's summary/metadata count (50) counts only text-bearing messages (`_message_text`) and thus excludes the 2 `reasoning` steps. Both are internally consistent; the stats number counts *steps*, the tool counts *readable messages* | **Document** the semantics (steps vs readable messages); do NOT change the tool's count — it is intentional |
+| `average_assistant_message_content_length` | `0.0` | `sum(len(message.get('content','')) for assistant msgs) / n` | **Backend bug:** v0.10.2 assistant messages carry the text in `output[].content[].text`; plain `content` is empty (`''`) for every assistant message → the average is `0.0` for ANY chat with assistant messages (live: 24/26 have real text, still 0.0). Same bug distorts user averages for multimodal `content` lists (`len()` of a list, not of its text). The export route (`_process_chat_for_export::get_message_content_length`) already handles strings+lists correctly — the usage route does not | **Fix in the tool:** recompute both length averages from the ChatResponse (the tool already parses `output[].content[].text` via `_message_text`); keep the raw backend fields too, marked `(backend)` |
+| `last_message_at` | 2026-08-18 05:43 | `message_list[-1].get('timestamp')` — timestamp of the **last message** on the main branch | `updated_at` (2026-08-19 14:34) is the **chat row** timestamp, moved by renames/edits/any row update — here ~1.4 days after the last message (chat was touched after its last message). Different sources, **both legitimate**; not a bug | **Document** the semantics (last-message time vs row-update time) |
+| `history_message_count` | 52 | `len(messages_map)` — the **whole tree** (all branches) | Equal to `message_count` only because this chat has no alternate branches; on chats with alternate branches the two diverge by design | **Document**; already surfaced with the `history_*` fields |
+
+**Decision (per metric):**
+- **Fix (code):** recompute `average_user_message_content_length` / `average_assistant_message_content_length` in `_get_chat_stats` from the ChatResponse (same `_chat_metadata_payload` fetch used by summary/metadata — no extra request, or one shared fetch), using `_message_text`-style real text lengths. Backend values remain available under `…_backend` keys so nothing is lost.
+- **Document (no code):** `message_count` = steps on the main branch; `last_message_at` = last-message timestamp vs `updated_at` = row-update; `history_message_count` = whole-tree count.
+- **Docstring** of `get_chat_stats` gains a semantics note.
+
+**Acceptance:** the divergence is explained from verified evidence (this table); the two length averages are correct (non-zero when assistant text exists); the other three metrics are documented in the docstring; tests pin the recompute path (mock) and the semantics note (docstring test).
+
+### 9.4 Credential non-exposure — fail-loud guard + allowlist tripwire
+
+**Context:** the audit already guarantees no credential values are serialized (`_sanitize` + `_redact` + per-method whitelists + no-raw-body tripwire; DESIGN §7.2). The brief asks for a *defensive* guarantee covering **future** endpoints too.
+
+**Design:**
+1. **Fail-loud sanitizer:** `_ok` logs `logger.warning` (key name **only**, never the value) whenever `_sanitize` drops a credential-named key with a non-empty string value — a future leaking method becomes visible in the server log instead of being silently cleaned. Output behavior unchanged.
+2. **Allowlist tripwire (static test):** extract every `_ROUTE_* = "…"` assignment from `owui_meta.py` and fail if any matches a secret-bearing pattern (the DESIGN §6.3 list: `auths/api_key`, `tools/id/{id}/valves(+/user)`, `tools/id/{id}`, `knowledge/external/connections*`, `*/admin/*` configs). A future developer adding a credential route is blocked at test/review time — "blocked by default".
+3. **Documented guarantee:** DESIGN §7.2 gains a "credential non-exposure guarantee" paragraph enumerating the full control stack.
+
+**Acceptance:** no meta endpoint can return credential values (documented); the static tripwire fails the suite if a secret-bearing route is ever added to the allowlist; a leaked credential-like field is logged (name only) and still stripped.
+
+**Tests** (`test/test_security.py`): route extraction + pattern tripwire (positive control: a fake secret route constant makes the test fail); fail-loud log emission (caplog) with no value in the message; existing suites unchanged.
+
+### 9.5 `delete_files` — destructive test (optional, sandbox only)
+
+**Context:** `delete_files` is live but its destructive path has only mock coverage. The brief asks for an optional, sandbox-only live test.
+
+**Design (env-gated, skipped by default):** behind `OWUI_META_DESTRUCTIVE_TESTS=1` (plus `OWUI_META_LIVE_URL` / `OWUI_META_LIVE_TOKEN`): upload a disposable file (`POST /api/v1/files/`, unique random content), call `delete_files([id])`, assert success + subsequent 404; foreign-file rejection uses `OWUI_META_LIVE_TOKEN2` when present (delete attempt on the other user's file → clean per-id failure, rest of the batch unaffected); cleanup any residue. Never runs against production by construction (opt-in env var + documented sandbox requirement).
+
+**Acceptance:** own-file deletion confirmed against a sandbox instance; foreign files rejected per id; suite stays green and skipped without the opt-in env.
+
+### 9.6 `get_my_chats` — date-range filter ⏸️ DEFERRED (user decision 2026-08-21)
+
+**Commit:** *(none — not implemented; design kept for reference in this section and DESIGN §8.10)*
+
+**Decision:** the user decided to **postpone the date-range filter** to a future version of the tool. It is removed from the current Iteration 9 scope; the design below stays recorded so it can be picked up unchanged later.
+
+**Context (why it was proposed):** no native date filter; "list chats from June" currently requires `sort_by=created_at&sort_order=asc` + manual selection (the account's earliest chat is 2026-06-29, so June chats were the first 5).
+
+**Design (backward-compatible, all new params optional):**
+
+```python
+get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
+             created_after=None, created_before=None,
+             updated_after=None, updated_before=None)
+```
+
+- **Value acceptance:** epoch int/float **or** ISO date/datetime strings (`"2026-06-01"`, `"2026-06-01 12:00"`, `"2026-06-01T12:00:00Z"`); a tolerant `_parse_ts` converts to epoch UTC (partial dates → midnight UTC).
+- **Range semantics:** **half-open `[after, before)`** — `created_after` inclusive, `created_before` exclusive (June = `created_after="2026-06-01", created_before="2026-07-01"`); same for `updated_*`.
+- **Application:** client-side, after the tag fetch / page iteration and **before** sort + slice (the API exposes no date filter). Composable with `tag`, `sort_by`, `sort_order`.
+- `_render_chats` unchanged; the summary header can note the applied range (e.g. `June 2026`).
+
+**Acceptance (when picked up again):** range filters return only chats created/updated within the range; composable with `sort_by`/`sort_order`/`tag`; existing calls unchanged.
+
+**Tests (when picked up again)** (`test/test_iteration9.py`): epoch + ISO inputs, half-open boundaries (midnight cases), partial-date ISO, month case (`2026-06-01` → `2026-07-01`), composition with tag and sort, invalid dates → clean error / ignored, backward compatibility (no new required params).
+
+**Tracked as future work:** see §7 “Future versions” below.
+
+### Delivery
+
+- Re-run the full matrix after implementation (mock suite + live env-gated suite): chat metadata/summary/stats, search + delimiter matrix (incl. the new `tag:` cases), tag filter, file content + new image fields, profile, timestamps, chat listing sort/date.
+- Update README: image metadata fields, `tag:` scope-limiter semantics, stats semantics (documented or fixed). The date-range filter is NOT documented as shipped — it is deferred (see §7) and will be documented when implemented.
+- DESIGN updated per task (§5.1 / §6.1 / §7.2 / §8.6 / §8.9 / §8.10 / §8.11 / §9 — see the parallel DESIGN edits).
+- Frontmatter `version:` bumped per commit, aligned to v0.17.0+ at the end; all tests green (`python3 -m pytest`), import + Valves checks pass.
 
 ## 8. Out of scope (per DESIGN §2)
 

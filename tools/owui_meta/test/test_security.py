@@ -17,6 +17,7 @@ boundary so no sensitive value can reach the model even then:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -118,7 +119,104 @@ def test_redact_ignores_short_or_absent_tokens():
     assert tools._redact("my sk-long-token-here end", "sk-long-token-here") == "my [REDACTED] end"
 
 
-# ── 3. Static tripwire ───────────────────────────────────────────────
+# ── 4. Fail-loud sanitizer (Iteration 9 task 9.4) ────────────────────
+
+def test_fail_loud_logs_dropped_key_name_never_value(caplog):
+    # A leaked credential-like field is stripped as before AND the key name
+    # appears in the server log (value never).
+    tools = owui_meta.Tools()
+    payload = {
+        "token": "sk-should-not-leak-123",
+        "name": "John Doe",
+        "nested": {"client_secret": "cs-should-not-leak"},
+    }
+    with caplog.at_level("WARNING", logger="owui_meta"):
+        out = tools._ok(payload, "profile", output_format="json")
+    data = json.loads(out)
+    assert "token" not in data and "client_secret" not in data["nested"]
+    assert "name" in data
+    # fail-loud: both dropped keys are named in the log
+    joined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "token" in joined and "client_secret" in joined
+    # the VALUES are never logged
+    assert "sk-should-not-leak-123" not in joined
+    assert "cs-should-not-leak" not in joined
+
+
+def test_fail_loud_is_silent_when_nothing_dropped(caplog):
+    tools = owui_meta.Tools()
+    with caplog.at_level("WARNING", logger="owui_meta"):
+        tools._ok({"name": "ok", "api_keys": True}, "profile", output_format="json")
+    assert not caplog.records  # no credential-like key dropped → no warning
+
+
+# ── 5. Allowlist tripwire (Iteration 9 task 9.4) ──────────────────────
+
+# Secret-bearing route patterns from DESIGN §6.3 — the list of routes that
+# must NEVER appear in the allowlist (they return credentials):
+#   /api/v1/auths/api_key, /api/v1/tools/id/{id}/valves(+/user),
+#   /api/v1/tools/id/{id} (source code), /api/v1/knowledge/external/connections*,
+#   any */admin/* config route (LDAP/OAuth secrets).
+_SECRET_ROUTE_PATTERNS = (
+    re.compile(r"/api/v1/auths/api_key(?:$|/)"),
+    re.compile(r"/api/v1/tools/id/"),
+    re.compile(r"/api/v1/knowledge/external/connections"),
+    re.compile(r"/api/v1/(?:auths|users|config)/admin/"),
+    re.compile(r"/admin/config(?:$|/)"),
+)
+
+
+def _is_secret_bearing_route(route: str) -> bool:
+    return any(p.search(route) for p in _SECRET_ROUTE_PATTERNS)
+
+
+def test_secret_route_patterns_positive_and_negative_controls():
+    # Positive control: the patterns must match the exact DESIGN §6.3 list.
+    for bad in (
+        "/api/v1/auths/api_key",
+        "/api/v1/auths/api_key/",
+        "/api/v1/tools/id/abc123",
+        "/api/v1/tools/id/abc123/valves",
+        "/api/v1/tools/id/abc123/valves/user",
+        "/api/v1/knowledge/external/connections",
+        "/api/v1/knowledge/external/connections/1",
+        "/api/v1/auths/admin/config",
+        "/api/v1/users/admin/config",
+    ):
+        assert _is_secret_bearing_route(bad), f"pattern missed {bad}"
+    # Negative control: every legitimate allowlist shape must NOT match.
+    for good in (
+        "/api/v1/auths/",
+        "/api/models",
+        "/api/v1/chats/",
+        "/api/v1/chats/{chat_id}",
+        "/api/v1/chats/search",
+        "/api/v1/chats/tags",
+        "/api/v1/chats/stats/usage",
+        "/api/v1/files/",
+        "/api/v1/files/{file_id}/content",
+        "/api/v1/prompts/",
+        "/api/v1/tools/",
+        "/api/v1/knowledge/",
+        "/api/v1/skills/",
+        "/api/v1/skills/id/{skill_id}",
+        "/api/v1/folders/",
+    ):
+        assert not _is_secret_bearing_route(good), f"false positive on {good}"
+
+
+def test_allowlist_route_tripwire_blocks_secret_bearing_routes():
+    # Every _ROUTE_* constant in the module must be read-safe. A future
+    # developer adding a credential route to the allowlist is blocked at
+    # test/review time — "blocked by default" (DESIGN §8.9.4).
+    source = Path(owui_meta.__file__).read_text(encoding="utf-8")
+    routes = re.findall(r'^_ROUTE_\w+\s*=\s*"([^"]+)"', source, re.MULTILINE)
+    assert routes, "no _ROUTE_* constants found — tripwire is inert"
+    bad = [r for r in routes if _is_secret_bearing_route(r)]
+    assert not bad, f"secret-bearing route(s) in the allowlist: {bad}"
+
+
+# ── 6. Static tripwire ────────────────────────────────────────────────
 
 def test_no_raw_server_body_reaches_ok():
     # Every method must transform json.loads(body) through a whitelist or a

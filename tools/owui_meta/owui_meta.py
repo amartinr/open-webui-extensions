@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.16.0
+version: 0.17.0
 licence: MIT
 """
 
@@ -511,11 +511,24 @@ class Tools:
 
     @classmethod
     def _sanitize(cls, value: Any) -> Any:
-        """Recursively drop credential-looking keys (string values only)."""
+        """Recursively drop credential-looking keys (string values only).
+
+        Fail-loud (Iteration 9 task 9.4, 2026-08-21): whenever a
+        credential-like key is actually dropped, a warning is logged with
+        the KEY NAME ONLY (never the value — it may BE the credential), so a
+        future method or server field that accidentally carries a credential
+        becomes visible in the server log instead of being silently cleaned.
+        """
         if isinstance(value, dict):
             out = {}
             for key, val in value.items():
                 if cls._SENSITIVE_KEY_RE.search(str(key)) and isinstance(val, str) and val.strip():
+                    # Fail-loud: log the key name; the value is never logged.
+                    logger.warning(
+                        "owui_meta: dropped credential-like key %r from output "
+                        "(value not logged)",
+                        str(key),
+                    )
                     continue  # credential-like key with a non-empty string value
                 out[key] = cls._sanitize(val)
             return out

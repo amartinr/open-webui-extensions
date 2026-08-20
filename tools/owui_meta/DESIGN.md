@@ -3,7 +3,7 @@
 **Version:** 1.0
 **Date:** 2026-07-31
 **Author:** (with technical assistance)
-**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20)
+**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20). **Iteration 9 improvement pass designed 2026-08-21** (search `tag:` semantics verified — the backend already scope-limits; image header metadata; chat-stats metrics root-caused; fail-loud credential guard; `delete_files` sandbox test) — implementation not started; the **`get_my_chats` date-range filter is DEFERRED by user decision 2026-08-21** (design recorded in §8.9.6)
 
 ---
 
@@ -143,6 +143,8 @@ Sources: **real curl tests with a `user`-role API key** against the internal ins
 | Chats | `GET /api/v1/chats/` (trailing slash) | Array of `ChatTitleIdResponse` — **only** `id, title, created_at, updated_at, last_read_at, snippet`. **No `meta`/tags/folder/pinned/archived in the items.** Default listing **excludes chats inside folders and pinned chats** (verified live 2026-08-20: p.1 default 60 vs `include_folders+include_pinned` 60, delta +43; p.2 19 vs 60, delta +60; total 147 per `stats/usage`). `include_folders`/`include_pinned` change which rows are returned, never the fields |
 | Chats | `GET /api/v1/chats/{id}` | Full chat with message history (`ChatResponse`: also `pinned`, `archived`, `folder_id`, `meta.tags`) |
 | Chats | `GET /api/v1/chats/search?text=…` (no trailing slash) | Search (parameter confirmed: `text`, not `q`). Populates a `snippet` per result. **Filter prefixes work server-side**: `tag:<name>`, `tag:none` (chats without tags), `folder:<name>`, `pinned:true/false`, `archived:true/false`, `shared:true/false` (verified live 2026-08-20) |
+
+**Delimiter semantics — live-verified 2026-08-21 (§8.9.1):** `pinned:`, `folder:` and **`tag:`** all act as **scope limiters** over the free text (`"Open WebUI"` → 37 chats, `"Open WebUI pinned:true"` → 0, `"manchego tag:comfyui"` → 0); the brief's claim that `tag:` relaxes the text was **verified false** (see §8.9.1). Related intended behavior: a zero-match lone `tag:` query triggers the backend's **orphan-tag cleanup** (documented in §8.9.1 — not a bug).
 | Chats | `GET /api/v1/chats/archived` (no trailing slash) | Archived chats, `ChatTitleIdResponse` list (verified live 2026-08-20) |
 | Chats | `GET /api/v1/chats/all/tags` (no trailing slash) | User's tag catalog: `TagModel` list `{id, name, user_id, meta}` (id = name lowercased, spaces→underscores; verified live 2026-08-20: 19 tags) |
 | Chats | `POST /api/v1/chats/tags` (no trailing slash, JSON body `{name, skip, limit}`) | Chats filtered by tag, `ChatTitleIdResponse` list. **POST** — GET on the path returns 401. Prefer `search?text=tag:<name>` (same results, zero new surface) |
@@ -192,9 +194,10 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 | `get_my_profile()` | `GET /api/v1/auths` | ✓ |
 | `get_models()` | `GET /api/models` | ✓ |
 | `get_my_chats(limit, tag)` | `GET /api/v1/chats` (with `include_folders`/`include_pinned`); with `tag` → `POST /api/v1/chats/tags` (query-only: pure tag filter, `{name, skip, limit}`) | ✓ |
+| `get_my_chats` date-range filter | *(not implemented)* — `created_after`/`created_before`/`updated_after`/`updated_before` params, design recorded in §8.9.6 | ⏸️ DEFERRED (2026-08-21) |
 | `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) | ✓ |
 | `get_chat_metadata(chat_id)` | `GET /api/v1/chats/{id}` (metadata only: message_count, models, tags, folder, flags, dates; no message content in any format) | ✓ |
-| `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results) | ✓ |
+| `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results). **Planned (Iteration 9.1):** `tag:` becomes a scope limiter (AND with free text), consistent with `pinned:`/`folder:` — §8.9.1 | ✓ |
 | `get_archived_chats(limit)` | `GET /api/v1/chats/archived` (no pagination params; whole list sliced by `limit`) | ✓ |
 | `get_my_tags()` | `GET /api/v1/chats/all/tags` (tag catalog; `user_id`/`meta` not exposed) | ✓ |
 | `get_chat_stats(chat_id)` | `GET /api/v1/chats/stats/usage` (**EXPERIMENTAL** endpoint; tags, message_count, models, history counts, averages) | ✓ |
@@ -333,6 +336,7 @@ The `files`/`embeds` events are persisted by the backend into the message's fiel
    - Files: `content_type` (e.g. `image/*`), `size` range (`min_size`, `max_size` bytes), partial `filename`.
    - Chats: textual search (`/api/v1/chats/search?text=…`) and/or status filter (`pinned`, `archived`, `shared`).
    - Workspace: search by name/description when the endpoint supports it.
+   - **Date-range filter for chats (design recorded, DEFERRED 2026-08-21):** `created_after`/`created_before`/`updated_after`/`updated_before` on `get_my_chats`, applied **client-side** after the tag fetch / page iteration and before sort + slice (the API exposes no date filter). Full design in §8.9.6; postponed by user decision.
 4. **Client vs. server filtering strategy** — apply **server-side filtering whenever the endpoint supports it** (less data transferred, cheaper). Local filtering (in the tool) remains only for criteria the API does not expose (e.g. minimum size when the listing already carries `meta.size`).
 5. **Truncation and summarization** — lists returned to the model must be **summarized** (e.g. top N results + `total`), not full dumps, to avoid saturating the context (see also `max_response_chars` in §8.2).
 
@@ -452,6 +456,91 @@ Implementation notes:
 
 ---
 
+## 8.9 Improvement pass — Iteration 9 (2026-08-21)
+
+Consolidated improvement plan written 2026-08-21 (the same brief whose findings are in PLAN.md Iteration 9). **Live + v0.10.2-source research completed 2026-08-21: two brief claims corrected** (`tag:` is already a scope limiter server-side — §8.9.1; the stats anomaly is fully root-caused — §8.9.3). **Five tasks pending implementation; one task (the `get_my_chats` date-range filter) is DEFERRED by user decision** — its design is recorded below so it can be picked up unchanged. All tasks preserve the read-only + allowlist security model (§7).
+
+| # | Task | Status |
+|---|---|---|
+| 8.9.1 | `search_chats` `tag:` semantics — VERIFY + PIN (backend already ANDs); document the tag-deletion side effect | ⏳ planned (no scope-limiter code change needed) |
+| 8.9.2 | `get_file_content`: image header metadata (stdlib, first 8192 bytes) | ⏳ planned |
+| 8.9.3 | `get_chat_stats` metrics — ROOT-CAUSED: recompute the two length averages (backend bug), document the other three | ⏳ planned (fix + docs) |
+| 8.9.4 | Credential non-exposure: fail-loud sanitizer + allowlist tripwire test | ⏳ planned |
+| 8.9.5 | `delete_files` destructive live test (optional, sandbox only, env-gated) | ⏳ planned (optional) |
+| 8.9.6 | `get_my_chats` date-range filter | ⏸️ **DEFERRED** (2026-08-21) |
+
+### 8.9.1 Search: `tag:` scope-limiter semantics — VERIFY + PIN (backend already implements it)
+
+**Verified live (2026-08-21):** `pinned:` and `folder:` scope-limit the free text server-side (`"Open WebUI"` → 37; `"Open WebUI pinned:true"` → 0; `"Sulion"` → 1; `"Sulion pinned:true"` → same 1; `"manchego"` → 0 everywhere).
+
+**Brief claim corrected:** the brief stated `tag:` is a **standalone tag filter** that relaxes the free text. **Verified false on this backend** (v0.10.2 `models/chats.py::get_chats_by_user_id_and_search_text` + live probes): the query strips every prefix and **ANDs** the text search with the tag filter (`and_(*[EXISTS(json_each(meta.tags) = tag_i)])`); multiple `tag:` prefixes are ANDed; `tag:none` uses `NOT EXISTS`. Live: `"manchego tag:comfyui"` → 0 and `"zzz_nonexistent_xyz tag:comfyui"` → 0 (a standalone filter would return the tag's 3 chats); `"Open WebUI tag:comfyui"` → 1 = the only tag chat containing “Open WebUI”. **No scope-limiter code change is needed.**
+
+**What remains (the real work):**
+1. **Pin the semantics with tests** (mock + env-gated live): text+tag AND, multi-tag AND, `tag:none` untouched, results consistent with `get_my_chats(tag=…)`.
+2. **Document the orphan-tag cleanup (no code — intended behavior):** a `tag:` query with zero matches triggers the backend's **deliberate lazy GC**: the catalog entry (`tag` row) is deleted; per-chat inline `meta.tags` are untouched (they recreate the entry when the chat is updated); a typo'd/nonexistent tag deletes nothing. The tool must **not** guard or block it (blocking would break intended behavior). Documentation notes only: (a) `search_chats` / `get_my_chats(tag=)` are read-only *queries* but can carry this write side effect — docstring line; (b) **archived asymmetry:** `search` excludes archived chats (`Chat.archived == False`), `POST /chats/tags` does not — a tag used only on archived chats is cleaned via `search_chats("tag:X")` yet still visible via `get_my_chats(tag=)`. Upstream semantics; documented, not fixed.
+3. **Snippet caveat (document):** the backend snippet is built from the plain `content` string only — for v0.10.2 assistant messages (text in `output[].content[].text`) the snippet is usually absent even when the match is in assistant text. Not a tool bug; do not compensate.
+
+**Acceptance:** tests pin the AND semantics; the orphan-tag cleanup and the archived asymmetry are documented in the docstrings (no behavioral guard added).
+
+### 8.9.2 Image header metadata for `get_file_content`
+
+**Context:** images currently return only name/MIME/size/id (+ inline embed). The model cannot answer "what resolution/format is this image?".
+
+**Design:** stdlib-only header parser (`struct`/`binascii`) over the **already-downloaded body** (`_api_get_raw`), reading **only the first `IMAGE_HEADER_PREFIX_BYTES` (8192) bytes** — headers and the first TIFF IFD fit; O(1) parse cost regardless of file size; **never pixel data, never the full buffer**. Formats: PNG (IHDR), JPEG (SOF0–15, APP0 JFIF), GIF (logical screen descriptor + image blocks), WebP (RIFF: VP8X/VP8/VP8L), BMP (BITMAPINFOHEADER), TIFF (first IFD0).
+
+Output fields (all optional; `None` on parse failure — a bad header never errors the call): `width`, `height`, `bit_depth`, `color_mode`, `has_alpha`, `real_format` (from the signature — may differ from the reported MIME, e.g. server says `image/x-png`, signature says PNG), plus cheap per-format details (JPEG subsampling, WebP compression, GIF frame count). Non-image files unaffected. **No dependency change** (stdlib + httpx; Pillow — already bundled by Open WebUI — is documented as the future scale-out path).
+
+**Rendering:** markdown binary renderer gains one line (`Image: 1024×768 px, RGB, 8-bit, alpha: no (PNG)`); json carries the same fields; the "already embedded / do not re-embed" note stays.
+
+### 8.9.3 Chat usage-stats semantics — ROOT-CAUSED (2026-08-21)
+
+**Anomaly (live 2026-08-21, chat `cc7caaa6-fc56-4117-a685-c2e7955fb2ac` — 52 branch steps: 26 user + 26 assistant; 24 assistant carry readable text, 2 are pure `reasoning` steps with `content=''`):** `average_assistant_message_content_length` = `0.0`; `last_message_at` (2026-08-18 05:43) ≠ `updated_at` (2026-08-19 14:34); `message_count` 52 (stats) vs 50 (summary/metadata).
+
+**Verified root cause (v0.10.2 `routers/chats.py::get_session_user_chat_usage_stats`):**
+
+| Metric | Stats value | Source in v0.10.2 | Explanation | Action |
+|---|---|---|---|---|
+| `message_count` | 52 | `len(get_message_list(messages_map, currentId))` — the **main branch**, every step | The tool's count (50) = text-bearing messages (`_message_text`), excluding the 2 `reasoning` steps. Stats counts *steps*; the tool counts *readable messages*. Both internally consistent | **Document** semantics; do NOT change the tool count |
+| `average_assistant_message_content_length` | `0.0` | `sum(len(message.get('content','')) for assistant msgs) / n` | **Backend bug:** v0.10.2 assistant text lives in `output[].content[].text`; plain `content` is `''` for every assistant message → `0.0` for ANY chat with assistant messages (live: 24/26 have real text, still 0.0). `len()` of multimodal `content` lists also counts elements, not chars. The export route (`_process_chat_for_export::get_message_content_length`) handles strings+lists correctly — the usage route does not | **Fix in the tool:** recompute both length averages from the ChatResponse (parsed with the existing `_message_text`); keep backend values as `…_backend` |
+| `last_message_at` | 2026-08-18 05:43 | `message_list[-1].get('timestamp')` — timestamp of the **last message** on the main branch | `updated_at` (2026-08-19 14:34) is the **chat row** timestamp, moved by renames/edits/any row update (~1.4 days after the last message here). Different sources, both legitimate | **Document** (last-message time vs row-update time) |
+| `history_message_count` | 52 | `len(messages_map)` — the **whole tree** (all branches) | Equal to `message_count` only because this chat has no alternate branches; diverges by design otherwise | **Document** |
+
+**Decision:** recompute the two length averages in `_get_chat_stats` from the ChatResponse (shared `_chat_metadata_payload` fetch — no extra request) using real text lengths; document the other three metrics in the docstring; tests pin the recompute path.
+
+### 8.9.4 Credential non-exposure: fail-loud guard + allowlist tripwire
+
+**Context:** no credential values are serialized today (`_sanitize` + `_redact` + per-method whitelists + the static no-raw-body tripwire, §7.2). The brief asks for a *defensive* guarantee covering **future** endpoints too.
+
+**Design:**
+1. **Fail-loud sanitizer:** `_ok` logs `logger.warning` (**key name only**, never the value) whenever `_sanitize` drops a credential-named key with a non-empty string value — a future leaking method becomes visible in the server log instead of being silently cleaned. Output behavior unchanged.
+2. **Allowlist tripwire (static test):** extract every `_ROUTE_* = "…"` assignment from `owui_meta.py` and fail if any matches a secret-bearing pattern (the §6.3 list: `auths/api_key`, `tools/id/{id}/valves(+/user)`, `tools/id/{id}`, `knowledge/external/connections*`, `*/admin/*` configs). A future developer adding a credential route is blocked at test/review time — "blocked by default".
+3. **Documented guarantee** (this section): no meta endpoint returns credential values; the full control stack is the per-method whitelists → `_sanitize` → `_redact` → the two static tripwires (no-raw-body, no-secret-route).
+
+### 8.9.5 `delete_files` destructive test (optional, sandbox only)
+
+Env-gated (skipped by default) behind `OWUI_META_DESTRUCTIVE_TESTS=1` (+ `OWUI_META_LIVE_URL`/`OWUI_META_LIVE_TOKEN`): upload a disposable file (`POST /api/v1/files/`, unique random content), `delete_files([id])`, assert success + subsequent 404; foreign-file rejection via `OWUI_META_LIVE_TOKEN2` when present (clean per-id failure, rest of the batch unaffected); cleanup residue. Never runs against production by construction (opt-in env var + documented sandbox requirement).
+
+### 8.9.6 `get_my_chats` date-range filter — ⏸️ DEFERRED (user decision 2026-08-21)
+
+**Status:** design recorded for a future version; **not in the current scope** (the manual workaround — sort by `created_at` asc and pick the range — remains).
+
+**Context (why it was proposed):** no native date filter; "list chats from June" requires manual range selection (the account's earliest chat is 2026-06-29, so June chats are the first 5 when sorted by `created_at` asc).
+
+**Design (backward-compatible, all new params optional):**
+
+```python
+get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
+             created_after=None, created_before=None,
+             updated_after=None, updated_before=None)
+```
+
+- **Value acceptance:** epoch int/float **or** ISO date/datetime strings (`"2026-06-01"`, `"2026-06-01 12:00"`, `"2026-06-01T12:00:00Z"`); a tolerant `_parse_ts` converts to epoch UTC (partial dates → midnight UTC).
+- **Range semantics:** **half-open `[after, before)`** — `created_after` inclusive, `created_before` exclusive (June = `created_after="2026-06-01", created_before="2026-07-01"`); same for `updated_*`.
+- **Application:** client-side, after the tag fetch / page iteration and **before** sort + slice (the API exposes no date filter). Composable with `tag`, `sort_by`, `sort_order`.
+- `_render_chats` unchanged; the summary header can note the applied range (e.g. `June 2026`).
+
+---
+
 ## 9. Lessons from the tests (for implementation)
 
 1. **Session token and API key are interchangeable** for the tool's purposes: both land in `request.state.token` and the API accepts them equally.
@@ -463,6 +552,7 @@ Implementation notes:
 7. **Pagination is mandatory** (files POC): observed `pageSize` max 50, `total` in the response. `GET /api/v1/files/` returned 50 items with `total: 104`; 3 pages had to be iterated to list everything. Also, `content_type` and `size` (bytes) live in each item's `meta` — type/size filtering is done on the listing, without downloading binaries.
 8. **The trailing slash matters, and it is NOT uniform.** Verified live (2026-08-01): the **listing routes** (`/api/v1/auths/`, `/api/v1/chats/`, `/api/v1/files/`, `/api/v1/prompts/`, `/api/v1/tools/`, `/api/v1/knowledge/`, `/api/v1/users/`) require a **trailing slash** — without it they fall through to the SPA HTML catch-all (HTTP 200, `text/html`). But the **sub-resources** (`/api/v1/chats/search`, `/pinned`, `/shared`, `/api/v1/chats/{id}`, `/api/v1/files/{id}/content`) and `/api/models` must **NOT** have a trailing slash — with one they fall to the SPA catch-all too. The allowlist must fix the canonical form of each route individually, not rely on a uniform rule or redirects (FastAPI/Starlette does not 307-redirect here; the SPA catch-all absorbs the miss). **Same applies to the newer routes (2026-08-20):** `folders/` WITH slash; `chats/all/tags`, `chats/archived`, `chats/stats/usage` WITHOUT.
 9. **The chat list omits organization metadata by design.** `GET /api/v1/chats/` returns `ChatTitleIdResponse` only — no `meta`/tags/folder/pinned/archived on the items — and the default query **hides folder + pinned chats** unless `include_folders=true&include_pinned=true` (verified live 2026-08-20). Any tool feature needing per-chat organization state (tags, folder, flags) must source it from the detail endpoint (`ChatResponse` carries `meta.tags`, `folder_id`, `pinned`, `archived`), the tags catalog (`GET /api/v1/chats/all/tags`), the usage-stats endpoint (`GET /api/v1/chats/stats/usage` — tags + message_count), or the folders router (`GET /api/v1/folders/`) — never from the list items.
+10. **Search filter prefixes are scope limiters — including `tag:` (verified live + v0.10.2 source, 2026-08-21).** The brief claimed `tag:` was a standalone filter; **verified false**: `get_chats_by_user_id_and_search_text` strips all prefixes and ANDs the text search with `EXISTS(meta.tags = …)`; multi-tag is AND; `tag:none` is `NOT EXISTS`. Live: `"manchego tag:comfyui"` → 0 (a standalone filter would return the tag's 3 chats). No client-side normalization is needed. **Related intended behavior (documented, not a bug):** a `tag:` query with zero matches triggers the backend's **orphan-tag cleanup** — the catalog entry is deleted (per-chat inline `meta.tags` untouched; a typo'd tag deletes nothing). Tool-relevant nuance: `search` excludes archived chats, `POST /chats/tags` does not, so a tag used only on archived chats is cleaned via `search_chats("tag:X")` yet visible via `get_my_chats(tag=)` — documented upstream asymmetry (Iteration 9 task 1, §8.9.1).
 
 ---
 
