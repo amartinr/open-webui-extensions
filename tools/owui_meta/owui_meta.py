@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.10.0
+version: 0.11.0
 licence: MIT
 """
 
@@ -1192,6 +1192,10 @@ class Tools:
     ) -> str:
         """List the requesting user's recent chats (id, title, dates).
 
+        Includes chats inside folders and pinned chats (the backend hides
+        them from the default listing unless include_folders/include_pinned
+        are sent — verified live 2026-08-20).
+
         :param limit: how many chats to return (default 10, max 100).
         :param sort_by: "updated_at" or "created_at" (default "updated_at").
         :param sort_order: "asc" or "desc" (default "desc").
@@ -1216,7 +1220,14 @@ class Tools:
         limit = self._coerce_limit(limit)
         sort_order = self._coerce_sort_order(sort_order)
         page_size = min(max(limit, 20), DEFAULT_PAGE_SIZE)
-        all_items, total = await self._fetch_all_pages(token, _ROUTE_CHATS, page_size=page_size)
+        # The backend hides folder + pinned chats unless these flags are sent
+        # (verified live 2026-08-20: default listing excludes them, delta
+        # ~1/3 of the user's chats). The flags only change which rows come
+        # back — item fields stay ChatTitleIdResponse.
+        all_items, total = await self._fetch_all_pages(
+            token, _ROUTE_CHATS, page_size=page_size,
+            params={"include_folders": "true", "include_pinned": "true"},
+        )
         sorted_items = self._sorted_chats(all_items, sort_by, sort_order)
         chats = self._summarize_chats(sorted_items[:limit])
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)

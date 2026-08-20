@@ -128,6 +128,18 @@ async def test_get_my_chats_sends_page_size_and_summarizes():
     assert "messages" not in json.dumps(payload)
 
 
+async def test_get_my_chats_sends_include_flags():
+    # REGRESSION (Iteration 8): the backend hides chats inside folders and
+    # pinned chats from the default listing unless include_folders/include_pinned
+    # are sent. The tool must always send both so the model sees the real set.
+    recorder = Recorder(api_handler)
+    tools = make_tools(recorder, base_url="http://open-webui.private", output_format="json")
+    await tools.get_my_chats(limit=5, __request__=FakeRequest())
+    params = recorder.requests[0].url.params
+    assert params["include_folders"] == "true"
+    assert params["include_pinned"] == "true"
+
+
 async def test_get_chat_returns_full_chat():
     tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
     out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
