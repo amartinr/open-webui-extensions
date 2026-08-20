@@ -5,12 +5,13 @@ author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
-requirements: httpx
-version: 0.19.0
+requirements: httpx, Pillow
+version: 0.20.0
 licence: MIT
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -41,6 +42,14 @@ DEFAULT_MAX_RESPONSE_CHARS = 8000
 # the snippet is only for the model to recognize what the file is about —
 # never a full dump (DESIGN §8.6.5, PLAN.md §7 2026-08-03).
 FILE_SNIPPET_CHARS = 100
+
+# Defensive import: Pillow is bundled with Open WebUI (image processing),
+# but outside that environment it may be absent — the image header metadata
+# (Iteration 9 task 9.2) degrades gracefully to no extra fields.
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover - environment-dependent
+    Image = None
 
 # Hard cap on how many files one delete_files() call may delete in a single
 # pass. Prevents a runaway tool call from wiping a large library at once.
@@ -960,12 +969,74 @@ class Tools:
             lines += ["", note]
         return "\n".join(lines)
 
+    # ──────────────────────────────────────────────
+    #  Image header metadata (Iteration 9 task 9.2, DESIGN §8.9.2)
+    #
+    #  Uses Pillow (bundled with Open WebUI) — never reimplements image
+    #  parsers. Image.open is lazy (header only; pixel data is never
+    #  decoded), so the cost is O(1) regardless of file size and no pixel
+    #  data ever reaches the output. Any failure (bad/truncated file, Pillow
+    #  absent) degrades to an empty dict — the caller omits the fields and
+    #  the call never errors.
+    # ──────────────────────────────────────────────
+
+    # Bits per channel for Pillow modes (used when ``img.bits`` is not
+    # exposed, which Pillow only does for some modes).
+    _MODE_BITS = {
+        "1": 1, "L": 8, "P": 8, "LA": 8, "PA": 8,
+        "RGB": 8, "RGBA": 8, "CMYK": 8, "YCbCr": 8,
+        "I;16": 16, "I": 32, "F": 32,
+    }
+
+    def _image_header_info(self, body: bytes) -> dict:
+        """Best-effort image header metadata via Pillow (width/height/depth).
+
+        Returns ``{"width", "height", "color_mode" (Pillow mode: RGB, RGBA,
+        L, P, CMYK, …), "bit_depth" (bits per channel, derived from the
+        mode)}`` or ``{}`` on any failure. The lazy ``Image.open`` never
+        decodes pixel data.
+        """
+        if Image is None or not body:
+            return {}
+        try:
+            with Image.open(io.BytesIO(body)) as img:
+                info = {"width": img.width, "height": img.height}
+                mode = getattr(img, "mode", None)
+                if mode:
+                    info["color_mode"] = mode
+                    info["bit_depth"] = self._MODE_BITS.get(mode) or getattr(img, "bits", None)
+                return info
+        except Exception:
+            return {}
+
+    def _image_meta_lines(self, p: dict) -> list:
+        """Markdown lines describing an image's resolution + color depth."""
+        if not p.get("width") or not p.get("height"):
+            return []
+        parts = [f"{p['width']}\u00d7{p['height']} px"]
+        mode = p.get("color_mode")
+        bits = p.get("bit_depth")
+        if mode and bits is not None:
+            parts.append(f"{mode} ({bits}-bit)")
+        elif mode:
+            parts.append(mode)
+        elif bits is not None:
+            parts.append(f"{bits}-bit")
+        return ["- Image: " + ", ".join(parts)]
+
     def _render_file_binary(self, p: dict) -> str:
         ident = p.get("filename") or p.get("file_id")
         head = f"**File: {ident}** ({p.get('content_type')}, {p.get('size')} bytes)"
         if p.get("filename"):
             head += f" (id: {p.get('file_id')})"
-        return head + "\n\n" + p.get("note", "Binary content not returned inline.")
+        lines = [head]
+        img = self._image_meta_lines(p)
+        if img:
+            lines += ["", *img]
+        note = p.get("note", "Binary content not returned inline.")
+        if note:
+            lines += ["", note]
+        return "\n".join(lines)
 
     def _render_files_deleted(self, p: dict) -> str:
         """Render the batch deletion summary: per-file rows + counts."""
@@ -2144,7 +2215,11 @@ class Tools:
             await self._emit_embeds(
                 __event_emitter__, [self._image_embed_html(file_id, name)]
             )
-            return self._ok({
+            # Iteration 9 task 9.2: enrich with header metadata via Pillow
+            # (resolution + color depth; lazy open, never pixel data).
+            # Best-effort: a bad header or missing Pillow → no extra fields.
+            info = self._image_header_info(body)
+            payload = {
                 "file_id": file_id,
                 "filename": filename,
                 "content_type": ct,
@@ -2152,7 +2227,10 @@ class Tools:
                 "note": f"Image ({ct}, {size} bytes) is embedded in the "
                         "conversation and visible to the user. Do NOT embed or "
                         "display it again as markdown.",
-            }, "file_binary", output_format=output_format)
+            }
+            if info:
+                payload.update(info)
+            return self._ok(payload, "file_binary", output_format=output_format)
 
         # Text and generic binaries: attach via the ``files`` event (UI
         # download chip).

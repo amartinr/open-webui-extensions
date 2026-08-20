@@ -22,6 +22,7 @@ What this suite pins:
 
 import json
 import os
+import struct
 import sys
 from pathlib import Path
 
@@ -32,7 +33,7 @@ import httpx
 import pytest
 
 import owui_meta
-from helpers import FakeRequest, Recorder, json_response, make_tools
+from helpers import FakeRequest, Recorder, binary_response, json_response, make_tools
 
 LIVE_URL = os.getenv("OWUI_META_LIVE_URL", "").strip()
 LIVE_TOKEN = os.getenv("OWUI_META_LIVE_TOKEN", "").strip()
@@ -258,3 +259,152 @@ async def test_chat_stats_keeps_backend_values_when_chat_fetch_fails():
     # chat fetch failed → enrichment degrades to backend values, no error
     assert data["average_user_message_content_length"] == 3.0
     assert data["average_assistant_message_content_length"] == 0.0
+
+
+# ── 9.2: image header metadata (Pillow — bundled with Open WebUI) ─────
+
+pytestmark_92 = pytest.mark.skipif(
+    owui_meta.Image is None, reason="Pillow not available"
+)
+
+
+def _make_image(fmt: str, size=(64, 48), mode="RGB"):
+    """Generate a real image of the given format via Pillow."""
+    import io as _io
+    buf = _io.BytesIO()
+    img = owui_meta.Image.new(mode, size)
+    img.save(buf, format=fmt)
+    return buf.getvalue()
+
+
+@pytestmark_92
+def test_image_header_png_rgb():
+    info = owui_meta.Tools()._image_header_info(_make_image("PNG", (1024, 768), "RGB"))
+    assert info == {"width": 1024, "height": 768, "color_mode": "RGB", "bit_depth": 8}
+
+
+@pytestmark_92
+def test_image_header_png_rgba():
+    info = owui_meta.Tools()._image_header_info(_make_image("PNG", (64, 48), "RGBA"))
+    assert info["color_mode"] == "RGBA"
+    assert info["bit_depth"] == 8
+
+
+@pytestmark_92
+def test_image_header_jpeg():
+    info = owui_meta.Tools()._image_header_info(_make_image("JPEG", (640, 480), "RGB"))
+    assert info["width"] == 640 and info["height"] == 480
+    assert info["color_mode"] == "RGB"
+
+
+@pytestmark_92
+def test_image_header_gif():
+    info = owui_meta.Tools()._image_header_info(_make_image("GIF", (320, 240), "P"))
+    assert info["width"] == 320 and info["height"] == 240
+
+
+@pytestmark_92
+def test_image_header_webp():
+    try:
+        body = _make_image("WEBP", (10, 20), "RGBA")
+    except Exception:
+        pytest.skip("libwebp not available")
+    info = owui_meta.Tools()._image_header_info(body)
+    assert info["width"] == 10 and info["height"] == 20
+    assert info["color_mode"] == "RGBA"
+
+
+@pytestmark_92
+def test_image_header_bmp():
+    info = owui_meta.Tools()._image_header_info(_make_image("BMP", (100, 50), "RGB"))
+    assert info["width"] == 100 and info["height"] == 50
+    assert info["color_mode"] == "RGB"
+    assert info["bit_depth"] == 8  # bits per channel
+
+
+@pytestmark_92
+def test_image_header_tiff():
+    info = owui_meta.Tools()._image_header_info(_make_image("TIFF", (800, 600), "RGB"))
+    assert info["width"] == 800 and info["height"] == 600
+
+
+def test_image_header_garbage_and_truncated_never_error():
+    tools = owui_meta.Tools()
+    assert tools._image_header_info(b"") == {}
+    assert tools._image_header_info(b"\x00\x01\x02garbage") == {}
+    # valid PNG signature but truncated payload → Pillow raises, we degrade
+    assert tools._image_header_info(b"\x89PNG\r\n\x1a\n\x00\x00\x00") == {}
+
+
+def _file_metadata(filename="photo.png", content_type="image/png", size=10):
+    return {"id": "f1", "filename": filename,
+            "meta": {"content_type": content_type, "size": size}}
+
+
+def _file_content_handler(body, content_type="image/png", filename="photo.png"):
+    def handler(request):
+        if request.url.path == "/api/v1/files/f1":
+            return json_response(_file_metadata(filename, content_type, len(body)))
+        if request.url.path == "/api/v1/files/f1/content":
+            return binary_response(body, content_type)
+        raise AssertionError(f"unexpected path {request.url.path}")
+    return handler
+
+
+@pytestmark_92
+async def test_get_file_content_image_includes_header_metadata():
+    body = _make_image("PNG", (1024, 768), "RGBA") + b"trailing"
+    tools = make_tools(_file_content_handler(body), base_url="http://webui.example.test",
+                       output_format="json")
+    data = json.loads(await tools.get_file_content("f1", FakeRequest()))
+    assert (data["width"], data["height"]) == (1024, 768)
+    assert data["color_mode"] == "RGBA"
+    assert data["bit_depth"] == 8
+    assert data["size"] == len(body)
+    # never pixel data in the output
+    assert "trailing" not in str(data)
+
+
+@pytestmark_92
+async def test_get_file_content_image_markdown_line():
+    tools = make_tools(_file_content_handler(_make_image("PNG", (640, 480), "RGB")),
+                       base_url="http://webui.example.test", output_format="markdown")
+    out = await tools.get_file_content("f1", FakeRequest())
+    assert "- Image: 640\u00d7480 px, RGB (8-bit)" in out
+
+
+@pytestmark_92
+async def test_get_file_content_binary_image_without_pillow_degrades():
+    # Simulate Pillow absence: the enrichment is skipped, no error, no fields.
+    tools = make_tools(_file_content_handler(_make_image("PNG", (4, 4))),
+                       base_url="http://webui.example.test", output_format="json")
+    original = owui_meta.Image
+    owui_meta.Image = None
+    try:
+        data = json.loads(await tools.get_file_content("f1", FakeRequest()))
+    finally:
+        owui_meta.Image = original
+    for key in ("width", "height", "color_mode"):
+        assert key not in data
+
+
+async def test_get_file_content_binary_non_image_unaffected():
+    body = b"%PDF-1.4 fake pdf content"
+    tools = make_tools(_file_content_handler(body, content_type="application/pdf",
+                                             filename="doc.pdf"),
+                       base_url="http://webui.example.test", output_format="json")
+    data = json.loads(await tools.get_file_content("f1", FakeRequest()))
+    assert data["content_type"] == "application/pdf"
+    for key in ("width", "height", "color_mode", "bit_depth"):
+        assert key not in data
+
+
+async def test_get_file_content_binary_non_image_unaffected():
+    body = b"%PDF-1.4 fake pdf content"
+    tools = make_tools(_file_content_handler(body, content_type="application/pdf",
+                                             filename="doc.pdf"),
+                       base_url="http://webui.example.test", output_format="json")
+    data = json.loads(await tools.get_file_content("f1", FakeRequest()))
+    assert data["content_type"] == "application/pdf"
+    for key in ("real_format", "width", "height"):
+        assert key not in data

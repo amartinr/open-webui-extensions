@@ -458,15 +458,15 @@ Implementation notes:
 
 ## 8.9 Improvement pass — Iteration 9 (2026-08-21)
 
-Consolidated improvement plan written 2026-08-21 (the same brief whose findings are in PLAN.md Iteration 9). **Live + v0.10.2-source research completed 2026-08-21: two brief claims corrected** (`tag:` is already a scope limiter server-side — §8.9.1; the stats anomaly is fully root-caused — §8.9.3). **Five tasks pending implementation; one task (the `get_my_chats` date-range filter) is DEFERRED by user decision** — its design is recorded below so it can be picked up unchanged. All tasks preserve the read-only + allowlist security model (§7).
+Consolidated improvement plan written 2026-08-21 (the same brief whose findings are in PLAN.md Iteration 9). **Live + v0.10.2-source research completed 2026-08-21: two brief claims corrected** (`tag:` is already a scope limiter server-side — §8.9.1; the stats anomaly is fully root-caused — §8.9.3). **Tasks 8.9.1–8.9.4 implemented (v0.17.0–v0.20.0); 8.9.5 pending; one task (the `get_my_chats` date-range filter) is DEFERRED by user decision** — its design is recorded below so it can be picked up unchanged. All tasks preserve the read-only + allowlist security model (§7).
 
 | # | Task | Status |
 |---|---|---|
-| 8.9.1 | `search_chats` `tag:` semantics — VERIFY + PIN (backend already ANDs); document the tag-deletion side effect | ⏳ planned (no scope-limiter code change needed) |
-| 8.9.2 | `get_file_content`: image header metadata (stdlib, first 8192 bytes) | ⏳ planned |
-| 8.9.3 | `get_chat_stats` metrics — ROOT-CAUSED: recompute the two length averages (backend bug), document the other three | ⏳ planned (fix + docs) |
-| 8.9.4 | Credential non-exposure: fail-loud sanitizer + allowlist tripwire test | ⏳ planned |
-| 8.9.5 | `delete_files` destructive live test (optional, sandbox only, env-gated) | ⏳ planned (optional) |
+| 8.9.1 | `search_chats` `tag:` semantics — VERIFY + PIN (backend already ANDs); document the orphan-tag cleanup side effect | ✅ DONE (v0.18.0) |
+| 8.9.2 | `get_file_content`: image header metadata via **Pillow** (bundled with Open WebUI) — width/height/mode/bits | ✅ DONE (v0.20.0) |
+| 8.9.3 | `get_chat_stats` metrics — ROOT-CAUSED: recompute the two length averages (backend bug), document the other three | ✅ DONE (v0.19.0) |
+| 8.9.4 | Credential non-exposure: fail-loud sanitizer + allowlist tripwire test | ✅ DONE (v0.17.0) |
+| 8.9.5 | `delete_files` destructive live test (optional, sandbox only, env-gated) | ⏳ pending |
 | 8.9.6 | `get_my_chats` date-range filter | ⏸️ **DEFERRED** (2026-08-21) |
 
 ### 8.9.1 Search: `tag:` scope-limiter semantics — VERIFY + PIN (backend already implements it)
@@ -482,15 +482,15 @@ Consolidated improvement plan written 2026-08-21 (the same brief whose findings 
 
 **Acceptance:** tests pin the AND semantics; the orphan-tag cleanup and the archived asymmetry are documented in the docstrings (no behavioral guard added).
 
-### 8.9.2 Image header metadata for `get_file_content`
+### 8.9.2 Image header metadata for `get_file_content` — DONE (v0.20.0)
 
-**Context:** images currently return only name/MIME/size/id (+ inline embed). The model cannot answer "what resolution/format is this image?".
+**Context:** images previously returned only name/MIME/size/id (+ inline embed). The model could not answer "what resolution/color depth is this image?".
 
-**Design:** stdlib-only header parser (`struct`/`binascii`) over the **already-downloaded body** (`_api_get_raw`), reading **only the first `IMAGE_HEADER_PREFIX_BYTES` (8192) bytes** — headers and the first TIFF IFD fit; O(1) parse cost regardless of file size; **never pixel data, never the full buffer**. Formats: PNG (IHDR), JPEG (SOF0–15, APP0 JFIF), GIF (logical screen descriptor + image blocks), WebP (RIFF: VP8X/VP8/VP8L), BMP (BITMAPINFOHEADER), TIFF (first IFD0).
+**Design (revised 2026-08-21 — user direction: use an existing library, don't hand-roll parsers):** **Pillow**, already bundled with Open WebUI (12.2.0) and used internally for image handling. `Image.open(io.BytesIO(body))` is **lazy**: it parses the header only and never decodes pixel data (no `Image.load()`), so the cost is O(1) regardless of file size; the body is already in memory from `_api_get_raw`. Defensive import (`from PIL import Image`, degraded to `None`) — outside Open WebUI the tool still works without the extra fields. `requirements: httpx, Pillow`.
 
-Output fields (all optional; `None` on parse failure — a bad header never errors the call): `width`, `height`, `bit_depth`, `color_mode`, `has_alpha`, `real_format` (from the signature — may differ from the reported MIME, e.g. server says `image/x-png`, signature says PNG), plus cheap per-format details (JPEG subsampling, WebP compression, GIF frame count). Non-image files unaffected. **No dependency change** (stdlib + httpx; Pillow — already bundled by Open WebUI — is documented as the future scale-out path).
+Output fields (all optional; a bad/truncated file or missing Pillow → the fields are omitted, the call never errors): `width`, `height` (resolution in px), `color_mode` (the Pillow mode: RGB, RGBA, L, P, CMYK, …), `bit_depth` (bits per channel, derived from the mode via a small map — Pillow only exposes `img.bits` for some modes). Non-image files unaffected.
 
-**Rendering:** markdown binary renderer gains one line (`Image: 1024×768 px, RGB, 8-bit, alpha: no (PNG)`); json carries the same fields; the "already embedded / do not re-embed" note stays.
+**Rendering:** markdown binary renderer gains one line `Image: 1024×768 px, RGB (8-bit)`; json carries the same fields; the "already embedded / do not re-embed" note stays.
 
 ### 8.9.3 Chat usage-stats semantics — ROOT-CAUSED (2026-08-21)
 

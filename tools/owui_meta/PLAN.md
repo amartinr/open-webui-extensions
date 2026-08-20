@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — improvement plan written 2026-08-21, live + source research completed (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric), implementation not started** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions)
+**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3 and 9.4 DONE (v0.17.0–v0.20.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions)
 **Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -363,7 +363,7 @@ Iteration 8 is complete.
 
 Five independent tasks (9.6 deferred by user decision 2026-08-21), all preserving the read-only + allowlist security model (§2). Ships as up to five commits (one per task), frontmatter `version:` bumped per commit and aligned at the end (→ v0.17.0+); DESIGN/README updated per task; the live matrix re-run at the end (see Delivery).
 
-### 9.1 `search_chats` — `tag:` scope-limiter semantics: VERIFY + PIN (the backend already implements it)
+### 9.1 `search_chats` — `tag:` scope-limiter semantics: VERIFY + PIN (the backend already implements it) ✅ DONE (v0.18.0)
 
 **Context (verified live 2026-08-21):** the other UI prefixes scope-limit free text server-side:
 - `"Open WebUI"` → 37 chats; `"Open WebUI pinned:true"` → 0; `"Open WebUI folder:Open WebUI meta"` → 0.
@@ -383,30 +383,29 @@ Five independent tasks (9.6 deferred by user decision 2026-08-21), all preservin
 
 **Tests** (`test/test_iteration9.py`): mock — text+tag intersection, tag with no text, multi-tag AND, `tag:none` passthrough, unknown lone `tag:` no-delete; live (env-gated) — the delimiter matrix above plus `"Open WebUI tag:comfyui"`, `"manchego tag:comfyui"`, and a `tag:`-catalog-preservation check.
 
-### 9.2 `get_file_content` — image header metadata
+### 9.2 `get_file_content` — image header metadata ✅ DONE (v0.20.0)
 
-**Context:** for images the tool currently returns only name/MIME/size/id (+ inline embed). The model cannot answer "what resolution/format is this image?".
+**Commit:** `feat(owui_meta): enrich image files with resolution and color depth via Pillow`
 
-**Design:** **stdlib-only** header parser (`struct`, `binascii`) over the already-downloaded body (`_api_get_raw`), reading **only the first `IMAGE_HEADER_PREFIX_BYTES` (8192) bytes** — headers and the first TIFF IFD fit; parse cost is O(1) regardless of file size (no performance degradation on large files); **never pixel data, never the full buffer**.
+**Context:** for images the tool previously returned only name/MIME/size/id (+ inline embed). The model could not answer "what resolution/color depth is this image?".
 
-| Format | Header source | Fields |
-|---|---|---|
-| PNG | IHDR | width, height, bit depth, color type → color mode (gray/RGB/palette/gray+alpha/RGBA), alpha (types 4/6) |
-| JPEG | SOF0–SOF15, APP0 JFIF | width, height, precision, component count/IDs → colorspace (gray vs YCbCr), subsampling (cheap) |
-| GIF | logical screen descriptor + image blocks | width, height, bits/pixel, frame count, alpha (transparent-color index present) |
-| WebP | RIFF (VP8X / VP8 / VP8L) | width, height, alpha flag, compression (lossy / lossless / extended) |
-| BMP | BITMAPINFOHEADER | width, height, bpp, compression |
-| TIFF | first IFD0 entries | width, height, bits per sample, samples per pixel, photometric → color mode |
+**Design (revised 2026-08-21 — user direction: use an existing library, don't hand-roll parsers):** **Pillow** — already bundled with Open WebUI (12.2.0) and used internally for image handling. `Image.open(io.BytesIO(body))` is **lazy**: it parses the header only and never decodes pixel data, so the cost is O(1) regardless of file size. The body is already in memory from `_api_get_raw`; `_image_header_info` closes the image right after reading `width`/`height`/`mode`. No `Image.load()`, no pixel data anywhere.
 
-Output fields (all optional; `None` on parse failure — a bad header never errors the call): `width`, `height`, `bit_depth`, `color_mode`, `has_alpha`, `real_format` (from the signature — may differ from the reported MIME, e.g. server says `image/x-png`, signature says PNG), plus cheap per-format details (JPEG subsampling, WebP compression, GIF frame count). Non-image files unaffected. **No dependency change:** PLAN §1 keeps stdlib + httpx; Pillow (already bundled by Open WebUI for image handling) is documented as the future scale-out path if more formats are ever needed.
+- Defensive import (`from PIL import Image`, degraded to `None`) — outside Open WebUI the tool still works, just without the extra fields.
+- `requirements: httpx, Pillow` in the module header.
 
-**Rendering:** the markdown binary renderer gains a line `Image: 1024×768 px, RGB, 8-bit, alpha: no (PNG)`; json carries the same fields. The "embedded in the conversation / do not re-embed" note stays.
+**Output fields** (all optional; a bad/truncated file or missing Pillow → `{}`, the fields are omitted and the call never errors):
+- `width`, `height` — resolution in pixels.
+- `color_mode` — the Pillow mode (RGB, RGBA, L, P, CMYK, …).
+- `bit_depth` — bits per channel, derived from the mode via a small map (`img.bits` is only exposed by Pillow for some modes).
 
-**Acceptance:** images return the new fields alongside existing metadata; non-images unchanged; parse failures degrade to nulls without erroring; no pixel data anywhere.
+**Rendering:** the markdown binary renderer gains one line `Image: 1024×768 px, RGB (8-bit)`; json carries the same fields; the "embedded in the conversation / do not re-embed" note stays. Non-image files are untouched.
 
-**Tests** (`test/test_iteration9.py`): synthetic PNG/JPEG/GIF/WebP/BMP/TIFF headers → correct fields; truncated/garbage prefix → nulls, no error; MIME mismatch (server `image/x-png`, signature PNG); large file with short prefix (no full-buffer read); non-image binary → no new fields; markdown + json rendering.
+**Tests** (`test/test_iteration9.py`, Pillow-gated with `skipif` when absent): real images generated via Pillow (PNG RGB/RGBA, JPEG, GIF, WebP, BMP, TIFF) → correct width/height/mode/bits; garbage/truncated bytes → `{}`, no error; Pillow absent → enrichment skipped (no fields, no error); non-image binary → no new fields; markdown + json rendering.
 
-### 9.3 `get_chat_stats` — root-cause the metric divergence
+**Verified:** 161 passed / 21 skipped (live env-gated); the instance account currently has no files, so the live file case is covered by the mock suite with real Pillow-generated images.
+
+### 9.3 `get_chat_stats` — root-cause the metric divergence ✅ DONE (v0.19.0)
 
 **Status: RESOLVED (2026-08-21)** — divergence fully root-caused against the v0.10.2 source (`routers/chats.py::get_session_user_chat_usage_stats`) and live probes of the anomaly chat.
 
@@ -426,7 +425,7 @@ Output fields (all optional; `None` on parse failure — a bad header never erro
 
 **Acceptance:** the divergence is explained from verified evidence (this table); the two length averages are correct (non-zero when assistant text exists); the other three metrics are documented in the docstring; tests pin the recompute path (mock) and the semantics note (docstring test).
 
-### 9.4 Credential non-exposure — fail-loud guard + allowlist tripwire
+### 9.4 Credential non-exposure — fail-loud guard + allowlist tripwire ✅ DONE (v0.17.0)
 
 **Context:** the audit already guarantees no credential values are serialized (`_sanitize` + `_redact` + per-method whitelists + no-raw-body tripwire; DESIGN §7.2). The brief asks for a *defensive* guarantee covering **future** endpoints too.
 
