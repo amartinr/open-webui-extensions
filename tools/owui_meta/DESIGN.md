@@ -191,7 +191,7 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 |---|---|---|
 | `get_my_profile()` | `GET /api/v1/auths` | ✓ |
 | `get_models()` | `GET /api/models` | ✓ |
-| `get_my_chats(limit)` | `GET /api/v1/chats` (with `include_folders`/`include_pinned`) | ✓ |
+| `get_my_chats(limit, tag)` | `GET /api/v1/chats` (with `include_folders`/`include_pinned`); with `tag` → `POST /api/v1/chats/tags` (query-only: pure tag filter, `{name, skip, limit}`) | ✓ |
 | `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) | ✓ |
 | `get_chat_metadata(chat_id)` | `GET /api/v1/chats/{id}` (metadata only: message_count, models, tags, folder, flags, dates; no message content in any format) | ✓ |
 | `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results) | ✓ |

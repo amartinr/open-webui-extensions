@@ -116,6 +116,17 @@ async def test_live_chats_list():
         assert chat.get("updated_at")
 
 
+async def test_live_chats_tag_filter_matches_search_prefix():
+    # get_my_chats(tag=...) (pure filter via POST /chats/tags) and
+    # search_chats("tag:...") must return the same set of chat ids.
+    tools = live_tools("json")
+    by_tag = json.loads(await tools.get_my_chats(limit=50, tag="tool", __request__=live_request()))
+    by_search = json.loads(await tools.search_chats("tag:tool", __request__=live_request()))
+    ids_tag = {c["id"] for c in by_tag["chats"]}
+    ids_search = {c["id"] for c in by_search["chats"]}
+    assert ids_tag == ids_search, f"tag filter {ids_tag} != search prefix {ids_search}"
+
+
 async def test_live_chat_metadata_and_summary():
     tools = live_tools("json")
     chat_id = await first_chat_id(tools)

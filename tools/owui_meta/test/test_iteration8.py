@@ -50,6 +50,11 @@ def api_handler(request):
         ])
     if path == "/api/v1/chats/stats/usage":
         return json_response({"items": [], "total": 0})
+    if path == "/api/v1/chats/tags":
+        return json_response([
+            {"id": "c1", "title": "Tagged chat one", "created_at": 100, "updated_at": 200},
+            {"id": "c2", "title": "Tagged chat two", "created_at": 300, "updated_at": 400},
+        ])
     if path == "/api/v1/folders/":
         return json_response([
             {"id": "f1", "name": "Budget folder", "meta": {"icon": "sparkles"},
@@ -58,6 +63,68 @@ def api_handler(request):
              "parent_id": "f1", "is_expanded": True, "created_at": 7, "updated_at": 8},
         ])
     return json_response({"unexpected": path}, status=404)
+
+
+# ── get_my_chats(tag=...) — pure tag filter (user decision 2026-08-20) ────
+
+async def test_get_my_chats_with_tag_uses_post_tags():
+    # get_my_chats(tag=...) must call POST /api/v1/chats/tags with the typed
+    # body {name, skip, limit} — NOT the chat listing, NOT search.
+    recorder = Recorder(api_handler)
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
+    out = await tools.get_my_chats(tag="tool", __request__=FakeRequest())
+    assert len(recorder.requests) == 1
+    req = recorder.requests[0]
+    assert req.method == "POST"
+    assert req.url.path == "/api/v1/chats/tags"
+    import json as _json
+    assert _json.loads(req.content) == {"name": "tool", "skip": 0, "limit": 50}
+    payload = _json.loads(out)
+    assert payload["count"] == 2
+    # default sort is updated_at desc -> c2 (400) before c1 (200)
+    assert payload["chats"][0]["id"] == "c2"
+    assert payload["total"] == 2
+
+
+async def test_get_my_chats_blank_tag_falls_back_to_listing():
+    # A blank tag is not a tag filter: the normal listing is used.
+    recorder = Recorder(api_handler)
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
+    await tools.get_my_chats(tag="   ", __request__=FakeRequest())
+    assert len(recorder.requests) == 1
+    assert recorder.requests[0].method == "GET"
+    assert recorder.requests[0].url.path == "/api/v1/chats/"
+
+
+async def test_get_my_chats_tag_paginates_with_skip():
+    # >50 tagged chats -> a second POST with skip=50 (bounded by MAX_PAGES).
+    def handler(request):
+        if request.url.path != "/api/v1/chats/tags":
+            return json_response({"unexpected": request.url.path}, status=404)
+        import json as _json
+        body = _json.loads(request.content)
+        skip = body["skip"]
+        if skip == 0:
+            items = [{"id": f"t{i:02d}", "title": f"Tag {i}", "created_at": i, "updated_at": i} for i in range(50)]
+        else:
+            items = [{"id": f"t{i:02d}", "title": f"Tag {i}", "created_at": i, "updated_at": i} for i in range(50, 53)]
+        return json_response(items)
+
+    recorder = Recorder(handler)
+    tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
+    out = await tools.get_my_chats(tag="many", limit=100, __request__=FakeRequest())
+    assert [json.loads(r.content)["skip"] for r in recorder.requests] == [0, 50]
+    payload = json.loads(out)
+    assert payload["count"] == 53
+    assert payload["total"] == 53
+
+
+async def test_get_my_chats_tag_markdown_table():
+    tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
+    out = await tools.get_my_chats(tag="tool", __request__=FakeRequest())
+    assert "**Chats: 2" in out
+    assert "| Title | Updated | ID |" in out
+    assert "| Tagged chat one" in out
 
 
 # ── get_my_tags (item 2) ────────────────────────────────────────────────

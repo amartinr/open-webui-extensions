@@ -60,7 +60,7 @@ Import `owui_meta.py` into Open WebUI at **Workspace → Tools → +** and attac
 List methods support **pagination, sorting and filtering** (client-side, since the API does not expose them):
 
 - `get_my_files(limit=50, sort_by="size" | "created_at" | "filename", sort_order="asc" | "desc", content_type="image/*", min_size=100000, max_size=1000000, filename="report")` — size in raw bytes.
-- `get_my_chats(limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc")` — includes folder + pinned chats (the backend hides them from the default listing).
+- `get_my_chats(limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc", tag="tool")` — includes folder + pinned chats (the backend hides them from the default listing); `tag` filters the list to chats carrying that tag (pure server-side filter, not a text search).
 
 Chat organization (Iteration 8) is covered by dedicated methods:
 

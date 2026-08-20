@@ -60,10 +60,10 @@ def assert_route(tools, method, args, expected):
     return out, recorder.seen
 
 
-async def _run_and_record(method, args, expected):
+async def _run_and_record(method, args, expected, **kwargs):
     recorder = generic_handler([expected], fallback=lambda r: json_response({"unexpected": r.url.path}, status=200))
     tools = make_tools(recorder, base_url="http://webui.example.test")
-    await getattr(tools, method)(*args, __request__=FakeRequest())
+    await getattr(tools, method)(*args, **kwargs, __request__=FakeRequest())
     return recorder.seen
 
 
@@ -132,6 +132,19 @@ async def test_subresource_routes_without_trailing_slash():
     for method, args, route in cases:
         seen = await _run_and_record(method, args, route)
         assert route in seen, f"{method} did not hit {route}; saw {seen}"
+
+
+async def test_get_my_chats_tag_filter_hits_post_route():
+    # get_my_chats(tag=...) is a POST query on /api/v1/chats/tags (no slash).
+    seen = await _run_and_record("get_my_chats", (), "/api/v1/chats/tags", tag="tool")
+    assert "/api/v1/chats/tags" in seen
+
+
+async def test_get_my_chats_no_tag_hits_listing_route():
+    # without tag the normal listing (with slash) is used, never the POST.
+    seen = await _run_and_record("get_my_chats", (), "/api/v1/chats/")
+    assert "/api/v1/chats/" in seen
+    assert "/api/v1/chats/tags" not in seen
 
 
 async def test_no_slash_variants_are_never_used():
