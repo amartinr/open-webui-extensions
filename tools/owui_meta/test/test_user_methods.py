@@ -41,9 +41,25 @@ def api_handler(request):
         ])
     if path == f"/api/v1/chats/{CHAT_ID}":
         return json_response({
-            "id": CHAT_ID, "title": "Budget planning",
-            "messages": [{"role": "user", "content": "hi"}],
+            "id": CHAT_ID, "title": "Budget planning", "user_id": "u1",
+            "folder_id": "f1", "meta": {"tags": ["budget", "q1"]},
+            "tasks": [], "summary": "a summary", "last_read_at": 123,
+            "pinned": False, "archived": False, "share_id": None,
+            "created_at": 1, "updated_at": 2,
+            "chat": {
+                "models": ["deepseek-v4-flash"],
+                "history": {
+                    "currentId": "m3",
+                    "messages": {
+                        "m1": {"id": "m1", "role": "user", "content": "hi", "parentId": None, "timestamp": 1},
+                        "m2": {"id": "m2", "role": "assistant", "content": "hola", "parentId": "m1", "timestamp": 2},
+                        "m3": {"id": "m3", "role": "user", "content": "can you show code?\n```\nx = 1\n```", "parentId": "m2", "timestamp": 3},
+                    },
+                },
+            },
         })
+    if path == "/api/v1/folders/":
+        return json_response([{"id": "f1", "name": "Budget folder"}])
     if path == "/api/v1/chats/search":
         return json_response([
             {"id": CHAT_ID, "title": "Budget planning", "created_at": 1, "updated_at": 2},
@@ -140,12 +156,32 @@ async def test_get_my_chats_sends_include_flags():
     assert params["include_pinned"] == "true"
 
 
-async def test_get_chat_returns_full_chat():
+async def test_get_chat_returns_snippet():
     tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
     out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["id"] == CHAT_ID
-    assert payload["messages"][0]["content"] == "hi"
+    assert payload["message_count"] == 3
+    assert payload["head"][0]["role"] == "user"
+    assert payload["head"][0]["text"] == "hi"
+    assert payload["models"] == ["deepseek-v4-flash"]
+    assert payload["tags"] == ["budget", "q1"]
+    assert payload["folder_name"] == "Budget folder"
+    assert payload["skipped"] == 0
+
+
+async def test_get_chat_snippet_normalizes_code_fences():
+    # SECURITY/ROBUSTNESS (Iteration 8): a message containing a code fence
+    # must never open a fence in the tool output. The snippet escapes every
+    # backtick and collapses newlines to ' ⏎ '.
+    tools = make_tools(api_handler, base_url="http://open-webui.private", output_format="json")
+    out = await tools.get_chat(CHAT_ID, head=5, tail=0, __request__=FakeRequest())
+    payload = json.loads(out)
+    texts = [i["text"] for i in payload["head"]]
+    assert any("can you show code?" in t for t in texts)
+    assert all("```" not in t for t in texts)          # no raw triple fence
+    assert any("\\`\\`\\`" in t for t in texts)        # backticks escaped
+    assert any("⏎" in t for t in texts)                  # newlines collapsed
 
 
 async def test_get_chat_invalid_id_rejected_without_request():
@@ -279,29 +315,37 @@ async def test_get_skill_strips_owner_and_bookkeeping():
 
 async def test_get_chat_strips_bookkeeping_fields():
     # SECURITY (whitelist): the full ChatResponse carries bookkeeping noise
-    # (user_id, meta, tasks, summary, folder_id) that json mode used to dump
-    # raw. The conversation itself is kept (that is the feature).
+    # (user_id, tasks, summary, last_read_at, the raw meta dict). Only
+    # organization metadata and a bounded snippet are kept; json mode must
+    # never dump the raw body. folder_id + tags are kept (Iteration 8).
     def handler(request):
         return json_response({
             "id": CHAT_ID, "title": "Budget planning", "user_id": "u1",
-            "folder_id": "f1", "meta": {"profile": "x"}, "tasks": [],
-            "summary": "a summary", "last_read_at": 123,
-            "messages": [{"role": "user", "content": "hola"}],
-            "created_at": 1, "updated_at": 2, "pinned": False, "archived": False,
+            "folder_id": "f1", "meta": {"profile": "x", "tags": ["t1"]},
+            "tasks": [], "summary": "a summary", "last_read_at": 123,
+            "pinned": False, "archived": False,
+            "created_at": 1, "updated_at": 2,
+            "chat": {
+                "models": ["m1"],
+                "history": {"currentId": "m1", "messages": {
+                    "m1": {"id": "m1", "role": "user", "content": "hola", "parentId": None, "timestamp": 1},
+                }},
+            },
         })
 
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="json")
     out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
     payload = json.loads(out)
-    assert payload["messages"][0]["content"] == "hola"  # conversation kept
-    for noise in ("user_id", "folder_id", "meta", "tasks", "summary", "last_read_at"):
+    assert payload["head"][0]["text"] == "hola"  # conversation kept as snippet
+    for noise in ("user_id", "tasks", "summary", "last_read_at"):
         assert noise not in payload, f"{noise} should be stripped"
+    assert payload["folder_id"] == "f1"
+    assert payload["tags"] == ["t1"]
 
-    # markdown mode shows the conversation as before
+    # markdown mode shows the snippet as before
     tools = make_tools(handler, base_url="http://open-webui.private", output_format="markdown")
     out = await tools.get_chat(CHAT_ID, __request__=FakeRequest())
-    assert "**user**" in out
-    assert "hola" in out
+    assert "**User**: hola" in out
     assert "a summary" not in out
 
 

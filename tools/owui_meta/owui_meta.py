@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx
-version: 0.11.0
+version: 0.12.0
 licence: MIT
 """
 
@@ -53,6 +53,18 @@ MAX_DELETE_FILES = 50
 MAX_PAGES = 5
 DEFAULT_PAGE_SIZE = 50
 
+# Default/cap for the head/tail counts of the get_chat snippet (Iteration 8).
+# Default: first 3 + last 3 messages of the main branch, bounded so a single
+# call can never expand into a full conversation dump.
+DEFAULT_SNIPPET_HEAD = 3
+DEFAULT_SNIPPET_TAIL = 3
+MAX_SNIPPET_HEAD_TAIL = 10
+
+# Per-message character budget for the get_chat snippet. Lines longer than
+# this are truncated with an ellipsis; combined with head/tail caps this
+# keeps the whole snippet well under max_response_chars.
+MAX_SNIPPET_MESSAGE_CHARS = 160
+
 # ── Canonical route paths (allowlist) ─────────────────────────────────
 # Trailing slashes are SIGNIFICANT in this deployment (v0.10.2):
 #   - Listings (auths, chats, files, prompts, tools, knowledge, skills,
@@ -78,6 +90,7 @@ _ROUTE_TOOLS = "/api/v1/tools/"
 _ROUTE_KNOWLEDGE = "/api/v1/knowledge/"
 _ROUTE_SKILLS = "/api/v1/skills/"
 _ROUTE_SKILL = "/api/v1/skills/id/{skill_id}"
+_ROUTE_FOLDERS = "/api/v1/folders/"
 
 # Content types that are useful as text when reading a file's content.
 _TEXT_CONTENT_TYPES = frozenset({
@@ -684,23 +697,42 @@ class Tools:
         return head + "\n\n" + table
 
     def _render_chat(self, p: dict) -> str:
-        lines = [
-            f"**Chat: {p.get('title', '(untitled)')}** (id: {p.get('id', '')})",
-            "",
-        ]
-        for message in p.get("messages", []):
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content")
-            if content is None:
-                continue
-            role = message.get("role", "message")
-            lines.append(f"**{role}**")
-            if isinstance(content, str):
-                lines.append(content)
-            else:
-                lines.append(self._md_hierarchy(content))
+        """Render the chat snippet: simple header, metadata, head + tail.
+
+        Format (user decision 2026-08-20): bold only on the chat title and
+        the role labels, plain metadata lines, an ellipsis line between the
+        head and tail blocks. Message lines are pre-normalized (single line,
+        backticks escaped) so no fence or table can break the output.
+        """
+        lines = [f"**Chat: {p.get('title', '(untitled)')}**", ""]
+        meta = f"- Messages: {p.get('message_count', 0)}"
+        models = p.get("models") or []
+        if models:
+            meta += " · Models: " + ", ".join(models)
+        tags = p.get("tags") or []
+        if tags:
+            meta += " · Tags: " + ", ".join(tags)
+        lines.append(meta)
+        folder = p.get("folder_name") or p.get("folder_id")
+        if folder:
+            lines.append(f"- Folder: {folder}")
+        lines.append(
+            f"- Created: {self._fmt_ts(p.get('created_at'))} · "
+            f"Updated: {self._fmt_ts(p.get('updated_at'))}"
+        )
+        lines.append("")
+
+        def role_label(role: Any) -> str:
+            return "**User**" if role == "user" else "**Assistant**"
+
+        for item in p.get("head", []):
+            lines.append(f"{role_label(item.get('role'))}: {item.get('text', '')}")
+        if p.get("skipped"):
             lines.append("")
+            lines.append(f"… ( {p['skipped']} messages skipped ) …")
+            lines.append("")
+        for item in p.get("tail", []):
+            lines.append(f"{role_label(item.get('role'))}: {item.get('text', '')}")
         return "\n".join(lines).rstrip()
 
     def _render_files(self, p: dict) -> str:
@@ -959,6 +991,130 @@ class Tools:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    # ──────────────────────────────────────────────
+    #  Chat snippet helpers (Iteration 8: get_chat)
+    # ──────────────────────────────────────────────
+
+    def _coerce_head_tail(self, value: Any, default: int = DEFAULT_SNIPPET_HEAD,
+                          cap: int = MAX_SNIPPET_HEAD_TAIL) -> int:
+        """Coerce a head/tail count for the chat snippet (0..cap)."""
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = default
+        return max(0, min(number, cap))
+
+    @staticmethod
+    def _message_text(message: dict) -> Optional[str]:
+        """Extract the readable text of one chat message.
+
+        v0.10.2 stores message text in one of three places:
+        - ``content`` as a plain string (most user messages),
+        - ``content`` as a list of parts (multimodal legacy),
+        - ``output[]`` items of type ``message`` whose ``content[]`` items
+          of type ``output_text`` hold the assistant text (assistant
+          messages usually have an empty ``content``).
+        Returns None when the message has no readable text (e.g. pure
+        function-call steps), which are skipped in the snippet.
+        """
+        if not isinstance(message, dict):
+            return None
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            parts = [
+                c.get("text")
+                for c in content
+                if isinstance(c, dict) and isinstance(c.get("text"), str) and c.get("text").strip()
+            ]
+            if parts:
+                return "\n".join(parts).strip()
+        output = message.get("output")
+        if isinstance(output, list):
+            texts = []
+            for part in output:
+                if not isinstance(part, dict) or part.get("type") != "message":
+                    continue
+                for c in part.get("content") or []:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "output_text"
+                        and isinstance(c.get("text"), str)
+                        and c.get("text").strip()
+                    ):
+                        texts.append(c["text"].strip())
+            if texts:
+                return "\n".join(texts).strip()
+        return None
+
+    def _main_branch_messages(self, raw: dict) -> list:
+        """Return the messages on the main branch of a chat, oldest first.
+
+        The chat is a tree (parentId/childrenIds). The readable conversation
+        is the chain from ``currentId`` back through ``parentId``, reversed —
+        sorting by timestamp instead mixes branches and produces a broken
+        narrative (verified with real data 2026-08-20).
+        """
+        history = (raw.get("chat") or {}).get("history") or {}
+        msgs = history.get("messages") or {}
+        if not isinstance(msgs, dict):
+            return []
+        branch: list = []
+        seen = set()
+        current = history.get("currentId")
+        while current and current in msgs and current not in seen:
+            seen.add(current)
+            item = msgs[current]
+            if isinstance(item, dict):
+                branch.append(item)
+            current = item.get("parentId") if isinstance(item, dict) else None
+        branch.reverse()
+        return branch
+
+    @staticmethod
+    def _normalize_snippet_text(text: str, max_chars: int = MAX_SNIPPET_MESSAGE_CHARS) -> str:
+        """Collapse a message into one markdown-safe line for the snippet.
+
+        Newlines become ' ⏎ ' (visible break without breaking the layout),
+        every backtick is escaped so no code fence or code span can open and
+        swallow the rest of the output, and the line is truncated. Escaped
+        backticks render literally in Markdown (e.g. a triple fence shows as
+        '```' instead of starting a code block).
+        """
+        if not text:
+            return ""
+        one_line = text.replace("\n", " ⏎ ").strip()
+        one_line = one_line.replace("`", "\\`")
+        if len(one_line) <= max_chars:
+            return one_line
+        return one_line[: max_chars - 1].rstrip() + "…"
+
+    async def _folder_name(self, token: str, folder_id: Optional[str]) -> Optional[str]:
+        """Resolve a folder id to its display name (best-effort).
+
+        The ChatResponse carries only ``folder_id``; the name lives in the
+        folders router. A failure (folders disabled, route changed) falls
+        back to None — the renderer then shows the id. Never breaks the
+        chat call.
+        """
+        if not folder_id:
+            return None
+        try:
+            _status, _ct, body = await self._api_get_json(token, _ROUTE_FOLDERS)
+            folders = json.loads(body)
+            if isinstance(folders, list):
+                for folder in folders:
+                    if (
+                        isinstance(folder, dict)
+                        and folder.get("id") == folder_id
+                        and folder.get("name")
+                    ):
+                        return folder["name"]
+        except Exception:
+            pass
+        return None
 
     async def _fetch_all_pages(self, token: str, path: str, page_size: int = DEFAULT_PAGE_SIZE,
                                params: Optional[dict] = None,
@@ -1232,15 +1388,26 @@ class Tools:
         chats = self._summarize_chats(sorted_items[:limit])
         return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
-    async def get_chat(self, chat_id: str, __request__: Any = None, __user__: dict = None,
+    async def get_chat(self, chat_id: str, head: int = DEFAULT_SNIPPET_HEAD,
+                       tail: int = DEFAULT_SNIPPET_TAIL,
+                       __request__: Any = None, __user__: dict = None,
                        __event_emitter__: Any = None) -> str:
-        """Get the full content of one chat (all its messages) by id.
+        """Get a compact snippet of one chat: summary, first N and last M messages.
+
+        Never dumps the full conversation. Each message is collapsed to a
+        single markdown-safe line (newlines become ' ⏎ ', code fences are
+        neutralized) and only the head and tail of the main branch are
+        returned, so the model sees what the chat is about without flooding
+        the context. Use larger head/tail to read a bit more.
 
         :param chat_id: the chat's UUID.
+        :param head: how many leading messages to include (default 3, max 10).
+        :param tail: how many trailing messages to include (default 3, max 10).
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_chat(chat_id, __request__, __user__=__user__, output_format=output_format),
+            self._get_chat(chat_id, head, tail, __request__, __user__=__user__,
+                            output_format=output_format),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
@@ -1248,26 +1415,57 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_chat(self, chat_id: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+    async def _get_chat(self, chat_id: Any, head: Any = DEFAULT_SNIPPET_HEAD,
+                        tail: Any = DEFAULT_SNIPPET_TAIL,
+                        request: Any = None, __user__: Optional[dict] = None,
+                        output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         chat_id = self._require_id(chat_id, "chat_id")
+        head = self._coerce_head_tail(head)
+        tail = self._coerce_head_tail(tail)
         _status, _ct, body = await self._api_get_json(
             token, _ROUTE_CHAT.format(chat_id=chat_id)
         )
         raw = json.loads(body)
         # Field whitelist (defense in depth): the full ChatResponse carries
-        # bookkeeping noise (user_id, meta, tasks, summary, folder_id) that
-        # the model does not need. Keep the conversation (chat/messages),
-        # title and the user-facing flags only. No token or credential field
-        # exists here (verified in v0.10.2), but whitelisting keeps json mode
-        # consistent with the markdown renderer.
-        chat = {
-            k: raw.get(k)
-            for k in ("id", "title", "chat", "messages", "created_at",
-                      "updated_at", "share_id", "pinned", "archived")
-            if k in raw
+        # bookkeeping noise (user_id, tasks, summary, last_read_at, the raw
+        # meta dict) that the model does not need. Only organization metadata
+        # and a bounded snippet of the main branch are derived — no raw body
+        # ever reaches _ok (pinned by the static tripwire).
+        branch = self._main_branch_messages(raw)
+        with_text = [m for m in branch if self._message_text(m)]
+        count = len(with_text)
+        head_msgs = with_text[:head]
+        tail_msgs = with_text[count - tail:] if count > head + tail else []
+        skipped = max(0, count - head - tail)
+        chat_obj = raw.get("chat") or {}
+        meta = raw.get("meta") or {}
+        folder_id = raw.get("folder_id")
+        folder_name = await self._folder_name(token, folder_id)
+        payload = {
+            "id": raw.get("id"),
+            "title": raw.get("title"),
+            "message_count": count,
+            "models": chat_obj.get("models") or [],
+            "tags": meta.get("tags") or [],
+            "folder_id": folder_id,
+            "folder_name": folder_name,
+            "pinned": raw.get("pinned"),
+            "archived": raw.get("archived"),
+            "share_id": raw.get("share_id"),
+            "created_at": raw.get("created_at"),
+            "updated_at": raw.get("updated_at"),
+            "head": [
+                {"role": m.get("role"), "text": self._normalize_snippet_text(self._message_text(m))}
+                for m in head_msgs
+            ],
+            "tail": [
+                {"role": m.get("role"), "text": self._normalize_snippet_text(self._message_text(m))}
+                for m in tail_msgs
+            ],
+            "skipped": skipped,
         }
-        return self._ok(chat, "chat", output_format=output_format)
+        return self._ok(payload, "chat", output_format=output_format)
 
     async def search_chats(self, text: str, __request__: Any = None, __user__: dict = None,
                            __event_emitter__: Any = None) -> str:

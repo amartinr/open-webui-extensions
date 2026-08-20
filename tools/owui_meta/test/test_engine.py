@@ -154,18 +154,24 @@ async def test_truncation_applies_to_output():
 
 
 async def test_truncation_applies_to_markdown():
-    # A long chat history is rendered as Markdown; truncation still applies.
-    long_chat = {"id": "c1", "title": "Big", "messages": [
-        {"role": "user", "content": "y" * 3000},
-        {"role": "assistant", "content": "z" * 3000},
-    ]}
+    # A chat snippet with long messages is rendered as Markdown; truncation
+    # still applies.
+    long_chat = {
+        "id": "c1", "title": "Big", "folder_id": None, "meta": {},
+        "pinned": False, "archived": False, "created_at": 1, "updated_at": 2,
+        "chat": {"models": [], "history": {"currentId": "m10", "messages": {
+            f"m{i}": {"id": f"m{i}", "role": "user", "content": "y" * 3000,
+                       "parentId": None if i == 1 else f"m{i-1}", "timestamp": i}
+            for i in range(1, 11)
+        }}},
+    }
 
     def handler(request):
         return json_response(long_chat)
 
     tools = make_tools(handler, base_url="http://open-webui.private")
     tools.valves.max_response_chars = 500
-    out = await tools.get_chat("c1", __request__=FakeRequest())
+    out = await tools.get_chat("c1", head=10, tail=0, __request__=FakeRequest())
     assert "truncated" in out
     assert len(out) <= 500 + 5
 

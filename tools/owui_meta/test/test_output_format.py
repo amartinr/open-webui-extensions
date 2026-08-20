@@ -73,26 +73,27 @@ async def test_profile_permissions_hierarchy_full():
 
 
 async def test_multimodal_chat_content_renders_hierarchy():
-    # Chat message content can be a list of parts (multimodal); it must render
-    # as hierarchy, not Python repr / JSON.
+    # Chat message content can be a list of parts (multimodal); the snippet
+    # extracts the text parts and drops the rest (images cannot render in a
+    # text snippet).
     def handler(request):
         return json_response({
             "id": CHAT_ID, "title": "Media",
-            "messages": [
-                {"role": "assistant", "content": [
-                    {"type": "text", "text": "here is the result"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
-                ]},
-            ],
+            "chat": {"models": [], "history": {"currentId": "m1", "messages": {
+                "m1": {"id": "m1", "role": "assistant", "parentId": None, "timestamp": 1,
+                       "content": [
+                           {"type": "text", "text": "here is the result"},
+                           {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+                       ]},
+            }}},
+            "meta": {}, "folder_id": None, "pinned": False, "archived": False,
+            "created_at": 1, "updated_at": 2,
         })
 
     out = await md_tools(handler).get_chat(CHAT_ID, __request__=FakeRequest())
-    assert "**assistant**" in out
-    assert "1. Type: text" in out
-    assert "  - Text: here is the result" in out
-    assert "2. Type: image_url" in out
-    assert "  - Image Url" in out
-    assert "    - Url: data:image/png;base64,AAA" in out
+    assert "**Chat: Media**" in out
+    assert "**Assistant**: here is the result" in out
+    assert "data:image" not in out  # non-text parts dropped from the snippet
     assert "{" not in out
 
 
@@ -155,16 +156,47 @@ async def test_single_chat_renders_messages():
     def handler(request):
         return json_response({
             "id": CHAT_ID, "title": "Budget planning",
-            "messages": [
-                {"role": "user", "content": "hola"},
-                {"role": "assistant", "content": "hola, ¿qué tal?"},
-            ],
+            "chat": {"models": [], "history": {"currentId": "m2", "messages": {
+                "m1": {"id": "m1", "role": "user", "content": "hola", "parentId": None, "timestamp": 1},
+                "m2": {"id": "m2", "role": "assistant", "content": "hola, ¿qué tal?", "parentId": "m1", "timestamp": 2},
+            }}},
+            "meta": {}, "folder_id": None, "pinned": False, "archived": False,
+            "created_at": 1, "updated_at": 2,
         })
 
     out = await md_tools(handler).get_chat(CHAT_ID, __request__=FakeRequest())
-    assert "**Chat: Budget planning** (id: " + CHAT_ID + ")" in out
-    assert "**user**\nhola" in out
-    assert "**assistant**\nhola, ¿qué tal?" in out
+    assert "**Chat: Budget planning**" in out
+    assert "- Messages: 2" in out
+    assert "**User**: hola" in out
+    assert "**Assistant**: hola, ¿qué tal?" in out
+    # small chat -> no ellipsis line
+    assert "… (" not in out
+
+
+async def test_snippet_skips_intermediate_messages():
+    def handler(request):
+        msgs = {
+            f"m{i}": {"id": f"m{i}", "role": "user" if i % 2 else "assistant",
+                      "content": f"msg {i}", "parentId": None if i == 1 else f"m{i-1}", "timestamp": i}
+            for i in range(1, 11)
+        }
+        return json_response({
+            "id": CHAT_ID, "title": "Long chat",
+            "chat": {"models": [], "history": {"currentId": "m10", "messages": msgs}},
+            "meta": {}, "folder_id": None, "pinned": False, "archived": False,
+            "created_at": 1, "updated_at": 10,
+        })
+
+    out = await md_tools(handler).get_chat(CHAT_ID, head=2, tail=2, __request__=FakeRequest())
+    assert "**Chat: Long chat**" in out
+    assert "- Messages: 10" in out
+    assert "**User**: msg 1" in out
+    assert "**Assistant**: msg 2" in out
+    assert "… ( 6 messages skipped ) …" in out
+    assert "**User**: msg 9" in out
+    assert "**Assistant**: msg 10" in out
+    # intermediate messages never appear
+    assert "msg 5" not in out
 
 
 async def test_file_text_content_is_fenced():
