@@ -218,7 +218,7 @@ These changes were not in the initial plan; they emerged during development / li
 Work intentionally postponed to a future version of the tool (not part of the current branch scope):
 
 - **Admin-only methods** (former Iteration 2, DESIGN §6.2): `list_users`, `get_user`, `list_all_chats`, `get_admin_config` — with the runtime role gate (`__user__.role == 'admin'` before any HTTP call). Deferred by user decision (2026-08-01).
-- **`get_my_chats` date-range filter** (former Iteration 9 task 9.6, DESIGN §8.10): `created_after`/`created_before`/`updated_after`/`updated_before` params (epoch or ISO values, half-open `[after, before)` ranges, applied client-side before sort/slice, composable with `tag`/`sort_by`/`sort_order`). Design complete and recorded; **deferred by user decision (2026-08-21)** — the manual workaround (sort by `created_at` asc + pick the range) remains the current path.
+- **`get_chats(scope="all")` date-range filter** (former Iteration 9 task 9.6, DESIGN §8.10): `created_after`/`created_before`/`updated_after`/`updated_before` params (epoch or ISO values, half-open `[after, before)` ranges, applied client-side before sort/slice, composable with `tag`/`sort_by`/`sort_order`). Design complete and recorded; **deferred by user decision (2026-08-21)** — the manual workaround (sort by `created_at` asc + pick the range) remains the current path.
 - Anything else not explicitly in the current iterations (per DESIGN §2 / out-of-scope list below).
 
 ---
@@ -447,7 +447,7 @@ Five independent tasks (9.6 deferred by user decision 2026-08-21), all preservin
 
 **Acceptance:** own-file deletion confirmed against a sandbox instance; foreign files rejected per id; suite stays green and skipped without the opt-in env.
 
-### 9.6 `get_my_chats` — date-range filter ⏸️ DEFERRED (user decision 2026-08-21)
+### 9.6 `get_chats(scope="all")` — date-range filter ⏸️ DEFERRED (user decision 2026-08-21)
 
 **Commit:** *(none — not implemented; design kept for reference in this section and DESIGN §8.10)*
 
@@ -458,9 +458,9 @@ Five independent tasks (9.6 deferred by user decision 2026-08-21), all preservin
 **Design (backward-compatible, all new params optional):**
 
 ```python
-get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
-             created_after=None, created_before=None,
-             updated_after=None, updated_before=None)
+get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=None,
+          created_after=None, created_before=None,
+          updated_after=None, updated_before=None)
 ```
 
 - **Value acceptance:** epoch int/float **or** ISO date/datetime strings (`"2026-06-01"`, `"2026-06-01 12:00"`, `"2026-06-01T12:00:00Z"`); a tolerant `_parse_ts` converts to epoch UTC (partial dates → midnight UTC).

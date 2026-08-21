@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx, Pillow
-version: 0.23.0
+version: 0.24.0
 licence: MIT
 """
 
@@ -1623,12 +1623,14 @@ class Tools:
         ``limit`` semantics differ per scope: for "all" it is the top-N after
         iterating server pages; for "pinned"/"shared" the top-N of the
         paged response; for "archived" the top-N of the whole (non-paginated)
-        list.
+        list. ``sort_by``/``sort_order`` apply to ``scope="all"`` only
+        (client-side); "pinned"/"shared"/"archived" keep the backend's
+        own ordering.
 
         :param scope: "all", "pinned", "shared" or "archived" (default "all").
         :param limit: how many chats to return (default 10, max 100).
-        :param sort_by: "updated_at" or "created_at" (default "updated_at").
-        :param sort_order: "asc" or "desc" (default "desc").
+        :param sort_by: "updated_at" or "created_at" (default "updated_at"; applies to scope="all" only).
+        :param sort_order: "asc" or "desc" (default "desc"; applies to scope="all" only).
         :param tag: filter to chats with this tag; only valid with scope="all" (default None = all chats).
         """
         output_format = self._resolve_output_format(__user__)
@@ -1925,11 +1927,12 @@ class Tools:
         match the folder "Open WebUI meta"; the backend treats ``_``≡space).
         An unknown folder name is a clean error listing the valid names.
 
-        Backend notes: (1) a LONE ``tag:`` query with zero matches triggers
-        the backend's orphan-tag cleanup — the tag's catalog entry is
-        deleted (intended behavior; per-chat tags are untouched); (2) search
+        Backend notes: (1) the backend's orphan-tag cleanup (a ``tag:``
+        query with zero matches deletes the tag's catalog entry) only fires
+        through ``get_chats(tag=...)`` — a lone ``tag:`` here is an error
+        before any request, so this tool can never trigger it; (2) search
         excludes archived chats, so a tag used only on archived chats is
-        cleaned here while ``get_chats(tag=...)`` still sees it.
+        visible via ``get_chats(tag=...)`` but not searchable here.
 
         :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted as refinements; folder: names resolved client-side).
         """

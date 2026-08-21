@@ -28,7 +28,7 @@ The tool returns **Markdown by default** (`output_format` valve, default `markdo
 - Profile → flat bullets; chat → heading + per-message blocks; file text → 100-char snippet in a fenced block; binary → metadata note; errors → plain-text `Error: …`.
 - **`get_file_content` shows the file in the conversation** — images are **embedded inline in the message** (HTML `embeds` mechanism, styled like a snippet — not markdown, not artifacts) and enriched with **resolution and color depth** (width×height, Pillow mode, bits per channel — via Pillow, already bundled with Open WebUI); text and other binaries appear as an attachment with a clean 100-char snippet / note in the text.
 - **Progress status events** (`verbose` valve, admin + per-user, default on) — the UI shows "Querying your chats…"-style progress while a method runs. **Errors** are shown as a message error block, always (even with `verbose` off), and consolidated to one per call — a batch delete with several failures shows a single "N of M files could not be deleted" instead of one toast per file.
-- **`output_format`** — per-user valve, configurable from the chat session (dropdown Markdown/JSON, default Markdown). There is **no admin valve** for the format: each user chooses the format they prefer for their own chats. The tool's built-in default is Markdown.
+- **`output_format`** — per-user valve, configurable from the chat session (dropdown Markdown/JSON, default Markdown), with an **admin valve as the default** when the user has not chosen. Each user chooses the format they prefer for their own chats; the tool's built-in default is Markdown.
 - Set it to `json` for models that prefer structured objects.
 
 Example of what the model receives for `get_chats()`:
@@ -62,7 +62,7 @@ Import `owui_meta.py` into Open WebUI at **Workspace → Tools → +** and attac
 List methods support **pagination, sorting and filtering** (client-side, since the API does not expose them):
 
 - `get_files(limit=50, sort_by="size" | "created_at" | "filename", sort_order="asc" | "desc", content_type="image/*", min_size=100000, max_size=1000000, filename="report")` — size in raw bytes.
-- `get_chats(scope="all" | "pinned" | "shared" | "archived", limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc", tag="tool")` — `scope` selects the collection (default `"all"`); `"all"` includes folder + pinned chats (the backend hides them from the default listing); `tag` filters the list to chats carrying that tag (pure server-side filter, not a text search) and is accepted **only** with `scope="all"`.
+- `get_chats(scope="all" | "pinned" | "shared" | "archived", limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc", tag="tool")` — `scope` selects the collection (default `"all"`); `"all"` includes folder + pinned chats (the backend hides them from the default listing); `tag` filters the list to chats carrying that tag (pure server-side filter, not a text search) and is accepted **only** with `scope="all"`; `sort_by`/`sort_order` apply to `scope="all"` only (other scopes keep the backend's ordering).
 
 Chat organization (Iteration 8) is covered by dedicated methods:
 
