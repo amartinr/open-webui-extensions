@@ -3,7 +3,7 @@
 **Version:** 1.0
 **Date:** 2026-07-31
 **Author:** (with technical assistance)
-**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20). **Iteration 9: tasks 8.9.1–8.9.4 DONE (v0.17.0–v0.20.0); 8.9.9 and 8.9.10 DONE (v0.21.0: `get_chats(scope=…)` unification + `_my_`-prefix drop); 8.9.5 pending; 8.9.7–8.9.8 planned** (`folder:` search fix, mandatory search term — design decisions 2026-08-21); **the `get_chats(scope="all")` date-range filter (8.9.6) is DEFERRED by user decision 2026-08-21** (applies to `get_chats(scope="all")` when implemented)
+**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20). **Iteration 9: tasks 8.9.1–8.9.4, 8.9.8, 8.9.9 and 8.9.10 DONE (v0.17.0–v0.22.0); 8.9.5 pending; 8.9.7 planned** (`folder:` search fix — design decision 2026-08-21); **the `get_chats(scope="all")` date-range filter (8.9.6) is DEFERRED by user decision 2026-08-21** (applies to `get_chats(scope="all")` when implemented)
 
 ---
 
@@ -466,7 +466,7 @@ Consolidated improvement plan written 2026-08-21 (the same brief whose findings 
 | 8.9.5 | `delete_files` destructive live test (optional, sandbox only, env-gated) | ⏳ pending |
 | 8.9.6 | `get_chats(scope="all")` date-range filter | ⏸️ **DEFERRED** (2026-08-21) |
 | 8.9.7 | `search_chats` `folder:` prefix — fix folder-NAME search (multi-word names broken; user report 2026-08-21) | ⏳ planned |
-| 8.9.8 | `search_chats` must **require a search term** (design decision 2026-08-21) — pure-prefix calls error, never list | ⏳ planned |
+| 8.9.8 | `search_chats` must **require a search term** (design decision 2026-08-21) — pure-prefix calls error, never list | ✅ **DONE (v0.22.0)** |
 | 8.9.9 | Unify the chat list methods into **`get_chats(scope="all"\|"pinned"\|"shared"\|"archived")`** (default `"all"`) — replace `get_my_chats`/`get_pinned_chats`/`get_shared_chats`/`get_archived_chats`; **N1 decided: `tag` accepted only with `scope="all"`** | ✅ **DONE (v0.21.0)** |
 | 8.9.10 | Drop the **`_my_`** prefix from all method names (`get_profile`, `get_files`, …; `get_knowledge_bases` **kept** — OWUI's own nomenclature, N3 resolved) | ✅ **DONE (v0.21.0)** |
 
@@ -568,17 +568,17 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 
 **Design (`_search_chats`, zero new routes):** greedy multi-word phrase matching against the user's folders (`GET /api/v1/folders/`, already allowlisted; backend normalization semantics) → **rewrite to the underscore-normalized single token** (`folder:open_webui_meta` — the backend treats `_`≡space, so it matches exactly; verified live: 38 chats for the long folder name) → **strip the consumed words** from the free text (kills the leak) → **unknown folder → clean error listing the valid names** (no more silent no-filter). Mixed text stays AND (`"foo folder:Open WebUI meta"` → `foo folder:open_webui_meta`).
 
-### 8.9.8 `search_chats` — search term required (design decision 2026-08-21)
+### 8.9.8 `search_chats` — search term required ✅ DONE (v0.22.0)
 
-**Decision:** `search_chats(text)` must require a **textual search term**. Calls whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must **error** — never return a full listing. The prefixes stay as **optional refinements** of an actual text search; pure filtered listing belongs to the list tools (`get_chats(scope=…)`, `get_folders`, … — see 8.9.9/8.9.10), never to `search_chats`.
+**Decision (implemented):** `search_chats(text)` must require a **textual search term**. Calls whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must **error** — never return a full listing. The prefixes stay as **optional refinements** of an actual text search; pure filtered listing belongs to the list tools (`get_chats(scope=…)`, `get_folders`, …), never to `search_chats`.
 
 **Why:** `search_chats` was being (mis)used as a filtered listing — `"pinned:true"` / `"tag:none"` returned full listings, and `"folder:Open WebUI meta"` returned 1 chat instead of the folder's (the 9.7 bug). Searching (text matching) and listing (filtered collections) must stay separate: predictable ("nothing searched" ≠ "nothing found") and correct API usage (list tools already exist).
 
-**Implementation (`_search_chats`):** tokenize by whitespace; if no token survives after removing the UI prefixes (`tag:`/`folder:`/`pinned:`/`archived:`/`shared:`) → **`ToolError`** pointing to the list tools; otherwise proceed (9.1 tag AND + 9.7 folder resolution apply to the remaining text + prefixes). Signature unchanged.
+**Implementation (done in `_search_chats`):** tokenize by whitespace; a token is a UI prefix if it starts with `_SEARCH_UI_PREFIXES` (`tag:`/`folder:`/`pinned:`/`archived:`/`shared:`); **no text token → `ToolError`** pointing to the list tools — raised before any request (no network, no orphan-tag side effect). Otherwise proceed (9.1 tag AND + the remaining text). Signature unchanged.
 
 **Alternatives considered:** empty result instead of error (rejected — indistinguishable from "nothing found"); keep hybrid search+listing (rejected — the current confusing state); a `list_only` flag (rejected — redundant with list tools).
 
-**Synergies:** the lone-`tag:` **orphan-tag cleanup becomes unreachable via `search_chats`** (pure-prefix calls error before the backend — simplifies §8.9.1); `get_chats(tag=)` keeps its documented cleanup side effect; the 9.7 folder fix remains needed for text+folder combos.
+**Synergies realized:** the lone-`tag:` **orphan-tag cleanup is now unreachable via `search_chats`** (pure-prefix calls error before the backend — simplifies §8.9.1); `get_chats(tag=)` keeps its documented cleanup side effect; the 9.7 folder fix remains needed for text+folder combos.
 
 ### 8.9.9 Unify chat listing into `get_chats(scope=…)` ✅ DONE (v0.21.0)
 

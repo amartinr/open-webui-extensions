@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3, 9.4, 9.9 and 9.10 DONE (v0.17.0–v0.21.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions; **9.7 planned: `folder:` search fix; 9.8 planned: `search_chats` requires a search term**) — design decisions 2026-08-21
+**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3, 9.4, 9.8, 9.9 and 9.10 DONE (v0.17.0–v0.22.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions; **9.7 planned: `folder:` search fix**) — design decisions 2026-08-21
 **Notes merged (2026-08-21):** `NOTES.md` was absorbed into this plan — N1 (`tag` × scope) and N2 (per-scope `limit` semantics) are now design notes under task 9.9; N3 (residual `_my_` names) under task 9.10; N4 (Iteration 9 status snapshot) is the **Status** line above. The standalone file was replaced by a pointer stub.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -504,9 +504,11 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 
 **Tests** (`test/test_iteration9.py`): mock — multi-word folder resolution, underscore rewrite, leak stripping, unknown-folder error, text+folder AND; live (env-gated) — the matrix above on the instance's real folders (name with spaces → folder's chats; id → error).
 
-### 9.8 `search_chats` — require a search term (design decision 2026-08-21)
+### 9.8 `search_chats` — require a search term ✅ DONE (v0.22.0)
 
-**Decision:** `search_chats(text)` must require a **textual search term**. A call whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must **error** — never return a full listing. The prefixes remain available as **optional refinements** that narrow an actual text search. Pure filtered listing belongs to the dedicated list tools (`get_my_chats`, `get_pinned_chats`, `get_archived_chats`, `get_my_folders`, `get_my_tags`) — never to `search_chats`.
+**Commit:** *(this iteration's commit)*
+
+**Decision (implemented):** `search_chats(text)` must require a **textual search term**. A call whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must **error** — never return a full listing. The prefixes remain available as **optional refinements** that narrow an actual text search. Pure filtered listing belongs to the dedicated list tools (`get_chats(scope=…)`, `get_folders`, `get_tags`) — never to `search_chats`.
 
 **Why (the mis-use that prompted it, live 2026-08-21):**
 - `search_chats("pinned:true")` and `search_chats("tag:none")` returned **full listings** — search silently doubling as listing, with the `tag:none` → dozens-of-chats surprise.
@@ -514,30 +516,33 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 
 **Rationale:** separation of concerns (searching = text matching; listing = filtered collections); predictability ("nothing searched" must be distinguishable from "nothing found"); correct API usage (list concerns are already covered by explicit list tools).
 
-**Implementation (`_search_chats`):**
-1. Tokenize `text` by whitespace; separate UI-prefix tokens (`tag:`, `folder:`, `pinned:`, `archived:`, `shared:`) from text tokens.
-2. **No text token → `ToolError`** with a pointer to the list tools, e.g. `search_chats requires a text term; use get_chats(scope="pinned"|"shared"|"archived") or get_folders for filtered listings.`
-3. Otherwise proceed as today — 9.1 (tag AND passthrough) and 9.7 (folder-name resolution) apply to the remaining text + prefixes. Signature unchanged (`text` stays the only required param).
+**Implementation (done in `_search_chats`):**
+1. Tokenize `text` by whitespace; a token is a UI prefix if it starts with `_SEARCH_UI_PREFIXES` (`tag:`, `folder:`, `pinned:`, `archived:`, `shared:` — case-insensitive), otherwise it is a text token.
+2. **No text token → `ToolError`** with a pointer to the list tools: `search_chats requires a text term; use get_chats(scope="pinned"|"shared"|"archived") or get_folders for filtered listings.` (raised before any request — no network hit, no orphan-tag side effect).
+3. Otherwise proceed as before — 9.1 (tag AND passthrough) applies; 9.7 (folder-name resolution) remains for text+folder combos. Signature unchanged (`text` stays the only required param).
 
-**Synergies:** the **lone-`tag:` orphan-tag cleanup becomes unreachable via `search_chats`** (9.1's side-effect note simplifies: a pure-prefix call errors before the backend is hit); `get_chats(tag=)` (task 9.9) remains the listing path and keeps its documented cleanup side effect; the 9.7 folder fix stays needed for text+folder combos (`"ventilador folder:Open WebUI meta"`). With tasks 9.9/9.10, all list references here resolve to `get_chats(scope=…)` / `get_folders`.
+**Synergies realized:** the **lone-`tag:` orphan-tag cleanup is now unreachable via `search_chats`** (pure-prefix calls error before the backend is hit); `get_chats(tag=)` remains the listing path and keeps its documented cleanup side effect; the 9.7 folder fix is still needed for text+folder combos (`"ventilador folder:Open WebUI meta"`).
 
 **Alternatives considered:**
 - *Return an empty result instead of an error* — **rejected**: "nothing searched" would be indistinguishable from "nothing found" (the exact predictability problem this decision fixes); an error teaches the model the correct tool.
 - *Keep `search_chats` as a hybrid search+listing* — rejected: the current state and the source of the confusion.
 - *Add a flag (e.g. `list_only`) to `search_chats`* — rejected: extra surface; the dedicated list tools already exist.
 
-**Acceptance:**
-- `search_chats("pinned:true")` → **error** (never a listing of pinned chats).
-- `search_chats("tag:comfyui")` / `search_chats("tag:none")` / `search_chats("folder:Open WebUI meta")` → **error**.
-- `search_chats("ventilador pinned:true")` → only pinned chats matching "ventilador" (prefix still narrows).
-- `search_chats("Open WebUI folder:Open WebUI meta")` → a real search (text AND folder, per 9.7).
-- Listing all chats / by tag / by folder / pinned → via `get_chats(scope=…)` (task 9.9) and `get_folders` (9.10), never via `search_chats`.
+**Acceptance (verified by tests, 2026-08-21):**
+- `search_chats("pinned:true")` → **error** (never a listing of pinned chats). ✓
+- `search_chats("tag:comfyui")` / `search_chats("tag:none")` → **error**. ✓ (`folder:MyFolder` also errors when it is a single token; multi-word `folder:` names are the 9.7 case — the trailing words are text and the call proceeds)
+- `search_chats("ventilador pinned:true")` → only pinned chats matching "ventilador" (prefix still narrows). ✓
+- `search_chats("Open WebUI folder:Open WebUI meta")` → a real search (text AND folder) — depends on 9.7 (still planned).
+- Listing all chats / by tag / by folder / pinned → via `get_chats(scope=…)` (9.9) and `get_folders` (9.10), never via `search_chats`.
 
 **Tests updated** (`test/test_iteration9.py`, `test/test_live.py`):
-- `test_search_chats_tag_none_passthrough` (mock) → now expects the error.
-- `test_live_chats_tag_filter_matches_search_prefix` (`test_live.py`, uses lone `search_chats("tag:tool")`) → rework to text+tag (e.g. `"tool tag:tool"`) or compare `get_chats(tag=)` (9.9) with a text+tag search.
-- `test_live_search_tag_consistent_with_get_my_chats_tag` (lone `tag:`) → rework to text+tag vs `get_chats(tag=)`.
-- New: pure-prefix → error for each prefix; text+prefix works (AND).
+- `test_search_chats_tag_none_passthrough` (mock) → now expects the error (no request issued).
+- `test_search_chats_pure_prefix_errors_for_each_prefix` (new): every UI prefix alone → error, zero network.
+- `test_search_chats_text_plus_prefix_still_works` (new): text+prefix passes through unchanged (AND).
+- `test_live_chats_tag_filter_matches_search_prefix` → reworked: a real term (a title from the tag's own chats) + `tag:` must be a subset of `get_chats(tag=)`.
+- `test_live_search_tag_consistent_with_get_chats_tag` → reworked: same subset check.
+- `test_live_search_text_and_prefixes` → split: text(+prefix) terms succeed; pure-prefix terms assert the error.
+- `test_tag_semantics_documented_in_docstrings` → + "real search term" / "get_folders" needles.
 
 ### 9.9 Unify the chat list methods into `get_chats(scope=…)` ✅ DONE (v0.21.0)
 
@@ -609,7 +614,15 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 - README updated: new method names + breaking-change note; DESIGN §6.1/§8.9.9/§8.9.10/Status updated.
 - Frontmatter `version:` → v0.21.0; import + Valves checks pass.
 
-**Still pending for Iteration 9 (v0.21.0+):** 9.5 (`delete_files` destructive test), 9.7 (`folder:` search fix), 9.8 (`search_chats` requires a text term). 9.6 DEFERRED (see §7).
+**Task 9.8 delivered (v0.22.0, one commit):**
+
+- `search_chats` now requires a real text term: a call whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `tag:none`, `folder:MyFolder`, …) → clean `ToolError` ("search_chats requires a text term; use get_chats(scope=\"pinned\"|\"shared\"|\"archived\") or get_folders for filtered listings.") — raised BEFORE any request (no network, no orphan-tag side effect). Prefixes remain valid as refinements of a text term ("ventilador pinned:true" works).
+- New `_SEARCH_UI_PREFIXES` constant (`tag:`/`folder:`/`pinned:`/`archived:`/`shared:`, case-insensitive match).
+- Tests: 3 new/changed mock tests (pure-prefix error per prefix with zero network, tag:none error, text+prefix AND) + live rework (subset checks for text+tag, pure-prefix errors). Full suite green — **169 passed / 21 skipped** (live env-gated) on 2026-08-21.
+- Docstrings + README updated (search term requirement, pointer to list tools).
+- Frontmatter `version:` → v0.22.0.
+
+**Still pending for Iteration 9 (v0.22.0+):** 9.5 (`delete_files` destructive test), 9.7 (`folder:` search fix). 9.6 DEFERRED (see §7).
 
 ## 8. Out of scope (per DESIGN §2)
 

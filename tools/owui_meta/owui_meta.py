@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx, Pillow
-version: 0.21.0
+version: 0.22.0
 licence: MIT
 """
 
@@ -106,6 +106,19 @@ _ROUTE_CHATS_STATS_USAGE = "/api/v1/chats/stats/usage"
 # bare ChatTitleIdResponse array). It is a QUERY (no side effects) despite
 # being POST — the backend uses POST for the JSON body, not for writing.
 _ROUTE_CHATS_TAGS = "/api/v1/chats/tags"
+
+# UI filter prefixes parsed server-side by the search endpoint (v0.10.2
+# get_chats_by_user_id_and_search_text strips them and ANDs the free text
+# with each filter). A call whose tokens are ONLY such prefixes searches
+# nothing — search_chats rejects it (Iteration 9 task 9.8); the prefixes
+# remain optional refinements of a real text term.
+_SEARCH_UI_PREFIXES = (
+    "tag:",
+    "folder:",
+    "pinned:",
+    "archived:",
+    "shared:",
+)
 
 # Content types that are useful as text when reading a file's content.
 _TEXT_CONTENT_TYPES = frozenset({
@@ -1883,14 +1896,20 @@ class Tools:
                            __event_emitter__: Any = None) -> str:
         """Search the requesting user's chats for a text fragment.
 
+        ``text`` must contain a real search term (a word that is not a UI
+        filter prefix). A call whose tokens are ONLY UI filter prefixes
+        (``pinned:true``, ``tag:meta``, ``folder:name``, ``tag:none``, ...)
+        is an error — use get_chats(scope=...) or get_folders for filtered
+        listings instead; this tool matches text.
+
         The backend supports the UI filter prefixes, all server-side:
         ``tag:name``, ``folder:name``, ``pinned:true/false``,
         ``archived:true/false``, ``shared:true/false`` and ``tag:none``
-        (chats with no tags) — e.g. ``search_chats("tag:budget")``. Results
-        include a per-chat ``snippet`` of the matched message when present.
-        All prefixes combine with the text as AND (server-side scope
-        limiters, verified live 2026-08-21) — ``"foo tag:bar"`` matches only
-        chats matching ``foo`` that also carry the tag ``bar``.
+        (chats with no tags). Results include a per-chat ``snippet`` of the
+        matched message when present. All prefixes combine with the text as
+        AND (server-side scope limiters, verified live 2026-08-21) —
+        ``"foo tag:bar"`` matches only chats matching ``foo`` that also
+        carry the tag ``bar``.
 
         Backend notes: (1) a LONE ``tag:`` query with zero matches triggers
         the backend's orphan-tag cleanup — the tag's catalog entry is
@@ -1898,7 +1917,7 @@ class Tools:
         excludes archived chats, so a tag used only on archived chats is
         cleaned here while ``get_chats(tag=...)`` still sees it.
 
-        :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted).
+        :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted as refinements).
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
@@ -1914,6 +1933,20 @@ class Tools:
         if not isinstance(text, str) or not text.strip():
             raise ToolError("search_chats requires a non-empty 'text' parameter.")
         text = text.strip()[:200]
+        # Task 9.8: a call whose tokens are ONLY UI filter prefixes searches
+        # nothing — it would silently return a full listing (the backend
+        # strips the prefixes and matches empty text). Reject it and point
+        # the model at the list tools; prefixes remain valid as refinements
+        # of a real text term (e.g. "foo tag:bar").
+        tokens = text.split()
+        if not any(
+            not tok.lower().startswith(_SEARCH_UI_PREFIXES) for tok in tokens
+        ):
+            raise ToolError(
+                "search_chats requires a text term; use get_chats("
+                'scope="pinned"|"shared"|"archived") or get_folders for '
+                "filtered listings."
+            )
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(
             token, _ROUTE_CHATS_SEARCH, {"text": text}

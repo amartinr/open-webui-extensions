@@ -75,13 +75,49 @@ async def test_search_chats_passes_tag_prefix_text_through_unchanged():
 
 
 async def test_search_chats_tag_none_passthrough():
+    # 9.8: a call whose tokens are ONLY UI prefixes (here tag:none) is an
+    # error — it would silently return a full listing, indistinguishable
+    # from "nothing found". No request must be issued.
+    seen = []
+
     def handler(request):
-        assert request.url.params["text"] == "tag:none"
-        return json_response([{"id": "c2", "title": "No tags"}])
+        seen.append(request.url.path)
+        return json_response([], status=200)
+
+    tools = make_tools(handler, base_url="http://webui.example.test")
+    out = await tools.search_chats("tag:none", FakeRequest())
+    assert seen == [], "pure-prefix call must not hit the network"
+    assert out.startswith("Error:")
+    assert "requires a text term" in out
+
+
+async def test_search_chats_pure_prefix_errors_for_each_prefix():
+    # 9.8 acceptance: every UI prefix alone → clean error, never a listing.
+    for term in ("pinned:true", "tag:meta", "folder:MyFolder",
+                 "archived:true", "shared:true", "tag:none"):
+        seen = []
+
+        def handler(request):
+            seen.append(request.url.path)
+            return json_response([], status=200)
+
+        tools = make_tools(handler, base_url="http://webui.example.test")
+        out = await tools.search_chats(term, FakeRequest())
+        assert seen == [], f"pure-prefix {term!r} must not hit the network"
+        assert out.startswith("Error:") and "requires a text term" in out, term
+
+
+async def test_search_chats_text_plus_prefix_still_works():
+    # 9.8: a real text term + prefix keeps working as AND (server-side).
+    def handler(request):
+        assert request.url.params["text"] == "ventilador pinned:true"
+        return json_response([{"id": "c1", "title": "Ventilador"}])
 
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.search_chats("tag:none", FakeRequest())
-    assert json.loads(out)["query"] == "tag:none"
+    out = await tools.search_chats("ventilador pinned:true", FakeRequest())
+    data = json.loads(out)
+    assert data["query"] == "ventilador pinned:true"
+    assert [c["id"] for c in data["chats"]] == ["c1"]
 
 
 async def test_get_chats_tag_uses_post_tags_route():
@@ -105,7 +141,8 @@ def test_tag_semantics_documented_in_docstrings():
         return " ".join(doc.split())
 
     search_doc = flat(owui_meta.Tools.search_chats.__doc__ or "")
-    for needle in ("scope limiters", "orphan-tag", "archived chats"):
+    for needle in ("scope limiters", "orphan-tag", "archived chats",
+                   "real search term", "get_folders"):
         assert needle in search_doc, f"search_chats docstring missing {needle!r}"
     list_doc = flat(owui_meta.Tools.get_chats.__doc__ or "")
     for needle in ("orphan-tag", "archived chats"):
@@ -136,13 +173,17 @@ async def test_live_search_tag_consistent_with_get_chats_tag():
     if not tags:
         pytest.skip("instance has no tags")
     tag = tags[0]["name"]
-    by_search = (json.loads(await tools.search_chats(f"tag:{tag}", live_request())) or {}).get("chats", [])
-    by_list = (
-        json.loads(await tools.get_chats(tag=tag, limit=50, __request__=live_request())) or {}
-    ).get("chats", [])
-    n = min(len(by_search), len(by_list))
-    # Both routes order by updated_at desc; the shared head must match.
-    assert [c["id"] for c in by_search[:n]] == [c["id"] for c in by_list[:n]]
+    by_list = json.loads(await tools.get_chats(tag=tag, limit=50, __request__=live_request()))
+    ids_list = {c["id"] for c in by_list.get("chats", [])}
+    if not ids_list:
+        pytest.skip("tag has no chats")
+    # 9.8: lone "tag:X" is an error, so search with a real term — the first
+    # tag chat's title — and verify text+tag is AND (a subset of the tag).
+    title = by_list["chats"][0]["title"]
+    by_search = json.loads(await tools.search_chats(f"{title} tag:{tag}", live_request()))
+    ids_search = {c["id"] for c in by_search.get("chats", [])}
+    assert ids_search <= ids_list, f"search {ids_search} not subset of tag {ids_list}"
+    assert by_list["chats"][0]["id"] in ids_search
 
 
 # ── 9.3: chat stats — recomputed length averages (backend bug) ────────

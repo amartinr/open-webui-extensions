@@ -70,7 +70,7 @@ Chat organization (Iteration 8) is covered by dedicated methods:
 - `get_chats(scope="archived")` — archived chats.
 - `get_chat_stats(chat_id)` — usage stats for one chat (message counts, models, tags, averages) from the **EXPERIMENTAL** `stats/usage` route; failure of that route is a clean error, never a crash.
 - `get_folders()` — folders (`name`, `parent`, `expanded`, dates); a 403 on instances where folders are disabled maps to a readable error.
-- `search_chats(text)` accepts the UI filter prefixes server-side: `tag:name`, `folder:name`, `pinned:true/false`, `archived:true/false`, `shared:true/false`, `tag:none` — and surfaces the per-result `snippet`.
+- `search_chats(text)` — **requires a real text term** (a call whose tokens are only UI filter prefixes, e.g. `pinned:true` or `tag:none`, is an error — use `get_chats(scope=…)` / `get_folders` for filtered listings). Accepts the UI filter prefixes server-side as refinements: `tag:name`, `folder:name`, `pinned:true/false`, `archived:true/false`, `shared:true/false`, `tag:none` — and surfaces the per-result `snippet`.
 
 Chat detail comes in two flavors:
 

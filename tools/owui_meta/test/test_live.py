@@ -117,14 +117,22 @@ async def test_live_chats_list():
 
 
 async def test_live_chats_tag_filter_matches_search_prefix():
-    # get_chats(tag=...) (pure filter via POST /chats/tags) and
-    # search_chats("tag:...") must return the same set of chat ids.
+    # get_chats(tag=...) (pure filter via POST /chats/tags) and a text+tag
+    # search must be consistent: the search result (text AND tag) is a
+    # subset of the pure tag filter. 9.8: lone "tag:..." is an error, so
+    # the search uses a real term (a title from the tag's own chats).
     tools = live_tools("json")
     by_tag = json.loads(await tools.get_chats(limit=50, tag="tool", __request__=live_request()))
-    by_search = json.loads(await tools.search_chats("tag:tool", __request__=live_request()))
     ids_tag = {c["id"] for c in by_tag["chats"]}
+    if not ids_tag:
+        pytest.skip("instance has no chats with tag 'tool'")
+    title = by_tag["chats"][0]["title"]
+    by_search = json.loads(await tools.search_chats(f"{title} tag:tool", __request__=live_request()))
     ids_search = {c["id"] for c in by_search["chats"]}
-    assert ids_tag == ids_search, f"tag filter {ids_tag} != search prefix {ids_search}"
+    # text+tag is AND: every search hit carries the tag.
+    assert ids_search <= ids_tag, f"search {ids_search} not subset of tag {ids_tag}"
+    # the source chat (its title is the term) is in the result.
+    assert by_tag["chats"][0]["id"] in ids_search
 
 
 async def test_live_chat_metadata_and_summary():
@@ -149,11 +157,17 @@ async def test_live_search_text_and_prefixes():
     # the prefix loop: big result sets (e.g. tag:none -> 60 chats) exceed
     # max_response_chars and are truncated, which would break a strict JSON
     # parse — the truncation note is expected behavior, not a failure.
+    # 9.8: every term below has a real text token; prefixes narrow it.
     tools = live_tools("markdown")
-    for term in ("meta", "tag:tool", "pinned:true", "archived:true", "tag:none"):
+    for term in ("meta", "meta tag:tool", "meta pinned:true",
+                 "meta archived:true", "meta tag:none"):
         out = await tools.search_chats(term, __request__=live_request())
-        assert "Error:" not in out, f"prefix {term!r} failed: {out[:200]}"
-        assert "Search results for" in out, f"prefix {term!r} missing header"
+        assert "Error:" not in out, f"term {term!r} failed: {out[:200]}"
+        assert "Search results for" in out, f"term {term!r} missing header"
+    # 9.8: pure-prefix calls are errors, never silent full listings.
+    for term in ("tag:tool", "pinned:true", "archived:true", "tag:none"):
+        out = await tools.search_chats(term, __request__=live_request())
+        assert "Error:" in out and "requires a text term" in out, term
         assert ("| Title |" in out) or ("(none)" in out), f"prefix {term!r} rendered weird: {out[:200]}"
     # json mode passes the query through (lenient to truncation on big sets)
     out = await live_tools("json").search_chats("meta", __request__=live_request())
