@@ -72,12 +72,12 @@ async def test_sanitize_protects_against_future_raw_pass_through():
 
     # markdown
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
-    out = await tools.get_my_profile(FakeRequest(token="sk-echoed"))
+    out = await tools.get_profile(FakeRequest(token="sk-echoed"))
     assert "sk-echoed" not in out
 
     # json
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_profile(FakeRequest(token="sk-echoed"))
+    out = await tools.get_profile(FakeRequest(token="sk-echoed"))
     assert "sk-echoed" not in out
 
 
@@ -94,7 +94,7 @@ async def test_token_string_redacted_even_inside_whitelisted_field():
 
     for fmt in ("markdown", "json"):
         tools = make_tools(handler, base_url="http://webui.example.test", output_format=fmt)
-        out = await tools.get_my_profile(FakeRequest(token=secret))
+        out = await tools.get_profile(FakeRequest(token=secret))
         assert secret not in out, f"token leaked in {fmt} mode"
         assert "[REDACTED]" in out
 
@@ -107,7 +107,7 @@ async def test_token_redacted_in_error_path():
         raise httpx.ConnectError(f"could not connect with {secret}", request=request)
 
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
-    out = await tools.get_my_profile(FakeRequest(token=secret))
+    out = await tools.get_profile(FakeRequest(token=secret))
     assert secret not in out
 
 

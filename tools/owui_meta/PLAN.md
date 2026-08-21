@@ -2,8 +2,8 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3 and 9.4 DONE (v0.17.0–v0.20.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions; **9.8 planned: `search_chats` requires a search term; 9.9 planned: unify the chat list methods into `get_chats(scope=…)` (default `"all"`); 9.10 planned: drop the `_my_` prefix from all method names**) — design decisions 2026-08-21
-**Scope constraint:** all changes are confined to `tools/owui_meta/` — nothing else in the repository is touched.
+**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3, 9.4, 9.9 and 9.10 DONE (v0.17.0–v0.21.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions; **9.7 planned: `folder:` search fix; 9.8 planned: `search_chats` requires a search term**) — design decisions 2026-08-21
+**Notes merged (2026-08-21):** `NOTES.md` was absorbed into this plan — N1 (`tag` × scope) and N2 (per-scope `limit` semantics) are now design notes under task 9.9; N3 (residual `_my_` names) under task 9.10; N4 (Iteration 9 status snapshot) is the **Status** line above. The standalone file was replaced by a pointer stub.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
 
@@ -539,9 +539,11 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 - `test_live_search_tag_consistent_with_get_my_chats_tag` (lone `tag:`) → rework to text+tag vs `get_chats(tag=)`.
 - New: pure-prefix → error for each prefix; text+prefix works (AND).
 
-### 9.9 Unify the chat list methods into `get_chats(scope=…)` (design decision 2026-08-21)
+### 9.9 Unify the chat list methods into `get_chats(scope=…)` ✅ DONE (v0.21.0)
 
-**Decision:** replace `get_my_chats`, `get_pinned_chats`, `get_shared_chats` and `get_archived_chats` with a **single `get_chats(scope=…)`**:
+**Commit:** *(included in the 9.9+9.10 commit)*
+
+**Decision (implemented):** replace `get_my_chats`, `get_pinned_chats`, `get_shared_chats` and `get_archived_chats` with a **single `get_chats(scope=…)`**:
 
 ```python
 get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=None, ...)
@@ -551,19 +553,26 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 - **Why:** the four methods are the same resource (chats), the same result shape (`ChatTitleIdResponse`) and nearly the same params (`limit`/`sort_by`/`sort_order`/`tag`) — four near-identical tools made the model guess (e.g. `get_pinned` vs `get_shared`); one documented `Literal` scope removes the ambiguity.
 - **Naming:** no `_my_` prefix (task 9.10) — the tool only ever sees the requesting user's data.
 - **Backend unchanged:** same allowlisted routes per scope — `GET /api/v1/chats/` (+ `POST /chats/tags` for `tag=`), `/api/v1/chats/pinned`, `/api/v1/chats/shared`, `/api/v1/chats/archived`; same `_summarize_chats`/sorting/pagination/`max_response_chars`; the `"Archived chats"` label is kept for `scope="archived"`.
-- **Implementation:** one public `get_chats(scope=…)`; internal `_get_chats` dispatches on `scope` to the existing per-route logic; the three separate public methods are removed (breaking rename — the model picks up the new signature from the docstring; README notes old calls in stored history show as unresolved).
+- **Implementation (done):** one public `get_chats(scope=…)`; internal `_get_chats` dispatches on `scope` to the existing per-route logic (all four routes now handled in one dispatcher; the private `_get_shared_chats`/`_get_pinned_chats`/`_get_archived_chats` helpers were removed); the three separate public methods are removed (breaking rename — the model picks up the new signature from the docstring; README notes old calls in stored history show as unresolved). Progress label per scope via `_chats_action`.
+
+**Design notes (merged from NOTES.md N1/N2, 2026-08-21):**
+
+- **N1 — `tag` × `scope != "all"` does not exist in the backend.** There is **no** backend route combining a scope with a tag filter: `POST /chats/tags` filters by tag + user with **no scope**; `/chats/pinned`, `/chats/shared`, `/chats/archived` take **no tag parameter**. So "pinned + tag" has no direct route. **Decision (v1, user + design review 2026-08-21): Option B** — restrict `tag` to `scope="all"` only; `tag` with any other scope → clean `ToolError` ("tag filter only applies to scope='all'"). Zero new requests, simplest contract, predictable for the model. Option A (client-side intersection: fetch the scope list + the tag set via `POST /chats/tags`, cross ids) remains a **follow-up** if the model actually needs scoped+tagged listings.
+- **N2 — `limit` semantics differ per scope (document in the `get_chats` docstring; no code change):** `scope="all"` iterates pages of 50 (`MAX_PAGES`) then slices to `limit` ("top-N after iteration"); `pinned`/`shared` accept `pageSize` then slice; `archived` has **no server-side pagination** (whole list returned, sliced by `limit` — "top-N of the returned list"). The docstring must state the per-scope semantics so the behavior is documented rather than discovered.
 
 **Acceptance:**
 - `get_chats()` ≡ today's `get_my_chats()` (default `scope="all"`).
 - `get_chats(scope="pinned")` ≡ `get_pinned_chats()`; `scope="shared"` ≡ `get_shared_chats()`; `scope="archived"` ≡ `get_archived_chats()` (label kept).
-- `tag=` composes with every scope (validated per route).
+- `tag=` is accepted only with `scope="all"` (**Option B, per N1**): any other scope + `tag` → clean `ToolError` ("tag filter only applies to scope='all'").
 - Invalid `scope` → clean `ToolError` listing the valid values.
 
 **Tests updated:** `test_route_map.py` (route per scope), `test_user_methods.py`, `test_iteration8.py` (archived), `test_iteration9.py` (tag filter), live suite — re-point to `get_chats(scope=…)`; add default-`all` and invalid-scope cases. The deferred date-range filter (9.6) applies to `get_chats(scope="all", …)` when implemented.
 
-### 9.10 Drop the `_my_` prefix from all method names (design decision 2026-08-21)
+### 9.10 Drop the `_my_` prefix from all method names ✅ DONE (v0.21.0)
 
-**Decision:** remove `_my_` from every public method name — the tool only ever operates on the requesting user's data (token-scoped), so `my` is redundant noise:
+**Commit:** *(included in the 9.9+9.10 commit)*
+
+**Decision (implemented):** remove `_my_` from every public method name — the tool only ever operates on the requesting user's data (token-scoped), so `my` is redundant noise:
 
 | Old | New |
 |---|---|
@@ -575,17 +584,32 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 | `get_my_skills` | `get_skills` |
 | `get_my_folders` | `get_folders` |
 | `get_my_tags` | `get_tags` |
+| `get_knowledge_bases` | **unchanged** — `get_knowledge_bases` (N3 resolved 2026-08-21: “knowledge bases” is Open WebUI's own nomenclature — the KB route, the UI section and the tool's own renderer header all use “knowledge bases”) |
 
 - **Compatibility note:** this is a breaking rename of the tool surface. Open WebUI tools have no server-side alias; stored chat history referencing the old names will render those tool calls as unresolved, and the model re-learns the new names from the updated docstrings. README documents this.
-- **Scope:** public API is the contract. The private `_get_my_*` implementations may be renamed alongside (cosmetic) or kept; the docstring contract test (`test_docstrings.py`) requires names to match signatures.
-- **Tests:** global find/replace of the public names across the suite (route-map, user methods, iteration8/9, live); docstring + output-format suites unaffected beyond the rename.
+- **Scope:** public API is the contract. **Per N3, the private `_get_my_*` implementations are renamed in the same commit** — no `my` residue remains anywhere in the codebase.
+
+**Design notes (merged from NOTES.md N3, 2026-08-21):**
+
+1. **`get_knowledge_bases` keeps its name — RESOLVED (2026-08-21).** The initial suggestion was `get_knowledge` for symmetry, but *knowledge bases* is Open WebUI's own nomenclature: the API route is `/api/v1/knowledge/`, the UI section is “Knowledge Bases”, and the tool's own renderer header already says `**Knowledge bases**` (`_render_knowledge`). Keeping `get_knowledge_bases` matches the platform vocabulary the model already knows — renaming to `get_knowledge` would break that association. No change; the DESIGN §6.1 allowlist row stays as-is.
+2. **Rename the private `_get_my_*` implementations in the same commit** as the public names — no `my` residue remains (see **Scope** above).
+3. **`get_file_content` is the deliberate exception** (it is *content*, not a "my" list) — no change; confirmed.
+4. **`get_models` is already `_my_`-free** — no change.
+5. **Update `test_docstrings.py`-adjacent references** — names must match signatures (the docstring contract test replicates the v0.10.2 parsers verbatim).
+
+- **Tests:** global find/replace of the public names across the suite (route-map, user methods, iteration8/9, live); docstring + output-format suites unaffected beyond the rename; `test_docstrings.py` references updated (per N3.5).
 
 ### Delivery
 
-- Re-run the full matrix after implementation (mock suite + live env-gated suite): chat metadata/summary/stats, search + delimiter matrix (incl. the new `tag:` cases), tag filter, file content + new image fields, profile, timestamps, chat listing sort/date.
-- Update README: image metadata fields, `tag:` scope-limiter semantics, stats semantics (documented or fixed). The date-range filter is NOT documented as shipped — it is deferred (see §7) and will be documented when implemented.
-- DESIGN updated per task (§5.1 / §6.1 / §7.2 / §8.6 / §8.9 / §8.10 / §8.11 / §9 — see the parallel DESIGN edits).
-- Frontmatter `version:` bumped per commit, aligned to v0.17.0+ at the end; all tests green (`python3 -m pytest`), import + Valves checks pass.
+**Tasks 9.9 + 9.10 delivered together (v0.21.0, one commit — they are coupled by `get_my_chats` → `get_chats`):**
+
+- Renamed all `get_my_*` public methods to `get_*` and the private `_get_my_*` to `_get_*` in the same commit (N3: no `my` residue). `get_knowledge_bases` unchanged (N3 resolved: OWUI's own nomenclature).
+- Unified the four chat list methods into `get_chats(scope="all"|"pinned"|"shared"|"archived")`; N1 decided (tag only with scope="all" → clean ToolError); N2 documented in the docstring (per-scope `limit` semantics).
+- Tests: route-map updated + new cases (default scope=all with include_folders/include_pinned, per-scope routes, invalid scope clean error, tag×scope restriction); full suite green — **167 passed / 21 skipped** (live env-gated) on 2026-08-21.
+- README updated: new method names + breaking-change note; DESIGN §6.1/§8.9.9/§8.9.10/Status updated.
+- Frontmatter `version:` → v0.21.0; import + Valves checks pass.
+
+**Still pending for Iteration 9 (v0.21.0+):** 9.5 (`delete_files` destructive test), 9.7 (`folder:` search fix), 9.8 (`search_chats` requires a text term). 9.6 DEFERRED (see §7).
 
 ## 8. Out of scope (per DESIGN §2)
 

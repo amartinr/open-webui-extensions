@@ -31,7 +31,7 @@ The tool returns **Markdown by default** (`output_format` valve, default `markdo
 - **`output_format`** — per-user valve, configurable from the chat session (dropdown Markdown/JSON, default Markdown). There is **no admin valve** for the format: each user chooses the format they prefer for their own chats. The tool's built-in default is Markdown.
 - Set it to `json` for models that prefer structured objects.
 
-Example of what the model receives for `get_my_chats()`:
+Example of what the model receives for `get_chats()`:
 
 ```markdown
 **Chats: 2**
@@ -55,19 +55,21 @@ owui_meta/
 
 ## Usage
 
-Import `owui_meta.py` into Open WebUI at **Workspace → Tools → +** and attach it to a model. Then the model can call methods like `get_my_chats()`, `get_my_files()`, `search_chats("budget")`, `get_my_prompts()`, `get_my_skills()` — each answering with the requesting user's own data.
+Import `owui_meta.py` into Open WebUI at **Workspace → Tools → +** and attach it to a model. Then the model can call methods like `get_chats()`, `get_files()`, `search_chats("budget")`, `get_prompts()`, `get_skills()` — each answering with the requesting user's own data.
+
+> **Method names (v0.21.0):** the `_my_` prefix was dropped from every method name (the tool only ever sees the requesting user's data) and the four chat list methods were unified into `get_chats(scope=…)`. Stored chat history referencing the old names (`get_my_chats`, `get_my_files`, …) shows those calls as unresolved; the model picks up the new names from the tool docstrings.
 
 List methods support **pagination, sorting and filtering** (client-side, since the API does not expose them):
 
-- `get_my_files(limit=50, sort_by="size" | "created_at" | "filename", sort_order="asc" | "desc", content_type="image/*", min_size=100000, max_size=1000000, filename="report")` — size in raw bytes.
-- `get_my_chats(limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc", tag="tool")` — includes folder + pinned chats (the backend hides them from the default listing); `tag` filters the list to chats carrying that tag (pure server-side filter, not a text search).
+- `get_files(limit=50, sort_by="size" | "created_at" | "filename", sort_order="asc" | "desc", content_type="image/*", min_size=100000, max_size=1000000, filename="report")` — size in raw bytes.
+- `get_chats(scope="all" | "pinned" | "shared" | "archived", limit=10, sort_by="updated_at" | "created_at", sort_order="asc" | "desc", tag="tool")` — `scope` selects the collection (default `"all"`); `"all"` includes folder + pinned chats (the backend hides them from the default listing); `tag` filters the list to chats carrying that tag (pure server-side filter, not a text search) and is accepted **only** with `scope="all"`.
 
 Chat organization (Iteration 8) is covered by dedicated methods:
 
-- `get_my_tags()` — the tag catalog (`name` + `id`), to answer “which tags do you use?”.
-- `get_archived_chats(limit=10)` — archived chats.
+- `get_tags()` — the tag catalog (`name` + `id`), to answer “which tags do you use?”.
+- `get_chats(scope="archived")` — archived chats.
 - `get_chat_stats(chat_id)` — usage stats for one chat (message counts, models, tags, averages) from the **EXPERIMENTAL** `stats/usage` route; failure of that route is a clean error, never a crash.
-- `get_my_folders()` — folders (`name`, `parent`, `expanded`, dates); a 403 on instances where folders are disabled maps to a readable error.
+- `get_folders()` — folders (`name`, `parent`, `expanded`, dates); a 403 on instances where folders are disabled maps to a readable error.
 - `search_chats(text)` accepts the UI filter prefixes server-side: `tag:name`, `folder:name`, `pinned:true/false`, `archived:true/false`, `shared:true/false`, `tag:none` — and surfaces the per-result `snippet`.
 
 Chat detail comes in two flavors:
@@ -83,7 +85,7 @@ Open WebUI keeps chat-attached files when the chat is deleted (verified in the v
 
 - `delete_files(file_ids)` — permanently deletes the given files in one pass (up to 50 per call). The whole list is validated before anything runs; per file it reports the name and removes it (the backend re-verifies you own it or have write access, and removes it from storage, metadata, KB associations and the vector index). A file that fails (missing / not yours / backend error) is reported by id without aborting the rest. **Irreversible.**
 
-Finding the obsolete files is up to the model, using the existing read methods: `get_my_files()` exposes each file's `origin_chat_id`, and `get_my_chats()` gives the live chat ids — files whose origin chat is not in that list are cleanup candidates. Typical flow: `get_my_files()` + `get_my_chats()` → identify the orphans → `delete_files([ids...])` after user confirmation.
+Finding the obsolete files is up to the model, using the existing read methods: `get_files()` exposes each file's `origin_chat_id`, and `get_chats()` gives the live chat ids — files whose origin chat is not in that list are cleanup candidates. Typical flow: `get_files()` + `get_chats()` → identify the orphans → `delete_files([ids...])` after user confirmation.
 
 ## Requirements
 

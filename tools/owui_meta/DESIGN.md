@@ -3,7 +3,7 @@
 **Version:** 1.0
 **Date:** 2026-07-31
 **Author:** (with technical assistance)
-**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20). **Iteration 9: tasks 8.9.1–8.9.4 DONE (v0.17.0–v0.20.0); 8.9.5 pending; 8.9.7–8.9.10 planned** (`folder:` search fix, mandatory search term, `get_chats(scope=…)` unification, `_my_`-prefix drop — design decisions 2026-08-21); **the `get_my_chats` date-range filter (8.9.6) is DEFERRED by user decision 2026-08-21** (applies to `get_chats(scope="all")` when 8.9.9 lands)
+**Status:** Design validated through real-world tests against the internal Open WebUI instance (v0.10.2); implementation complete through Iteration 8 (chat organization metadata); automated live validation committed as Iteration 5 (see PLAN.md progress log 2026-08-20). **Iteration 9: tasks 8.9.1–8.9.4 DONE (v0.17.0–v0.20.0); 8.9.9 and 8.9.10 DONE (v0.21.0: `get_chats(scope=…)` unification + `_my_`-prefix drop); 8.9.5 pending; 8.9.7–8.9.8 planned** (`folder:` search fix, mandatory search term — design decisions 2026-08-21); **the `get_chats(scope="all")` date-range filter (8.9.6) is DEFERRED by user decision 2026-08-21** (applies to `get_chats(scope="all")` when implemented)
 
 ---
 
@@ -187,31 +187,27 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 
 ### 6.1 Regular user (role `user`)
 
-> **Implemented:** all rows below are live methods in the tool (v0.15.0). Iteration 8 (tags, folders, archived, usage stats) is complete.
+> **Implemented:** all rows below are live methods in the tool (v0.21.0). Iteration 8 (tags, folders, archived, usage stats) is complete; Iteration 9 tasks 8.9.9/8.9.10 (chat-list unification + `_my_`-drop) landed in v0.21.0.
 
-| Tool method (suggested name) | Internal route | Status |
+| Tool method | Internal route | Status |
 |---|---|---|
-| `get_my_profile()` | `GET /api/v1/auths` | ✓ |
+| `get_profile()` | `GET /api/v1/auths` | ✓ |
 | `get_models()` | `GET /api/models` | ✓ |
-| `get_my_chats(limit, tag)` | `GET /api/v1/chats` (with `include_folders`/`include_pinned`); with `tag` → `POST /api/v1/chats/tags` (query-only: pure tag filter, `{name, skip, limit}`) | ✓ |
-| **`get_chats(scope="all"\|"pinned"\|"shared"\|"archived", …)`** (planned) | unifies the four chat list methods; omitted `scope` → `"all"` ≡ today's `get_my_chats`; routes unchanged per scope | ⏳ planned (8.9.9) |
-| `get_my_chats` date-range filter | *(not implemented)* — `created_after`/`created_before`/`updated_after`/`updated_before` params, design recorded in §8.9.6 | ⏸️ DEFERRED (2026-08-21) |
+| **`get_chats(scope="all"\|"pinned"\|"shared"\|"archived", limit, sort_by, sort_order, tag)`** | unifies the four chat list methods; omitted `scope` → `"all"` ≡ the old `get_my_chats`; `"all"` → `GET /api/v1/chats` (with `include_folders`/`include_pinned`), with `tag` → `POST /api/v1/chats/tags` (query-only: pure tag filter, `{name, skip, limit}`; accepted only with `scope="all"` — N1, see §8.9.9); `"pinned"`/`"shared"` → `/api/v1/chats/pinned`/`/shared`; `"archived"` → `/api/v1/chats/archived` | ✓ (8.9.9) |
+| `get_chats` date-range filter | *(not implemented)* — `created_after`/`created_before`/`updated_after`/`updated_before` params, design recorded in §8.9.6; applies to `get_chats(scope="all")` when implemented | ⏸️ DEFERRED (2026-08-21) |
 | `get_chat_summary(chat_id)` | `GET /api/v1/chats/{id}` (markdown: metadata + first/last 3 messages; never the full content) | ✓ |
 | `get_chat_metadata(chat_id)` | `GET /api/v1/chats/{id}` (metadata only: message_count, models, tags, folder, flags, dates; no message content in any format) | ✓ |
-| `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results). **Planned (Iteration 9.1):** `tag:` becomes a scope limiter (AND with free text), consistent with `pinned:`/`folder:` — §8.9.1 | ✓ |
-| `get_archived_chats(limit)` | `GET /api/v1/chats/archived` (no pagination params; whole list sliced by `limit`) — **→ `get_chats(scope="archived")` (8.9.9)** | ✓ |
-| `get_my_tags()` | `GET /api/v1/chats/all/tags` (tag catalog; `user_id`/`meta` not exposed) | ✓ |
+| `search_chats(text)` | `GET /api/v1/chats/search?text=` (supports `tag:`, `folder:`, `pinned:`, `archived:`, `shared:` prefixes + `snippet` in results). **Iteration 9.1 done:** `tag:` is a scope limiter (AND with free text), consistent with `pinned:`/`folder:` — §8.9.1 | ✓ |
+| `get_tags()` | `GET /api/v1/chats/all/tags` (tag catalog; `user_id`/`meta` not exposed) | ✓ |
 | `get_chat_stats(chat_id)` | `GET /api/v1/chats/stats/usage` (**EXPERIMENTAL** endpoint; tags, message_count, models, history counts, averages) | ✓ |
-| `get_my_folders()` | `GET /api/v1/folders/` (trailing slash; may 403 if folders disabled on the instance) | ✓ |
-| `get_shared_chats()` | `GET /api/v1/chats/shared` — **→ `get_chats(scope="shared")` (8.9.9)** | ✓ |
-| `get_pinned_chats()` | `GET /api/v1/chats/pinned` — **→ `get_chats(scope="pinned")` (8.9.9)** | ✓ |
-| `get_my_files()` | `GET /api/v1/files` | ✓ |
+| `get_folders()` | `GET /api/v1/folders/` (trailing slash; may 403 if folders disabled on the instance) | ✓ |
+| `get_files()` | `GET /api/v1/files` | ✓ |
 | `get_file_content(file_id)` | `GET /api/v1/files/{id}/content` | ✓ |
 | `delete_files(file_ids)` | per id: `GET /api/v1/files/{id}` + `DELETE /api/v1/files/{id}` (write, explicit — see §7.4) | ✓ |
-| `get_my_prompts()` | `GET /api/v1/prompts` | ✓ |
-| `get_my_tools()` | `GET /api/v1/tools` | ✓ |
+| `get_prompts()` | `GET /api/v1/prompts` | ✓ |
+| `get_tools()` | `GET /api/v1/tools` | ✓ |
 | `get_knowledge_bases()` | `GET /api/v1/knowledge` | ✓ |
-| `get_my_skills()` | `GET /api/v1/skills` | ✓ |
+| `get_skills()` | `GET /api/v1/skills` | ✓ |
 | `get_skill(skill_id)` | `GET /api/v1/skills/id/{skill_id}` | ✓ |
 
 ### 6.2 Admin only (role `admin`, with `__user__.role == 'admin'` check)
@@ -250,11 +246,11 @@ The tool exposes **typed methods** (not a generic "call this URL"), and each met
 - **Response truncation**: size limit for the response returned to the model (prevents injecting megabytes into the context).
 - **Timeout**: configurable (default 15 s).
 - **No token logging**: the token must never appear in logs or in messages returned to the model.
-- **Profile field whitelist (security fix 2026-08-01)**: `GET /api/v1/auths/` **echoes the request token** in its body (v0.10.2 `get_session_user` returns `token`/`token_type`/`expires_at` for the frontend's session refresh). The tool never serializes the raw profile body — `_get_my_profile` builds an explicit field whitelist (`id`, `email`, `name`, `role`, `profile_image_url`, `permissions`, timestamps) and the token fields are never included, in **either** output format.
+- **Profile field whitelist (security fix 2026-08-01)**: `GET /api/v1/auths/` **echoes the request token** in its body (v0.10.2 `get_session_user` returns `token`/`token_type`/`expires_at` for the frontend's session refresh). The tool never serializes the raw profile body — `_get_profile` builds an explicit field whitelist (`id`, `email`, `name`, `role`, `profile_image_url`, `permissions`, timestamps) and the token fields are never included, in **either** output format.
 - **Whitelist on every raw detail method (audit 2026-08-01)**: an audit of all allowlisted endpoints against the v0.10.2 source found **no other token echoes** (chats/models/files/prompts/tools/knowledge/skills responses carry no credentials). For defense in depth, the two remaining raw pass-throughs were also whitelisted: `get_chat` keeps `id/title/chat/messages/dates/share_id/pinned/archived` (drops `user_id`, `meta`, `tasks`, `summary`, `folder_id`); `get_skill` keeps `id/name/description/content/is_active/dates/meta` (drops the embedded owner `UserResponse` — another user's email for shared skills — plus `access_grants`/`write_access`). List methods were already summarized with explicit field picks.
 - **Output-boundary guards (hardening 2026-08-01)**: whitelists are per-method and manual, so two guards run at the output boundary to also stop *accidental* leaks (a future method, or a future server version echoing a credential under an unexpected field): (1) `_sanitize` recursively drops any dict key whose name looks like a credential (`token`, `api_key`, `password`, `secret`, `authorization`, …) when its value is a **non-empty string** — boolean permission flags named e.g. `api_keys` are kept; (2) `_run` redacts the **raw token string** from any output (success or error) before returning. A static tripwire test (`test_security.py`) pins that no method passes a raw server body into `_ok`.
 
-- **File deletion is the only write operation (2026-08-03)**: `delete_files(file_ids)` validates the whole id list up front (one invalid id rejects the call before any request), then per file: `GET` the metadata (report what disappears; a 404 never reaches the `DELETE`) and `DELETE /api/v1/files/{id}`. The backend re-verifies authorization (`file.user_id == user.id` or admin or write access — otherwise 404), cleans up KB associations + embeddings, removes the object from storage and the vector index. Deletion is **irreversible**; the model/user decides per call. A per-file failure is reported by id without aborting the rest (bounded by `MAX_DELETE_FILES`). Orphan detection is intentionally NOT a tool method: the model derives it from `get_my_files()` (`origin_chat_id`) + `get_my_chats()`.
+- **File deletion is the only write operation (2026-08-03)**: `delete_files(file_ids)` validates the whole id list up front (one invalid id rejects the call before any request), then per file: `GET` the metadata (report what disappears; a 404 never reaches the `DELETE`) and `DELETE /api/v1/files/{id}`. The backend re-verifies authorization (`file.user_id == user.id` or admin or write access — otherwise 404), cleans up KB associations + embeddings, removes the object from storage and the vector index. Deletion is **irreversible**; the model/user decides per call. A per-file failure is reported by id without aborting the rest (bounded by `MAX_DELETE_FILES`). Orphan detection is intentionally NOT a tool method: the model derives it from `get_files()` (`origin_chat_id`) + `get_chats()`.
 
 ### 7.3 User isolation (verified in tests)
 - `GET /api/v1/chats/11111111-…-1111` (nonexistent UUID) → **401 "We could not find what you're looking for"**: no existence leak.
@@ -429,7 +425,7 @@ Implementation notes:
   ```
   Scalar values stay raw (`true`/`false`/`null`, numbers without prefixes). Multimodal chat content (a list of parts) renders the same way. This follows the research-backed JSON→Markdown strategies (llm-md / 1000+ case study): key-value bullet lists for shallow objects, tables for uniform arrays (>80% key similarity), indented hierarchy for deep nesting, and **never raw JSON embedded in a bullet** (it hurts comprehension).
 
-**Worked examples** (what the model sees for `get_my_files()` and `get_my_chats()`):
+**Worked examples** (what the model sees for `get_files()` and `get_chats()`):
 
 ```markdown
 **Files: 2 (2 total on server)**
@@ -468,11 +464,11 @@ Consolidated improvement plan written 2026-08-21 (the same brief whose findings 
 | 8.9.3 | `get_chat_stats` metrics — ROOT-CAUSED: recompute the two length averages (backend bug), document the other three | ✅ DONE (v0.19.0) |
 | 8.9.4 | Credential non-exposure: fail-loud sanitizer + allowlist tripwire test | ✅ DONE (v0.17.0) |
 | 8.9.5 | `delete_files` destructive live test (optional, sandbox only, env-gated) | ⏳ pending |
-| 8.9.6 | `get_my_chats` date-range filter | ⏸️ **DEFERRED** (2026-08-21) |
+| 8.9.6 | `get_chats(scope="all")` date-range filter | ⏸️ **DEFERRED** (2026-08-21) |
 | 8.9.7 | `search_chats` `folder:` prefix — fix folder-NAME search (multi-word names broken; user report 2026-08-21) | ⏳ planned |
 | 8.9.8 | `search_chats` must **require a search term** (design decision 2026-08-21) — pure-prefix calls error, never list | ⏳ planned |
-| 8.9.9 | Unify the chat list methods into **`get_chats(scope="all"\|"pinned"\|"shared"\|"archived")`** (default `"all"`) — replace `get_my_chats`/`get_pinned_chats`/`get_shared_chats`/`get_archived_chats` | ⏳ planned |
-| 8.9.10 | Drop the **`_my_`** prefix from all method names (`get_my_profile`→`get_profile`, `get_my_files`→`get_files`, …) | ⏳ planned |
+| 8.9.9 | Unify the chat list methods into **`get_chats(scope="all"\|"pinned"\|"shared"\|"archived")`** (default `"all"`) — replace `get_my_chats`/`get_pinned_chats`/`get_shared_chats`/`get_archived_chats`; **N1 decided: `tag` accepted only with `scope="all"`** | ✅ **DONE (v0.21.0)** |
+| 8.9.10 | Drop the **`_my_`** prefix from all method names (`get_profile`, `get_files`, …; `get_knowledge_bases` **kept** — OWUI's own nomenclature, N3 resolved) | ✅ **DONE (v0.21.0)** |
 
 ### 8.9.1 Search: `tag:` scope-limiter semantics — VERIFY + PIN (backend already implements it)
 
@@ -481,8 +477,8 @@ Consolidated improvement plan written 2026-08-21 (the same brief whose findings 
 **Brief claim corrected:** the brief stated `tag:` is a **standalone tag filter** that relaxes the free text. **Verified false on this backend** (v0.10.2 `models/chats.py::get_chats_by_user_id_and_search_text` + live probes): the query strips every prefix and **ANDs** the text search with the tag filter (`and_(*[EXISTS(json_each(meta.tags) = tag_i)])`); multiple `tag:` prefixes are ANDed; `tag:none` uses `NOT EXISTS`. Live: `"manchego tag:comfyui"` → 0 and `"zzz_nonexistent_xyz tag:comfyui"` → 0 (a standalone filter would return the tag's 3 chats); `"Open WebUI tag:comfyui"` → 1 = the only tag chat containing “Open WebUI”. **No scope-limiter code change is needed.**
 
 **What remains (the real work):**
-1. **Pin the semantics with tests** (mock + env-gated live): text+tag AND, multi-tag AND, `tag:none` untouched, results consistent with `get_my_chats(tag=…)`.
-2. **Document the orphan-tag cleanup (no code — intended behavior):** a `tag:` query with zero matches triggers the backend's **deliberate lazy GC**: the catalog entry (`tag` row) is deleted; per-chat inline `meta.tags` are untouched (they recreate the entry when the chat is updated); a typo'd/nonexistent tag deletes nothing. The tool must **not** guard or block it (blocking would break intended behavior). Documentation notes only: (a) `search_chats` / `get_my_chats(tag=)` are read-only *queries* but can carry this write side effect — docstring line; (b) **archived asymmetry:** `search` excludes archived chats (`Chat.archived == False`), `POST /chats/tags` does not — a tag used only on archived chats is cleaned via `search_chats("tag:X")` yet still visible via `get_my_chats(tag=)`. Upstream semantics; documented, not fixed.
+1. **Pin the semantics with tests** (mock + env-gated live): text+tag AND, multi-tag AND, `tag:none` untouched, results consistent with `get_chats(tag=…)`.
+2. **Document the orphan-tag cleanup (no code — intended behavior):** a `tag:` query with zero matches triggers the backend's **deliberate lazy GC**: the catalog entry (`tag` row) is deleted; per-chat inline `meta.tags` are untouched (they recreate the entry when the chat is updated); a typo'd/nonexistent tag deletes nothing. The tool must **not** guard or block it (blocking would break intended behavior). Documentation notes only: (a) `search_chats` / `get_chats(tag=)` are read-only *queries* but can carry this write side effect — docstring line; (b) **archived asymmetry:** `search` excludes archived chats (`Chat.archived == False`), `POST /chats/tags` does not — a tag used only on archived chats is cleaned via `search_chats("tag:X")` yet still visible via `get_chats(tag=)`. Upstream semantics; documented, not fixed.
 3. **Snippet caveat (document):** the backend snippet is built from the plain `content` string only — for v0.10.2 assistant messages (text in `output[].content[].text`) the snippet is usually absent even when the match is in assistant text. Not a tool bug; do not compensate.
 
 **Acceptance:** tests pin the AND semantics; the orphan-tag cleanup and the archived asymmetry are documented in the docstrings (no behavioral guard added).
@@ -525,7 +521,7 @@ Output fields (all optional; a bad/truncated file or missing Pillow → the fiel
 
 Env-gated (skipped by default) behind `OWUI_META_DESTRUCTIVE_TESTS=1` (+ `OWUI_META_LIVE_URL`/`OWUI_META_LIVE_TOKEN`): upload a disposable file (`POST /api/v1/files/`, unique random content), `delete_files([id])`, assert success + subsequent 404; foreign-file rejection via `OWUI_META_LIVE_TOKEN2` when present (clean per-id failure, rest of the batch unaffected); cleanup residue. Never runs against production by construction (opt-in env var + documented sandbox requirement).
 
-### 8.9.6 `get_my_chats` date-range filter — ⏸️ DEFERRED (user decision 2026-08-21)
+### 8.9.6 `get_chats(scope="all")` date-range filter — ⏸️ DEFERRED (user decision 2026-08-21)
 
 **Status:** design recorded for a future version; **not in the current scope** (the manual workaround — sort by `created_at` asc and pick the range — remains).
 
@@ -534,9 +530,9 @@ Env-gated (skipped by default) behind `OWUI_META_DESTRUCTIVE_TESTS=1` (+ `OWUI_M
 **Design (backward-compatible, all new params optional):**
 
 ```python
-get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
-             created_after=None, created_before=None,
-             updated_after=None, updated_before=None)
+get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=None,
+          created_after=None, created_before=None,
+          updated_after=None, updated_before=None)
 ```
 
 - **Value acceptance:** epoch int/float **or** ISO date/datetime strings (`"2026-06-01"`, `"2026-06-01 12:00"`, `"2026-06-01T12:00:00Z"`); a tolerant `_parse_ts` converts to epoch UTC (partial dates → midnight UTC).
@@ -557,7 +553,7 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 7. **Pagination is mandatory** (files POC): observed `pageSize` max 50, `total` in the response. `GET /api/v1/files/` returned 50 items with `total: 104`; 3 pages had to be iterated to list everything. Also, `content_type` and `size` (bytes) live in each item's `meta` — type/size filtering is done on the listing, without downloading binaries.
 8. **The trailing slash matters, and it is NOT uniform.** Verified live (2026-08-01): the **listing routes** (`/api/v1/auths/`, `/api/v1/chats/`, `/api/v1/files/`, `/api/v1/prompts/`, `/api/v1/tools/`, `/api/v1/knowledge/`, `/api/v1/users/`) require a **trailing slash** — without it they fall through to the SPA HTML catch-all (HTTP 200, `text/html`). But the **sub-resources** (`/api/v1/chats/search`, `/pinned`, `/shared`, `/api/v1/chats/{id}`, `/api/v1/files/{id}/content`) and `/api/models` must **NOT** have a trailing slash — with one they fall to the SPA catch-all too. The allowlist must fix the canonical form of each route individually, not rely on a uniform rule or redirects (FastAPI/Starlette does not 307-redirect here; the SPA catch-all absorbs the miss). **Same applies to the newer routes (2026-08-20):** `folders/` WITH slash; `chats/all/tags`, `chats/archived`, `chats/stats/usage` WITHOUT.
 9. **The chat list omits organization metadata by design.** `GET /api/v1/chats/` returns `ChatTitleIdResponse` only — no `meta`/tags/folder/pinned/archived on the items — and the default query **hides folder + pinned chats** unless `include_folders=true&include_pinned=true` (verified live 2026-08-20). Any tool feature needing per-chat organization state (tags, folder, flags) must source it from the detail endpoint (`ChatResponse` carries `meta.tags`, `folder_id`, `pinned`, `archived`), the tags catalog (`GET /api/v1/chats/all/tags`), the usage-stats endpoint (`GET /api/v1/chats/stats/usage` — tags + message_count), or the folders router (`GET /api/v1/folders/`) — never from the list items.
-10. **Search filter prefixes are scope limiters — including `tag:` (verified live + v0.10.2 source, 2026-08-21).** The brief claimed `tag:` was a standalone filter; **verified false**: `get_chats_by_user_id_and_search_text` strips all prefixes and ANDs the text search with `EXISTS(meta.tags = …)`; multi-tag is AND; `tag:none` is `NOT EXISTS`. Live: `"manchego tag:comfyui"` → 0 (a standalone filter would return the tag's 3 chats). No client-side normalization is needed. **Related intended behavior (documented, not a bug):** a `tag:` query with zero matches triggers the backend's **orphan-tag cleanup** — the catalog entry is deleted (per-chat inline `meta.tags` untouched; a typo'd tag deletes nothing). Tool-relevant nuance: `search` excludes archived chats, `POST /chats/tags` does not, so a tag used only on archived chats is cleaned via `search_chats("tag:X")` yet visible via `get_my_chats(tag=)` — documented upstream asymmetry (Iteration 9 task 1, §8.9.1).
+10. **Search filter prefixes are scope limiters — including `tag:` (verified live + v0.10.2 source, 2026-08-21).** The brief claimed `tag:` was a standalone filter; **verified false**: `get_chats_by_user_id_and_search_text` strips all prefixes and ANDs the text search with `EXISTS(meta.tags = …)`; multi-tag is AND; `tag:none` is `NOT EXISTS`. Live: `"manchego tag:comfyui"` → 0 (a standalone filter would return the tag's 3 chats). No client-side normalization is needed. **Related intended behavior (documented, not a bug):** a `tag:` query with zero matches triggers the backend's **orphan-tag cleanup** — the catalog entry is deleted (per-chat inline `meta.tags` untouched; a typo'd tag deletes nothing). Tool-relevant nuance: `search` excludes archived chats, `POST /chats/tags` does not, so a tag used only on archived chats is cleaned via `search_chats("tag:X")` yet visible via `get_chats(tag=)` — documented upstream asymmetry (Iteration 9 task 1, §8.9.1).
 11. **The `folder:` search prefix is broken for multi-word folder names (verified live + source, 2026-08-21).** `get_chats_by_user_id_and_search_text` splits the text on spaces, so `folder:Open WebUI meta` queries only `"Open"`; `search_folders_by_names` requires an **exact normalized match** of the full name (`[\s_]+`→space, lowercase) → no match → the folder filter is silently skipped and the leftover words leak into the free text; the folder **id never matches** (names only). The backend's own normalization makes the **underscore-joined single token** work (`folder:open_webui_meta`, `_`≡space — live: 38 chats). `GET /api/v1/chats/folder/{id}` → 401 for the user role on this instance. The tool must resolve folder names client-side (greedy phrase match + underscore rewrite + leak stripping + clean error for unknown folders) — Iteration 9 task 9.7 (§8.9.7).
 
 ---
@@ -584,13 +580,13 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 
 **Synergies:** the lone-`tag:` **orphan-tag cleanup becomes unreachable via `search_chats`** (pure-prefix calls error before the backend — simplifies §8.9.1); `get_chats(tag=)` keeps its documented cleanup side effect; the 9.7 folder fix remains needed for text+folder combos.
 
-### 8.9.9 Unify chat listing into `get_chats(scope=…)` (design decision 2026-08-21)
+### 8.9.9 Unify chat listing into `get_chats(scope=…)` ✅ DONE (v0.21.0)
 
-**Decision:** replace `get_my_chats`/`get_pinned_chats`/`get_shared_chats`/`get_archived_chats` with one **`get_chats(scope="all"|"pinned"|"shared"|"archived", limit=10, sort_by="updated_at", sort_order="desc", tag=None)`**. **Omitted `scope` → `"all"`** (user decision): `get_chats()` ≡ today's `get_my_chats()` (list with `include_folders`/`include_pinned` + optional `tag`). The four methods are the same resource with the same result shape and near-identical params — a single documented `Literal` scope kills the model's guessing (`get_pinned` vs `get_shared`). Backend/allowlist unchanged per scope (chats listing + `POST /chats/tags`, `/chats/pinned`, `/chats/shared`, `/chats/archived`); `"Archived chats"` label kept; invalid `scope` → clean `ToolError`. The deferred date-range filter (8.9.6) applies to `scope="all"`.
+**Decision (implemented):** replace `get_my_chats`/`get_pinned_chats`/`get_shared_chats`/`get_archived_chats` with one **`get_chats(scope="all"|"pinned"|"shared"|"archived", limit=10, sort_by="updated_at", sort_order="desc", tag=None)`**. **Omitted `scope` → `"all"`** (user decision): `get_chats()` ≡ the old `get_my_chats()` (list with `include_folders`/`include_pinned` + optional `tag`). The four methods are the same resource with the same result shape and near-identical params — a single documented `Literal` scope kills the model's guessing (`get_pinned` vs `get_shared`). Backend/allowlist unchanged per scope (chats listing + `POST /chats/tags`, `/chats/pinned`, `/chats/shared`, `/chats/archived`); `"Archived chats"` label kept; invalid `scope` → clean `ToolError`. **N1 (NOTES.md, merged 2026-08-21):** `tag` is accepted **only** with `scope="all"` — the backend has no route combining a scope with a tag filter; other scopes + `tag` → `ToolError` ("The 'tag' filter only applies to scope='all'."). **N2:** `limit` semantics differ per scope and are documented in the docstring ("all": top-N after iterating pages; "pinned"/"shared": top-N of the paged response; "archived": top-N of the whole non-paginated list). The deferred date-range filter (8.9.6) applies to `scope="all"`.
 
-### 8.9.10 Drop the `_my_` prefix from method names (design decision 2026-08-21)
+### 8.9.10 Drop the `_my_` prefix from method names ✅ DONE (v0.21.0)
 
-**Decision:** rename all `get_my_*` public methods to `get_*` (`get_profile`, `get_files`, `get_prompts`, `get_tools`, `get_skills`, `get_folders`, `get_tags`; `get_my_chats` absorbed into `get_chats` — 8.9.9). The tool only ever sees the requesting user's data (token-scoped), so `my` is redundant. **Breaking change** (no server-side alias in Open WebUI tools): stored history referencing the old names shows unresolved calls; the model re-learns the new names from the docstrings; README documents it.
+**Decision (implemented):** rename all `get_my_*` public methods to `get_*` (`get_profile`, `get_files`, `get_prompts`, `get_tools`, `get_skills`, `get_folders`, `get_tags`; `get_my_chats` absorbed into `get_chats` — 8.9.9). **N3: `get_knowledge_bases` keeps its name** — "knowledge bases" is Open WebUI's own nomenclature (route `/api/v1/knowledge/`, UI section, and the tool's own renderer header); the private `_get_my_*` implementations were renamed in the same commit (no `my` residue). The tool only ever sees the requesting user's data (token-scoped), so `my` is redundant. **Breaking change** (no server-side alias in Open WebUI tools): stored history referencing the old names shows unresolved calls; the model re-learns the new names from the docstrings; README documents it.
 
 ### 10.1 Connectivity (no credentials)
 | Test | Result |

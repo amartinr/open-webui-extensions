@@ -78,7 +78,7 @@ def load_json(out: str) -> dict:
 
 
 async def first_chat_id(tools) -> str:
-    out = await tools.get_my_chats(limit=1, __request__=live_request())
+    out = await tools.get_chats(limit=1, __request__=live_request())
     payload = load_json(out)
     assert payload["chats"], "instance has no chats — cannot run chat tests"
     return payload["chats"][0]["id"]
@@ -90,7 +90,7 @@ async def test_live_profile_never_echoes_token():
     # The REAL /api/v1/auths/ echoes the request token in its body. The tool's
     # field whitelist must drop it — this is the highest-value live check.
     tools = live_tools(output_format="json")
-    out = await tools.get_my_profile(__request__=live_request())
+    out = await tools.get_profile(__request__=live_request())
     payload = load_json(out)
     assert payload["email"], "profile must carry the requester's email"
     assert "token" not in out
@@ -108,7 +108,7 @@ async def test_live_models():
 
 
 async def test_live_chats_list():
-    payload = load_json(await live_tools("json").get_my_chats(limit=5, __request__=live_request()))
+    payload = load_json(await live_tools("json").get_chats(limit=5, __request__=live_request()))
     assert payload["total"] >= 1
     assert payload["count"] == 5
     for chat in payload["chats"]:
@@ -117,10 +117,10 @@ async def test_live_chats_list():
 
 
 async def test_live_chats_tag_filter_matches_search_prefix():
-    # get_my_chats(tag=...) (pure filter via POST /chats/tags) and
+    # get_chats(tag=...) (pure filter via POST /chats/tags) and
     # search_chats("tag:...") must return the same set of chat ids.
     tools = live_tools("json")
-    by_tag = json.loads(await tools.get_my_chats(limit=50, tag="tool", __request__=live_request()))
+    by_tag = json.loads(await tools.get_chats(limit=50, tag="tool", __request__=live_request()))
     by_search = json.loads(await tools.search_chats("tag:tool", __request__=live_request()))
     ids_tag = {c["id"] for c in by_tag["chats"]}
     ids_search = {c["id"] for c in by_search["chats"]}
@@ -174,7 +174,7 @@ async def test_live_search_snippet_surfaced():
 
 
 async def test_live_tags_no_leak():
-    out = await live_tools("json").get_my_tags(__request__=live_request())
+    out = await live_tools("json").get_tags(__request__=live_request())
     payload = load_json(out)
     assert payload["count"] >= 1
     for tag in payload["tags"]:
@@ -183,7 +183,7 @@ async def test_live_tags_no_leak():
 
 
 async def test_live_archived():
-    payload = load_json(await live_tools("json").get_archived_chats(__request__=live_request()))
+    payload = load_json(await live_tools("json").get_chats(scope="archived", __request__=live_request()))
     assert payload["label"] == "Archived chats"
     assert isinstance(payload["count"], int)
     assert isinstance(payload["chats"], list)
@@ -191,7 +191,7 @@ async def test_live_archived():
 
 async def test_live_folders_works_or_readable_403():
     # folders is feature-gated: on disabled instances the backend 403s.
-    out = await live_tools("markdown").get_my_folders(__request__=live_request())
+    out = await live_tools("markdown").get_folders(__request__=live_request())
     if out.startswith("Error:"):
         assert "Forbidden" in out
         return
@@ -223,7 +223,7 @@ async def test_live_chat_stats_quirk():
 
 async def test_live_files_and_content():
     tools = live_tools("json")
-    payload = load_json(await tools.get_my_files(limit=50, __request__=live_request()))
+    payload = load_json(await tools.get_files(limit=50, __request__=live_request()))
     assert payload["total"] >= 1
     files = payload["files"]
     assert all(f.get("id") for f in files)
@@ -243,10 +243,10 @@ async def test_live_files_and_content():
 async def test_live_workspace_resources():
     tools = live_tools("json")
     calls = (
-        (tools.get_my_prompts, "prompts"),
-        (tools.get_my_tools, "tools"),
+        (tools.get_prompts, "prompts"),
+        (tools.get_tools, "tools"),
         (tools.get_knowledge_bases, "knowledge"),
-        (tools.get_my_skills, "skills"),
+        (tools.get_skills, "skills"),
     )
     for method, key in calls:
         payload = load_json(await method(__request__=live_request()))
@@ -257,8 +257,8 @@ async def test_live_workspace_resources():
 async def test_live_shared_and_pinned():
     tools = live_tools("json")
     for out in (
-        await tools.get_shared_chats(__request__=live_request()),
-        await tools.get_pinned_chats(__request__=live_request()),
+        await tools.get_chats(scope="shared", __request__=live_request()),
+        await tools.get_chats(scope="pinned", __request__=live_request()),
     ):
         payload = load_json(out)
         assert isinstance(payload["count"], int)
@@ -293,12 +293,12 @@ async def test_live_users_blocked_for_user_role():
 async def test_live_no_token_in_any_output():
     tools = live_tools("json")
     outputs = []
-    outputs.append(await tools.get_my_profile(__request__=live_request()))
-    outputs.append(await tools.get_my_chats(limit=3, __request__=live_request()))
-    outputs.append(await tools.get_my_tags(__request__=live_request()))
-    outputs.append(await tools.get_my_folders(__request__=live_request()))
-    outputs.append(await tools.get_my_prompts(__request__=live_request()))
-    outputs.append(await tools.get_my_files(limit=3, __request__=live_request()))
-    outputs.append(await tools.get_my_skills(__request__=live_request()))
+    outputs.append(await tools.get_profile(__request__=live_request()))
+    outputs.append(await tools.get_chats(limit=3, __request__=live_request()))
+    outputs.append(await tools.get_tags(__request__=live_request()))
+    outputs.append(await tools.get_folders(__request__=live_request()))
+    outputs.append(await tools.get_prompts(__request__=live_request()))
+    outputs.append(await tools.get_files(limit=3, __request__=live_request()))
+    outputs.append(await tools.get_skills(__request__=live_request()))
     for out in outputs:
         assert LIVE_TOKEN not in out

@@ -63,7 +63,7 @@ async def test_token_isolation_per_request():
     recorder = Recorder(_auths_handler())
     tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
     for token in ("tok-alpha", "tok-beta", "tok-alpha"):
-        out = await tools.get_my_profile(__request__=FakeRequest(token=token))
+        out = await tools.get_profile(__request__=FakeRequest(token=token))
         assert json.loads(out)["name"] == "John Doe"
     auths = [r.headers.get("authorization") for r in recorder.requests]
     assert auths == ["Bearer tok-alpha", "Bearer tok-beta", "Bearer tok-alpha"]
@@ -75,9 +75,9 @@ async def test_instances_do_not_share_state():
     handler = _auths_handler()
     tools_md = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     tools_json = make_tools(handler, base_url="http://webui.example.test", output_format="json")
-    out_json = await tools_json.get_my_profile(__request__=FakeRequest())
-    out_md = await tools_md.get_my_profile(__request__=FakeRequest())
-    out_json2 = await tools_json.get_my_profile(__request__=FakeRequest())
+    out_json = await tools_json.get_profile(__request__=FakeRequest())
+    out_md = await tools_md.get_profile(__request__=FakeRequest())
+    out_json2 = await tools_json.get_profile(__request__=FakeRequest())
     assert json.loads(out_json)["name"] == "John Doe"
     assert "**Profile**" in out_md
     # the json instance still renders json after the md instance ran

@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx, Pillow
-version: 0.20.0
+version: 0.21.0
 licence: MIT
 """
 
@@ -1513,7 +1513,7 @@ class Tools:
     #  Tool methods — user role (DESIGN §6.1)
     # ──────────────────────────────────────────────
 
-    async def get_my_profile(self, __request__: Any = None, __user__: dict = None,
+    async def get_profile(self, __request__: Any = None, __user__: dict = None,
                              __event_emitter__: Any = None) -> str:
         """Get the requesting user's own profile: id, name, email, role and permissions.
 
@@ -1521,7 +1521,7 @@ class Tools:
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_profile(__request__, __user__=__user__, output_format=output_format),
+            self._get_profile(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
@@ -1529,7 +1529,7 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_my_profile(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+    async def _get_profile(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_PROFILE)
         raw = json.loads(body)
@@ -1573,8 +1573,9 @@ class Tools:
         models = self._summarize_models(items if isinstance(items, list) else [])
         return self._ok({"count": len(models), "models": models}, "models", output_format=output_format)
 
-    async def get_my_chats(
+    async def get_chats(
         self,
+        scope: str = "all",
         limit: int = 10,
         sort_by: str = "updated_at",
         sort_order: str = "desc",
@@ -1583,64 +1584,133 @@ class Tools:
         __user__: dict = None,
         __event_emitter__: Any = None,
     ) -> str:
-        """List the requesting user's recent chats (id, title, dates).
+        """List the requesting user's chats (id, title, dates), by scope.
 
-        Includes chats inside folders and pinned chats (the backend hides
-        them from the default listing unless include_folders/include_pinned
-        are sent — verified live 2026-08-20). Pass ``tag`` to filter the
-        list to chats carrying that tag (server-side, pure tag filter — not
-        a text search; e.g. ``tag="tool"``). Unlike search_chats, this tag
-        filter does NOT exclude archived chats. A ``tag`` filter with zero
-        matches triggers the backend's orphan-tag cleanup (the tag's catalog
-        entry is deleted — intended behavior; per-chat tags are untouched).
+        ``scope`` selects the collection: "all" (default), "pinned",
+        "shared" or "archived".
 
+        ``scope="all"`` includes chats inside folders and pinned chats (the
+        backend hides them from the default listing unless
+        include_folders/include_pinned are sent — verified live 2026-08-20);
+        it accepts ``tag`` to filter to chats carrying that tag (server-side,
+        pure tag filter — not a text search; e.g. ``tag="tool"``). Unlike
+        search_chats, this tag filter does NOT exclude archived chats. A
+        ``tag`` filter with zero matches triggers the backend's orphan-tag
+        cleanup (the tag's catalog entry is deleted — intended behavior;
+        per-chat tags are untouched). ``tag`` is accepted ONLY with
+        ``scope="all"`` — the backend has no route combining a scope with a
+        tag filter.
+
+        ``limit`` semantics differ per scope: for "all" it is the top-N after
+        iterating server pages; for "pinned"/"shared" the top-N of the
+        paged response; for "archived" the top-N of the whole (non-paginated)
+        list.
+
+        :param scope: "all", "pinned", "shared" or "archived" (default "all").
         :param limit: how many chats to return (default 10, max 100).
         :param sort_by: "updated_at" or "created_at" (default "updated_at").
         :param sort_order: "asc" or "desc" (default "desc").
-        :param tag: filter to chats with this tag (default None = all chats).
+        :param tag: filter to chats with this tag; only valid with scope="all" (default None = all chats).
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_chats(
-                limit, __request__, sort_by=sort_by, sort_order=sort_order,
+            self._get_chats(
+                scope, limit, __request__, sort_by=sort_by, sort_order=sort_order,
                 tag=tag, __user__=__user__, output_format=output_format,
             ),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
-            action="Querying your chats…",
+            action=self._chats_action(scope),
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_my_chats(self, limit: Any, request: Any, sort_by: Any = "updated_at",
-                            sort_order: Any = "desc", tag: Any = None,
-                            __user__: Optional[dict] = None,
-                            output_format: Optional[str] = None) -> str:
+    @staticmethod
+    def _chats_action(scope: Any) -> str:
+        """Progress label for a get_chats call, per scope."""
+        return {
+            "all": "Querying your chats…",
+            "pinned": "Reading pinned chats…",
+            "shared": "Reading shared chats…",
+            "archived": "Reading archived chats…",
+        }.get(scope, "Querying your chats…")
+
+    async def _get_chats(self, scope: Any, limit: Any, request: Any,
+                         sort_by: Any = "updated_at", sort_order: Any = "desc",
+                         tag: Any = None,
+                         __user__: Optional[dict] = None,
+                         output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         limit = self._coerce_limit(limit)
         sort_order = self._coerce_sort_order(sort_order)
+        if scope not in ("all", "pinned", "shared", "archived"):
+            raise ToolError(
+                "Invalid scope: expected one of 'all', 'pinned', 'shared', "
+                f"'archived' (got {scope!r})."
+            )
         if isinstance(tag, str):
             tag = tag.strip()
             if not tag:
                 tag = None
-        if tag is not None:
-            if len(tag) > 100:
-                raise ToolError("Invalid tag: at most 100 characters.")
-            all_items = await self._fetch_chats_by_tag(token, tag)
-            total = len(all_items)
-        else:
-            # The backend hides folder + pinned chats unless these flags are sent
-            # (verified live 2026-08-20: default listing excludes them, delta
-            # ~1/3 of the user's chats). The flags only change which rows come
-            # back — item fields stay ChatTitleIdResponse.
-            page_size = min(max(limit, 20), DEFAULT_PAGE_SIZE)
-            all_items, total = await self._fetch_all_pages(
-                token, _ROUTE_CHATS, page_size=page_size,
-                params={"include_folders": "true", "include_pinned": "true"},
+        if tag is not None and scope != "all":
+            raise ToolError("The 'tag' filter only applies to scope='all'.")
+
+        if scope == "all":
+            if tag is not None:
+                if len(tag) > 100:
+                    raise ToolError("Invalid tag: at most 100 characters.")
+                all_items = await self._fetch_chats_by_tag(token, tag)
+                total = len(all_items)
+            else:
+                # The backend hides folder + pinned chats unless these flags
+                # are sent (verified live 2026-08-20: default listing excludes
+                # them, delta ~1/3 of the user's chats). The flags only change
+                # which rows come back — item fields stay ChatTitleIdResponse.
+                page_size = min(max(limit, 20), DEFAULT_PAGE_SIZE)
+                all_items, total = await self._fetch_all_pages(
+                    token, _ROUTE_CHATS, page_size=page_size,
+                    params={"include_folders": "true", "include_pinned": "true"},
+                )
+            sorted_items = self._sorted_chats(all_items, sort_by, sort_order)
+            chats = self._summarize_chats(sorted_items[:limit])
+            return self._ok(
+                {"count": len(chats), "total": total, "chats": chats},
+                "chats", output_format=output_format,
             )
-        sorted_items = self._sorted_chats(all_items, sort_by, sort_order)
-        chats = self._summarize_chats(sorted_items[:limit])
-        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
+
+        if scope == "pinned":
+            _status, _ct, body = await self._api_get_json(
+                token, _ROUTE_CHATS_PINNED, {"pageSize": limit}
+            )
+            items, total = self._extract_items(json.loads(body))
+            chats = self._summarize_chats(items)
+            return self._ok(
+                {"count": len(chats), "total": total, "chats": chats},
+                "chats", output_format=output_format,
+            )
+
+        if scope == "shared":
+            _status, _ct, body = await self._api_get_json(
+                token, _ROUTE_CHATS_SHARED, {"pageSize": limit}
+            )
+            items, total = self._extract_items(json.loads(body))
+            chats = self._summarize_chats(items)
+            return self._ok(
+                {"count": len(chats), "total": total, "chats": chats},
+                "chats", output_format=output_format,
+            )
+
+        # scope == "archived" — plain ChatTitleIdResponse list, no server-side
+        # pagination; sliced by limit (N2: "top-N of the returned list").
+        _status, _ct, body = await self._api_get_json(token, _ROUTE_CHATS_ARCHIVED)
+        items, total = self._extract_items(json.loads(body))
+        chats = self._summarize_chats(items)[:limit]
+        return self._ok({
+            "label": "Archived chats",
+            "count": len(chats),
+            "total": total,
+            "chats": chats,
+        }, "chats", output_format=output_format)
 
     async def _fetch_chats_by_tag(self, token: str, tag: str) -> list:
         """Fetch all chats carrying a tag via POST /api/v1/chats/tags.
@@ -1664,8 +1734,8 @@ class Tools:
                 break
         return all_items
 
-    async def get_my_tags(self, __request__: Any = None, __user__: dict = None,
-                          __event_emitter__: Any = None) -> str:
+    async def get_tags(self, __request__: Any = None, __user__: dict = None,
+                       __event_emitter__: Any = None) -> str:
         """List the tags the requesting user has used on chats (name and id).
 
         Reads ``GET /api/v1/chats/all/tags``. The per-tag user_id and meta
@@ -1674,7 +1744,7 @@ class Tools:
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_tags(__request__, __user__=__user__, output_format=output_format),
+            self._get_tags(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
@@ -1682,8 +1752,8 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_my_tags(self, request: Any, __user__: Optional[dict] = None,
-                           output_format: Optional[str] = None) -> str:
+    async def _get_tags(self, request: Any, __user__: Optional[dict] = None,
+                        output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_CHATS_ALL_TAGS)
         items, _total = self._extract_items(json.loads(body))
@@ -1826,7 +1896,7 @@ class Tools:
         the backend's orphan-tag cleanup — the tag's catalog entry is
         deleted (intended behavior; per-chat tags are untouched); (2) search
         excludes archived chats, so a tag used only on archived chats is
-        cleaned here while ``get_my_chats(tag=...)`` still sees it.
+        cleaned here while ``get_chats(tag=...)`` still sees it.
 
         :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted).
         """
@@ -1851,94 +1921,6 @@ class Tools:
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
         return self._ok({"query": text, "count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
-
-    async def get_shared_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None,
-                               __event_emitter__: Any = None) -> str:
-        """List chats the requesting user has shared with others.
-
-        :param limit: how many chats to return (default 10, max 100).
-        """
-        output_format = self._resolve_output_format(__user__)
-        return await self._run(
-            self._get_shared_chats(limit, __request__, __user__=__user__, output_format=output_format),
-            output_format=output_format,
-            request=__request__,
-            emitter=__event_emitter__,
-            action="Reading shared chats…",
-            verbose=self._resolve_verbose(__user__),
-        )
-
-    async def _get_shared_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
-        token = self._require_token(request)
-        limit = self._coerce_limit(limit)
-        _status, _ct, body = await self._api_get_json(
-            token, _ROUTE_CHATS_SHARED, {"pageSize": limit}
-        )
-        items, total = self._extract_items(json.loads(body))
-        chats = self._summarize_chats(items)
-        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
-
-    async def get_pinned_chats(self, limit: int = 10, __request__: Any = None, __user__: dict = None,
-                               __event_emitter__: Any = None) -> str:
-        """List chats the requesting user has pinned.
-
-        :param limit: how many chats to return (default 10, max 100).
-        """
-        output_format = self._resolve_output_format(__user__)
-        return await self._run(
-            self._get_pinned_chats(limit, __request__, __user__=__user__, output_format=output_format),
-            output_format=output_format,
-            request=__request__,
-            emitter=__event_emitter__,
-            action="Reading pinned chats…",
-            verbose=self._resolve_verbose(__user__),
-        )
-
-    async def _get_pinned_chats(self, limit: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
-        token = self._require_token(request)
-        limit = self._coerce_limit(limit)
-        _status, _ct, body = await self._api_get_json(
-            token, _ROUTE_CHATS_PINNED, {"pageSize": limit}
-        )
-        items, total = self._extract_items(json.loads(body))
-        chats = self._summarize_chats(items)
-        return self._ok({"count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
-
-    async def get_archived_chats(self, limit: int = 10, __request__: Any = None,
-                                 __user__: dict = None,
-                                 __event_emitter__: Any = None) -> str:
-        """List chats the requesting user has archived.
-
-        Reads ``GET /api/v1/chats/archived`` (a plain ChatTitleIdResponse
-        list, no server-side pagination).
-
-        :param limit: how many chats to return (default 10, max 100).
-        """
-        output_format = self._resolve_output_format(__user__)
-        return await self._run(
-            self._get_archived_chats(limit, __request__, __user__=__user__,
-                                     output_format=output_format),
-            output_format=output_format,
-            request=__request__,
-            emitter=__event_emitter__,
-            action="Reading archived chats…",
-            verbose=self._resolve_verbose(__user__),
-        )
-
-    async def _get_archived_chats(self, limit: Any, request: Any,
-                                  __user__: Optional[dict] = None,
-                                  output_format: Optional[str] = None) -> str:
-        token = self._require_token(request)
-        limit = self._coerce_limit(limit)
-        _status, _ct, body = await self._api_get_json(token, _ROUTE_CHATS_ARCHIVED)
-        items, total = self._extract_items(json.loads(body))
-        chats = self._summarize_chats(items)[:limit]
-        return self._ok({
-            "label": "Archived chats",
-            "count": len(chats),
-            "total": total,
-            "chats": chats,
-        }, "chats", output_format=output_format)
 
     async def get_chat_stats(self, chat_id: str, __request__: Any = None,
                              __user__: dict = None,
@@ -2060,8 +2042,8 @@ class Tools:
                 out[role] = sum(lengths) / len(lengths)
         return out
 
-    async def get_my_folders(self, __request__: Any = None, __user__: dict = None,
-                             __event_emitter__: Any = None) -> str:
+    async def get_folders(self, __request__: Any = None, __user__: dict = None,
+                          __event_emitter__: Any = None) -> str:
         """List the folders the requesting user has created (name, id, parent).
 
         Reads ``GET /api/v1/folders/`` (trailing slash required). The route
@@ -2071,7 +2053,7 @@ class Tools:
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_folders(__request__, __user__=__user__, output_format=output_format),
+            self._get_folders(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
@@ -2079,8 +2061,8 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_my_folders(self, request: Any, __user__: Optional[dict] = None,
-                              output_format: Optional[str] = None) -> str:
+    async def _get_folders(self, request: Any, __user__: Optional[dict] = None,
+                           output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_FOLDERS)
         items, _total = self._extract_items(json.loads(body))
@@ -2093,7 +2075,7 @@ class Tools:
         ]
         return self._ok({"count": len(folders), "folders": folders}, "folders", output_format=output_format)
 
-    async def get_my_files(
+    async def get_files(
         self,
         limit: int = 50,
         sort_by: str = "created_at",
@@ -2122,7 +2104,7 @@ class Tools:
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_files(
+            self._get_files(
                 __request__,
                 limit=limit, sort_by=sort_by, sort_order=sort_order,
                 content_type=content_type, min_size=min_size, max_size=max_size,
@@ -2135,11 +2117,11 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_my_files(self, request: Any, limit: Any = 50, sort_by: Any = "created_at",
-                            sort_order: Any = "desc", content_type: Any = None,
-                            min_size: Any = None, max_size: Any = None, filename: Any = None,
-                            __user__: Optional[dict] = None,
-                            output_format: Optional[str] = None) -> str:
+    async def _get_files(self, request: Any, limit: Any = 50, sort_by: Any = "created_at",
+                         sort_order: Any = "desc", content_type: Any = None,
+                         min_size: Any = None, max_size: Any = None, filename: Any = None,
+                         __user__: Optional[dict] = None,
+                         output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         limit = self._coerce_limit(limit, default=50, cap=500)
         sort_order = self._coerce_sort_order(sort_order)
@@ -2508,12 +2490,12 @@ class Tools:
             "message": message,
         }
 
-    async def get_my_prompts(self, __request__: Any = None, __user__: dict = None,
-                             __event_emitter__: Any = None) -> str:
+    async def get_prompts(self, __request__: Any = None, __user__: dict = None,
+                          __event_emitter__: Any = None) -> str:
         """List the requesting user's custom prompts (command, name, content)."""
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_prompts(__request__, __user__=__user__, output_format=output_format),
+            self._get_prompts(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
@@ -2521,7 +2503,7 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_my_prompts(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+    async def _get_prompts(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_PROMPTS)
         items, _total = self._extract_items(json.loads(body))
@@ -2532,12 +2514,12 @@ class Tools:
         ]
         return self._ok({"count": len(prompts), "prompts": prompts}, "prompts", output_format=output_format)
 
-    async def get_my_tools(self, __request__: Any = None, __user__: dict = None,
-                           __event_emitter__: Any = None) -> str:
+    async def get_tools(self, __request__: Any = None, __user__: dict = None,
+                        __event_emitter__: Any = None) -> str:
         """List the tools available to the requesting user (id, name, description)."""
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_tools(__request__, __user__=__user__, output_format=output_format),
+            self._get_tools(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
@@ -2545,7 +2527,7 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_my_tools(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+    async def _get_tools(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_TOOLS)
         items, _total = self._extract_items(json.loads(body))
@@ -2585,8 +2567,8 @@ class Tools:
         ]
         return self._ok({"count": len(knowledge), "total": total, "knowledge": knowledge}, "knowledge", output_format=output_format)
 
-    async def get_my_skills(self, __request__: Any = None, __user__: dict = None,
-                            __event_emitter__: Any = None) -> str:
+    async def get_skills(self, __request__: Any = None, __user__: dict = None,
+                         __event_emitter__: Any = None) -> str:
         """List the skills available to the requesting user (id, name, description, active state).
 
         Skills are workspace resources like tools and prompts: the list includes
@@ -2596,7 +2578,7 @@ class Tools:
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
-            self._get_my_skills(__request__, __user__=__user__, output_format=output_format),
+            self._get_skills(__request__, __user__=__user__, output_format=output_format),
             output_format=output_format,
             request=__request__,
             emitter=__event_emitter__,
@@ -2604,7 +2586,7 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
-    async def _get_my_skills(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
+    async def _get_skills(self, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         token = self._require_token(request)
         _status, _ct, body = await self._api_get_json(token, _ROUTE_SKILLS)
         items, _total = self._extract_items(json.loads(body))

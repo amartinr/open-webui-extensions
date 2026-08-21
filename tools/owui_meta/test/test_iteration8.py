@@ -65,14 +65,14 @@ def api_handler(request):
     return json_response({"unexpected": path}, status=404)
 
 
-# ── get_my_chats(tag=...) — pure tag filter (user decision 2026-08-20) ────
+# ── get_chats(tag=...) — pure tag filter (user decision 2026-08-20) ────
 
-async def test_get_my_chats_with_tag_uses_post_tags():
-    # get_my_chats(tag=...) must call POST /api/v1/chats/tags with the typed
+async def test_get_chats_with_tag_uses_post_tags():
+    # get_chats(tag=...) must call POST /api/v1/chats/tags with the typed
     # body {name, skip, limit} — NOT the chat listing, NOT search.
     recorder = Recorder(api_handler)
     tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_chats(tag="tool", __request__=FakeRequest())
+    out = await tools.get_chats(tag="tool", __request__=FakeRequest())
     assert len(recorder.requests) == 1
     req = recorder.requests[0]
     assert req.method == "POST"
@@ -86,17 +86,17 @@ async def test_get_my_chats_with_tag_uses_post_tags():
     assert payload["total"] == 2
 
 
-async def test_get_my_chats_blank_tag_falls_back_to_listing():
+async def test_get_chats_blank_tag_falls_back_to_listing():
     # A blank tag is not a tag filter: the normal listing is used.
     recorder = Recorder(api_handler)
     tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
-    await tools.get_my_chats(tag="   ", __request__=FakeRequest())
+    await tools.get_chats(tag="   ", __request__=FakeRequest())
     assert len(recorder.requests) == 1
     assert recorder.requests[0].method == "GET"
     assert recorder.requests[0].url.path == "/api/v1/chats/"
 
 
-async def test_get_my_chats_tag_paginates_with_skip():
+async def test_get_chats_tag_paginates_with_skip():
     # >50 tagged chats -> a second POST with skip=50 (bounded by MAX_PAGES).
     def handler(request):
         if request.url.path != "/api/v1/chats/tags":
@@ -112,26 +112,26 @@ async def test_get_my_chats_tag_paginates_with_skip():
 
     recorder = Recorder(handler)
     tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_chats(tag="many", limit=100, __request__=FakeRequest())
+    out = await tools.get_chats(tag="many", limit=100, __request__=FakeRequest())
     assert [json.loads(r.content)["skip"] for r in recorder.requests] == [0, 50]
     payload = json.loads(out)
     assert payload["count"] == 53
     assert payload["total"] == 53
 
 
-async def test_get_my_chats_tag_markdown_table():
+async def test_get_chats_tag_markdown_table():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
-    out = await tools.get_my_chats(tag="tool", __request__=FakeRequest())
+    out = await tools.get_chats(tag="tool", __request__=FakeRequest())
     assert "**Chats: 2" in out
     assert "| Title | Updated | ID |" in out
     assert "| Tagged chat one" in out
 
 
-# ── get_my_tags (item 2) ────────────────────────────────────────────────
+# ── get_tags (item 2) ────────────────────────────────────────────────
 
-async def test_get_my_tags_summarizes_id_and_name_only():
+async def test_get_tags_summarizes_id_and_name_only():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_tags(__request__=FakeRequest())
+    out = await tools.get_tags(__request__=FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 4
     assert payload["tags"][0] == {"id": "comfyui", "name": "comfyui"}
@@ -141,9 +141,9 @@ async def test_get_my_tags_summarizes_id_and_name_only():
     assert '"meta":' not in dumped
 
 
-async def test_get_my_tags_markdown_table():
+async def test_get_tags_markdown_table():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
-    out = await tools.get_my_tags(__request__=FakeRequest())
+    out = await tools.get_tags(__request__=FakeRequest())
     assert "**Tags: 4**" in out
     assert "| Name | ID |" in out
     assert "| tool | tool |" in out
@@ -167,11 +167,11 @@ async def test_search_chats_markdown_renders_snippet_column():
     assert "Presupuestos Generales" in out
 
 
-# ── get_archived_chats (item 4) ─────────────────────────────────────────
+# ── get_chats(scope="archived") (item 4) ─────────────────────────────────────────
 
-async def test_get_archived_chats_summarizes_with_label():
+async def test_get_chats_archived_summarizes_with_label():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_archived_chats(__request__=FakeRequest())
+    out = await tools.get_chats(scope="archived", __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["label"] == "Archived chats"
     assert payload["count"] == 2
@@ -180,17 +180,17 @@ async def test_get_archived_chats_summarizes_with_label():
     assert "messages" not in json.dumps(payload)
 
 
-async def test_get_archived_chats_applies_limit():
+async def test_get_chats_archived_applies_limit():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_archived_chats(limit=1, __request__=FakeRequest())
+    out = await tools.get_chats(scope="archived", limit=1, __request__=FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 1
     assert payload["chats"][0]["id"] == "a1"
 
 
-async def test_get_archived_chats_markdown_header():
+async def test_get_chats_archived_markdown_header():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
-    out = await tools.get_archived_chats(__request__=FakeRequest())
+    out = await tools.get_chats(scope="archived", __request__=FakeRequest())
     assert "**Archived chats: 2**" in out
 
 
@@ -283,11 +283,11 @@ async def test_get_chat_stats_invalid_id_rejected_without_request():
     assert recorder.requests == []
 
 
-# ── get_my_folders (item 6) ─────────────────────────────────────────────
+# ── get_folders (item 6) ─────────────────────────────────────────────
 
-async def test_get_my_folders_whitelists_fields():
+async def test_get_folders_whitelists_fields():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_folders(__request__=FakeRequest())
+    out = await tools.get_folders(__request__=FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 2
     folder = payload["folders"][0]
@@ -301,19 +301,19 @@ async def test_get_my_folders_whitelists_fields():
     assert "user_id" not in dumped
 
 
-async def test_get_my_folders_markdown_table_with_parent_and_expanded():
+async def test_get_folders_markdown_table_with_parent_and_expanded():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="markdown")
-    out = await tools.get_my_folders(__request__=FakeRequest())
+    out = await tools.get_folders(__request__=FakeRequest())
     assert "**Folders: 2**" in out
     assert "| Name | Parent | Expanded | Created | ID |" in out
     assert "| Meta | f1 | yes |" in out
     assert "| Budget folder | — | no |" in out
 
 
-async def test_get_my_folders_403_maps_to_readable_error():
+async def test_get_folders_403_maps_to_readable_error():
     def forbidden(request):
         return json_response({"detail": "folders disabled"}, status=403)
 
     tools = make_tools(forbidden, base_url="http://webui.example.test", output_format="markdown")
-    out = await tools.get_my_folders(__request__=FakeRequest())
+    out = await tools.get_folders(__request__=FakeRequest())
     assert "Forbidden" in out

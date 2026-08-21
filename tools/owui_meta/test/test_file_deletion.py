@@ -12,8 +12,8 @@ the cleanup, deleting several files in one pass:
                             per id without aborting the rest.
 
 Orphan detection (files whose originating chat is gone) is intentionally NOT
-a dedicated method: the model derives it from get_my_files() (which exposes
-origin_chat_id) + get_my_chats() — no extra surface needed.
+a dedicated method: the model derives it from get_files() (which exposes
+origin_chat_id) + get_chats() — no extra surface needed.
 
 Safety: the whole id list is validated up front (one invalid id rejects the
 call before any request); deletion is user-authorized by the tool call

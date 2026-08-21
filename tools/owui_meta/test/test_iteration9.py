@@ -17,7 +17,7 @@ What this suite pins:
   backend's intended lazy cleanup);
 - live (env-gated): the decisive AND case (absent text + tag → 0 results, a
   standalone filter would return the tag's chats) and consistency between
-  ``search_chats("tag:X")`` and ``get_my_chats(tag="X")``.
+  ``search_chats("tag:X")`` and ``get_chats(tag="X")``.
 """
 
 import json
@@ -84,7 +84,7 @@ async def test_search_chats_tag_none_passthrough():
     assert json.loads(out)["query"] == "tag:none"
 
 
-async def test_get_my_chats_tag_uses_post_tags_route():
+async def test_get_chats_tag_uses_post_tags_route():
     def handler(request):
         assert request.method == "POST"
         assert request.url.path == "/api/v1/chats/tags"
@@ -93,7 +93,7 @@ async def test_get_my_chats_tag_uses_post_tags_route():
         return json_response([{"id": "c1", "title": "Budget"}])
 
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_chats(tag="budget", limit=10, __request__=FakeRequest())
+    out = await tools.get_chats(tag="budget", limit=10, __request__=FakeRequest())
     data = json.loads(out)
     assert [c["id"] for c in data["chats"]] == ["c1"]
 
@@ -107,9 +107,9 @@ def test_tag_semantics_documented_in_docstrings():
     search_doc = flat(owui_meta.Tools.search_chats.__doc__ or "")
     for needle in ("scope limiters", "orphan-tag", "archived chats"):
         assert needle in search_doc, f"search_chats docstring missing {needle!r}"
-    list_doc = flat(owui_meta.Tools.get_my_chats.__doc__ or "")
+    list_doc = flat(owui_meta.Tools.get_chats.__doc__ or "")
     for needle in ("orphan-tag", "archived chats"):
-        assert needle in list_doc, f"get_my_chats docstring missing {needle!r}"
+        assert needle in list_doc, f"get_chats docstring missing {needle!r}"
 
 
 # ── live: decisive AND + consistency (env-gated) ─────────────────────
@@ -117,7 +117,7 @@ def test_tag_semantics_documented_in_docstrings():
 @live
 async def test_live_search_tag_is_scope_limiter_and():
     tools = live_tools()
-    tags = (json.loads(await tools.get_my_tags(live_request())) or {}).get("tags") or []
+    tags = (json.loads(await tools.get_tags(live_request())) or {}).get("tags") or []
     if not tags:
         pytest.skip("instance has no tags")
     tag = tags[0]["name"]
@@ -130,15 +130,15 @@ async def test_live_search_tag_is_scope_limiter_and():
 
 
 @live
-async def test_live_search_tag_consistent_with_get_my_chats_tag():
+async def test_live_search_tag_consistent_with_get_chats_tag():
     tools = live_tools()
-    tags = (json.loads(await tools.get_my_tags(live_request())) or {}).get("tags") or []
+    tags = (json.loads(await tools.get_tags(live_request())) or {}).get("tags") or []
     if not tags:
         pytest.skip("instance has no tags")
     tag = tags[0]["name"]
     by_search = (json.loads(await tools.search_chats(f"tag:{tag}", live_request())) or {}).get("chats", [])
     by_list = (
-        json.loads(await tools.get_my_chats(tag=tag, limit=50, __request__=live_request())) or {}
+        json.loads(await tools.get_chats(tag=tag, limit=50, __request__=live_request())) or {}
     ).get("chats", [])
     n = min(len(by_search), len(by_list))
     # Both routes order by updated_at desc; the shared head must match.

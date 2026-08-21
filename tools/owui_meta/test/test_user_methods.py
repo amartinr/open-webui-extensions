@@ -113,9 +113,9 @@ def api_handler(request):
     return json_response({"unexpected": path}, status=404)
 
 
-async def test_get_my_profile():
+async def test_get_profile():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_profile(FakeRequest())
+    out = await tools.get_profile(FakeRequest())
     payload = json.loads(out)
     assert payload["name"] == "John Doe"
     assert payload["role"] == "user"
@@ -131,10 +131,10 @@ async def test_get_models_summarizes():
     assert "info" not in json.dumps(payload)
 
 
-async def test_get_my_chats_sends_page_size_and_summarizes():
+async def test_get_chats_sends_page_size_and_summarizes():
     recorder = Recorder(api_handler)
     tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_chats(limit=5, __request__=FakeRequest())
+    out = await tools.get_chats(limit=5, __request__=FakeRequest())
     # transparent pagination: page_size = min(max(limit, 20), 50)
     assert recorder.requests[0].url.params["pageSize"] == "20"
     assert recorder.requests[0].url.params["page"] == "1"
@@ -144,13 +144,13 @@ async def test_get_my_chats_sends_page_size_and_summarizes():
     assert "messages" not in json.dumps(payload)
 
 
-async def test_get_my_chats_sends_include_flags():
+async def test_get_chats_sends_include_flags():
     # REGRESSION (Iteration 8): the backend hides chats inside folders and
     # pinned chats from the default listing unless include_folders/include_pinned
     # are sent. The tool must always send both so the model sees the real set.
     recorder = Recorder(api_handler)
     tools = make_tools(recorder, base_url="http://webui.example.test", output_format="json")
-    await tools.get_my_chats(limit=5, __request__=FakeRequest())
+    await tools.get_chats(limit=5, __request__=FakeRequest())
     params = recorder.requests[0].url.params
     assert params["include_folders"] == "true"
     assert params["include_pinned"] == "true"
@@ -210,15 +210,15 @@ async def test_search_chats_requires_text():
 
 async def test_get_shared_and_pinned_chats():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    shared = json.loads(await tools.get_shared_chats(__request__=FakeRequest()))
-    pinned = json.loads(await tools.get_pinned_chats(__request__=FakeRequest()))
+    shared = json.loads(await tools.get_chats(scope="shared", __request__=FakeRequest()))
+    pinned = json.loads(await tools.get_chats(scope="pinned", __request__=FakeRequest()))
     assert shared["chats"][0]["id"] == "sh1"
     assert pinned["chats"][0]["id"] == "pn1"
 
 
-async def test_get_my_files_includes_meta_and_total():
+async def test_get_files_includes_meta_and_total():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_files(__request__=FakeRequest())
+    out = await tools.get_files(__request__=FakeRequest())
     payload = json.loads(out)
     assert payload["total"] == 104
     f = payload["files"][0]
@@ -248,16 +248,16 @@ async def test_get_file_content_binary_file_returns_note():
     assert "content" not in payload
 
 
-async def test_get_my_prompts():
+async def test_get_prompts():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_prompts(FakeRequest())
+    out = await tools.get_prompts(FakeRequest())
     payload = json.loads(out)
     assert payload["prompts"][0]["command"] == "/news"
 
 
-async def test_get_my_tools():
+async def test_get_tools():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_tools(FakeRequest())
+    out = await tools.get_tools(FakeRequest())
     payload = json.loads(out)
     assert payload["tools"][0]["name"] == "Enhance Image"
     assert payload["tools"][0]["description"] == "Upscales an image"
@@ -271,9 +271,9 @@ async def test_get_knowledge_bases():
     assert payload["knowledge"][0]["name"] == "Company docs"
 
 
-async def test_get_my_skills_summarizes_without_content():
+async def test_get_skills_summarizes_without_content():
     tools = make_tools(api_handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_skills(FakeRequest())
+    out = await tools.get_skills(FakeRequest())
     payload = json.loads(out)
     assert payload["count"] == 2
     s = payload["skills"][0]

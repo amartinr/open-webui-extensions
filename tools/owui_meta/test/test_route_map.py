@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from helpers import FakeRequest, json_response, make_tools
+from helpers import FakeRequest, Recorder, json_response, make_tools
 
 CHAT_ID = "b5d844f0-85c5-4cdc-8cf3-4f2366bc249e"
 FILE_ID = "643f81c9-2bc8-44d7-b4a1-994cdb1c503b"
@@ -99,14 +99,14 @@ async def _run_method(tools, method, *args):
 async def test_listing_routes_have_trailing_slash():
     # Each listing method must hit the WITH-slash path, not the no-slash one.
     cases = [
-        ("get_my_profile", (), "/api/v1/auths/"),
-        ("get_my_chats", (), "/api/v1/chats/"),
-        ("get_my_files", (), "/api/v1/files/"),
-        ("get_my_prompts", (), "/api/v1/prompts/"),
-        ("get_my_tools", (), "/api/v1/tools/"),
+        ("get_profile", (), "/api/v1/auths/"),
+        ("get_chats", (), "/api/v1/chats/"),
+        ("get_files", (), "/api/v1/files/"),
+        ("get_prompts", (), "/api/v1/prompts/"),
+        ("get_tools", (), "/api/v1/tools/"),
         ("get_knowledge_bases", (), "/api/v1/knowledge/"),
-        ("get_my_skills", (), "/api/v1/skills/"),
-        ("get_my_folders", (), "/api/v1/folders/"),
+        ("get_skills", (), "/api/v1/skills/"),
+        ("get_folders", (), "/api/v1/folders/"),
     ]
     for method, args, route in cases:
         seen = await _run_and_record(method, args, route)
@@ -119,10 +119,10 @@ async def test_subresource_routes_without_trailing_slash():
     cases = [
         ("get_models", (), "/api/models"),
         ("search_chats", ("budget",), "/api/v1/chats/search"),
-        ("get_pinned_chats", (), "/api/v1/chats/pinned"),
-        ("get_shared_chats", (), "/api/v1/chats/shared"),
-        ("get_my_tags", (), "/api/v1/chats/all/tags"),
-        ("get_archived_chats", (), "/api/v1/chats/archived"),
+        ("get_chats", ("pinned",), "/api/v1/chats/pinned"),
+        ("get_chats", ("shared",), "/api/v1/chats/shared"),
+        ("get_tags", (), "/api/v1/chats/all/tags"),
+        ("get_chats", ("archived",), "/api/v1/chats/archived"),
         ("get_chat_stats", (CHAT_ID,), "/api/v1/chats/stats/usage"),
         ("get_chat_summary", (CHAT_ID,), f"/api/v1/chats/{CHAT_ID}"),
         ("get_chat_metadata", (CHAT_ID,), f"/api/v1/chats/{CHAT_ID}"),
@@ -134,30 +134,88 @@ async def test_subresource_routes_without_trailing_slash():
         assert route in seen, f"{method} did not hit {route}; saw {seen}"
 
 
-async def test_get_my_chats_tag_filter_hits_post_route():
-    # get_my_chats(tag=...) is a POST query on /api/v1/chats/tags (no slash).
-    seen = await _run_and_record("get_my_chats", (), "/api/v1/chats/tags", tag="tool")
+async def test_get_chats_tag_filter_hits_post_route():
+    # get_chats(tag=...) is a POST query on /api/v1/chats/tags (no slash).
+    seen = await _run_and_record("get_chats", (), "/api/v1/chats/tags", tag="tool")
     assert "/api/v1/chats/tags" in seen
 
 
-async def test_get_my_chats_no_tag_hits_listing_route():
+async def test_get_chats_no_tag_hits_listing_route():
     # without tag the normal listing (with slash) is used, never the POST.
-    seen = await _run_and_record("get_my_chats", (), "/api/v1/chats/")
+    seen = await _run_and_record("get_chats", (), "/api/v1/chats/")
     assert "/api/v1/chats/" in seen
     assert "/api/v1/chats/tags" not in seen
+
+
+async def test_get_chats_default_scope_is_all():
+    # Omitted scope must behave exactly like the old get_my_chats: the
+    # plain listing route, with include_folders/include_pinned sent.
+    recorder = Recorder(lambda r: json_response([], status=200))
+    tools = make_tools(recorder, base_url="http://webui.example.test")
+    await tools.get_chats(__request__=FakeRequest())
+    assert len(recorder.requests) == 1
+    req = recorder.requests[0]
+    assert req.url.path == "/api/v1/chats/"
+    assert req.url.params.get("include_folders") == "true"
+    assert req.url.params.get("include_pinned") == "true"
+
+
+async def test_get_chats_scope_pinned_route():
+    seen = await _run_and_record("get_chats", ("pinned",), "/api/v1/chats/pinned")
+    assert "/api/v1/chats/pinned" in seen
+
+
+async def test_get_chats_scope_shared_route():
+    seen = await _run_and_record("get_chats", ("shared",), "/api/v1/chats/shared")
+    assert "/api/v1/chats/shared" in seen
+
+
+async def test_get_chats_scope_archived_route():
+    seen = await _run_and_record("get_chats", ("archived",), "/api/v1/chats/archived")
+    assert "/api/v1/chats/archived" in seen
+
+
+async def test_get_chats_invalid_scope_is_clean_error():
+    # Invalid scope must fail cleanly (ToolError → "Error: …"), never a
+    # request and never a crash.
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return json_response([], status=200)
+
+    tools = make_tools(handler, base_url="http://webui.example.test")
+    out = await tools.get_chats(scope="bogus", __request__=FakeRequest())
+    assert seen == [], "invalid scope must not hit the network"
+    assert out.startswith("Error:") and "Invalid scope" in out
+
+
+async def test_get_chats_tag_only_with_scope_all():
+    # N1 decision: tag is accepted ONLY with scope="all". A tag + other scope
+    # must fail cleanly without hitting the network.
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        return json_response([], status=200)
+
+    tools = make_tools(handler, base_url="http://webui.example.test")
+    out = await tools.get_chats(scope="pinned", tag="tool", __request__=FakeRequest())
+    assert seen == [], "tag with scope!=all must not hit the network"
+    assert "only applies to scope='all'" in out
 
 
 async def test_no_slash_variants_are_never_used():
     # Guard: the no-slash variants of listing routes (which return SPA HTML
     # in v0.10.2) must never be requested.
     cases = [
-        ("get_my_profile", (), "/api/v1/auths/", "/api/v1/auths"),
-        ("get_my_chats", (), "/api/v1/chats/", "/api/v1/chats"),
-        ("get_my_files", (), "/api/v1/files/", "/api/v1/files"),
-        ("get_my_prompts", (), "/api/v1/prompts/", "/api/v1/prompts"),
-        ("get_my_tools", (), "/api/v1/tools/", "/api/v1/tools"),
+        ("get_profile", (), "/api/v1/auths/", "/api/v1/auths"),
+        ("get_chats", (), "/api/v1/chats/", "/api/v1/chats"),
+        ("get_files", (), "/api/v1/files/", "/api/v1/files"),
+        ("get_prompts", (), "/api/v1/prompts/", "/api/v1/prompts"),
+        ("get_tools", (), "/api/v1/tools/", "/api/v1/tools"),
         ("get_knowledge_bases", (), "/api/v1/knowledge/", "/api/v1/knowledge"),
-        ("get_my_skills", (), "/api/v1/skills/", "/api/v1/skills"),
+        ("get_skills", (), "/api/v1/skills/", "/api/v1/skills"),
     ]
     for method, args, canonical, forbidden in cases:
         seen = await _run_and_record(method, args, canonical)

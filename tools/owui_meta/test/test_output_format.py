@@ -34,7 +34,7 @@ async def test_profile_is_bullets():
             "permissions": {"chat": {"controls": True}},
         })
 
-    out = await md_tools(handler).get_my_profile(FakeRequest())
+    out = await md_tools(handler).get_profile(FakeRequest())
     assert "**Profile**" in out
     assert "- Name: John Doe" in out
     assert "- Email: john.doe@example.com" in out
@@ -62,7 +62,7 @@ async def test_profile_permissions_hierarchy_full():
     def handler(request):
         return json_response({"id": "u1", "name": "John Doe", "role": "user", "permissions": perms})
 
-    out = await md_tools(handler).get_my_profile(FakeRequest())
+    out = await md_tools(handler).get_profile(FakeRequest())
     assert "- Workspace" in out
     assert "  - Models: false" in out
     assert "  - Knowledge: true" in out
@@ -112,7 +112,7 @@ async def test_files_table_with_raw_bytes():
             "total": 104,
         })
 
-    out = await md_tools(handler).get_my_files(__request__=FakeRequest())
+    out = await md_tools(handler).get_files(__request__=FakeRequest())
     # summary line carries counts (matched = returned; total = on server)
     assert "**Files: 2 matched (104 total on server)**" in out
     # header + separator
@@ -134,7 +134,7 @@ async def test_chats_table():
             {"id": CHAT_ID, "title": "Budget planning", "created_at": 1785457944, "updated_at": 1785458000},
         ])
 
-    out = await md_tools(handler).get_my_chats(__request__=FakeRequest())
+    out = await md_tools(handler).get_chats(__request__=FakeRequest())
     assert "**Chats: 1**" in out
     assert "| Title | Updated | ID |" in out
     # epoch 1785458000 == 2026-07-31 00:33 UTC
@@ -259,8 +259,8 @@ async def test_models_prompts_tools_knowledge_tables():
     tools = md_tools(handler)
     r = FakeRequest()
     models = await tools.get_models(r)
-    prompts = await tools.get_my_prompts(r)
-    tools_list = await tools.get_my_tools(r)
+    prompts = await tools.get_prompts(r)
+    tools_list = await tools.get_tools(r)
     kb = await tools.get_knowledge_bases(r)
     assert "**Models: 1**" in models and "| m1 |" in models
     assert "**Prompts: 1**" in prompts and "| /news |" in prompts
@@ -277,7 +277,7 @@ async def test_skills_list_table():
              "content": "y" * 100, "meta": {}, "created_at": 3, "updated_at": 4},
         ])
 
-    out = await md_tools(handler).get_my_skills(FakeRequest())
+    out = await md_tools(handler).get_skills(FakeRequest())
     assert "**Skills: 2**" in out
     assert "| Name | Description | Active | ID |" in out
     assert "| RAG summarizer | Summarizes documents | true | sk1 |" in out
@@ -315,7 +315,7 @@ async def test_error_is_plain_text_not_json():
     def handler(request):
         return json_response({"detail": "nope"}, status=403)
 
-    out = await md_tools(handler).get_my_profile(FakeRequest())
+    out = await md_tools(handler).get_profile(FakeRequest())
     assert out.startswith("Error: Forbidden")
     assert "{" not in out
 
@@ -327,7 +327,7 @@ async def test_json_mode_still_works():
     import json as _json
 
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_profile(FakeRequest())
+    out = await tools.get_profile(FakeRequest())
     payload = _json.loads(out)
     assert payload["name"] == "John Doe"
 
@@ -337,7 +337,7 @@ async def test_no_token_in_markdown_output():
         return json_response({"id": "u1", "name": "John Doe", "blob": "x" * 200})
 
     tools = md_tools(handler)
-    out = await tools.get_my_profile(FakeRequest(token="sk-secret-abc"))
+    out = await tools.get_profile(FakeRequest(token="sk-secret-abc"))
     assert "sk-secret-abc" not in out
 
 
@@ -351,7 +351,7 @@ async def test_user_valve_overrides_admin_markdown_default():
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     uv = tools.UserValves(output_format="json")
     user = {"valves": uv}
-    out = await tools.get_my_profile(FakeRequest(), __user__=user)
+    out = await tools.get_profile(FakeRequest(), __user__=user)
     payload = _json.loads(out)  # json output is parseable
     assert payload["name"] == "John Doe"
 
@@ -364,7 +364,7 @@ async def test_user_valve_default_is_markdown():
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     uv = tools.UserValves()  # default markdown
     user = {"valves": uv}
-    out = await tools.get_my_profile(FakeRequest(), __user__=user)
+    out = await tools.get_profile(FakeRequest(), __user__=user)
     assert "**Profile**" in out  # markdown
 
 
@@ -377,7 +377,7 @@ async def test_user_valve_json_overrides_default_markdown():
 
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     uv = tools.UserValves(output_format="json")
-    out = await tools.get_my_profile(FakeRequest(), __user__={"valves": uv})
+    out = await tools.get_profile(FakeRequest(), __user__={"valves": uv})
     payload = _json.loads(out)
     assert payload["name"] == "John Doe"
 
@@ -389,7 +389,7 @@ async def test_user_valve_json_overrides_admin_markdown_in_errors():
 
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="markdown")
     uv = tools.UserValves(output_format="json")
-    out = await tools.get_my_profile(FakeRequest(), __user__={"valves": uv})
+    out = await tools.get_profile(FakeRequest(), __user__={"valves": uv})
     import json as _json
 
     payload = _json.loads(out)
@@ -404,7 +404,7 @@ async def test_user_valve_markdown_overrides_admin_json():
 
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
     uv = tools.UserValves(output_format="markdown")
-    out = await tools.get_my_profile(FakeRequest(), __user__={"valves": uv})
+    out = await tools.get_profile(FakeRequest(), __user__={"valves": uv})
     assert "**Profile**" in out
 
 
@@ -413,7 +413,7 @@ async def test_no_user_valves_uses_admin_default():
         return json_response({"id": "u1", "name": "John Doe"})
 
     tools = make_tools(handler, base_url="http://webui.example.test", output_format="json")
-    out = await tools.get_my_profile(FakeRequest(), __user__=None)
+    out = await tools.get_profile(FakeRequest(), __user__=None)
     import json as _json
 
     assert _json.loads(out)["name"] == "John Doe"

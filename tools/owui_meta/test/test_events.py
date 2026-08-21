@@ -54,7 +54,7 @@ def files_handler():
 async def test_success_emits_start_and_done_status():
     emitter = FakeEmitter()
     tools = make_tools(files_handler(), base_url="http://webui.example.test")
-    out = await tools.get_my_files(__request__=FakeRequest(), __event_emitter__=emitter)
+    out = await tools.get_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
     statuses = [e for e in emitter.events if e["type"] == "status"]
     assert len(statuses) == 2
@@ -66,7 +66,7 @@ async def test_success_emits_start_and_done_status():
 
 async def test_no_emitter_skips_events():
     tools = make_tools(files_handler(), base_url="http://webui.example.test")
-    out = await tools.get_my_files(__request__=FakeRequest())  # no emitter
+    out = await tools.get_files(__request__=FakeRequest())  # no emitter
     assert "**Files: 1" in out  # still works, no events
 
 
@@ -74,7 +74,7 @@ async def test_verbose_false_suppresses_status_events():
     emitter = FakeEmitter()
     tools = make_tools(files_handler(), base_url="http://webui.example.test")
     tools.valves.verbose = False
-    out = await tools.get_my_files(__request__=FakeRequest(), __event_emitter__=emitter)
+    out = await tools.get_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
     assert [e for e in emitter.events if e["type"] == "status"] == []
     assert "**Files: 1" in out
@@ -90,7 +90,7 @@ async def test_user_valve_verbose_overrides_admin():
         pass
 
     user = FakeUser(id="u1", valves=tools.user_valves)  # __user__["valves"]
-    await tools.get_my_files(__request__=FakeRequest(), __user__=user, __event_emitter__=emitter)
+    await tools.get_files(__request__=FakeRequest(), __user__=user, __event_emitter__=emitter)
 
     statuses = [e for e in emitter.events if e["type"] == "status"]
     assert len(statuses) == 2
@@ -102,7 +102,7 @@ async def test_failure_emits_single_error_event():
 
     emitter = FakeEmitter()
     tools = make_tools(handler, base_url="http://webui.example.test")
-    out = await tools.get_my_files(__request__=FakeRequest(), __event_emitter__=emitter)
+    out = await tools.get_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
     errors = [e for e in emitter.events if e["type"] == "chat:message:error"]
     assert len(errors) == 1
@@ -118,7 +118,7 @@ async def test_error_event_shown_even_when_verbose_false():
     emitter = FakeEmitter()
     tools = make_tools(handler, base_url="http://webui.example.test")
     tools.valves.verbose = False
-    await tools.get_my_files(__request__=FakeRequest(), __event_emitter__=emitter)
+    await tools.get_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
     errors = [e for e in emitter.events if e["type"] == "chat:message:error"]
     assert len(errors) == 1  # errors are never gated by verbose
@@ -166,7 +166,7 @@ async def test_events_never_contain_the_token():
         return json_response({"unexpected": request.url.path}, status=500)
 
     tools = make_tools(handler, base_url="http://webui.example.test")
-    await tools.get_my_files(__request__=FakeRequest(token=secret), __event_emitter__=emitter)
+    await tools.get_files(__request__=FakeRequest(token=secret), __event_emitter__=emitter)
 
     blob = json.dumps([e for e in emitter.events])
     assert secret not in blob
