@@ -2,7 +2,7 @@
 
 **Branch:** `feat/owui_meta_tool`
 **Date:** 2026-08-01
-**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3, 9.4, 9.8, 9.9 and 9.10 DONE (v0.17.0–v0.22.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions; **9.7 planned: `folder:` search fix**) — design decisions 2026-08-21
+**Status:** Iterations 0, 1, 3, 4, 5, 6, 7 and 8 **done** (Iteration 5 completed 2026-08-20: live suite + isolation tests committed; Iteration 8 completed 2026-08-20: items 1–7); Iteration 2 **deferred to a future version**; **Iteration 9 — live + source research completed 2026-08-21 (Tasks 1 and 3 corrected: `tag:` is already a scope limiter server-side; the stats anomaly is fully root-caused — a backend bug in the assistant-length metric); tasks 9.1, 9.2, 9.3, 9.4, 9.7, 9.8, 9.9 and 9.10 DONE (v0.17.0–v0.23.0), 9.5 pending** (see the Iteration 9 section below; **task 9.6 chat date-range filter DEFERRED by user decision 2026-08-21** — see §7 Future versions) — design decisions 2026-08-21
 **Notes merged (2026-08-21):** `NOTES.md` was absorbed into this plan — N1 (`tag` × scope) and N2 (per-scope `limit` semantics) are now design notes under task 9.9; N3 (residual `_my_` names) under task 9.10; N4 (Iteration 9 status snapshot) is the **Status** line above. The standalone file was replaced by a pointer stub.
 
 This plan turns [DESIGN.md](./DESIGN.md) into a working Open WebUI tool one iteration at a time. The guiding rule: **every iteration ends with a working, testable, committable product** — never a half-wired feature.
@@ -474,7 +474,9 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 
 **Tracked as future work:** see §7 “Future versions” below.
 
-### 9.7 `search_chats` — fix the `folder:` prefix (folder-name resolution) ⏳ PLANNED (2026-08-21)
+### 9.7 `search_chats` — fix the `folder:` prefix (folder-name resolution) ✅ DONE (v0.23.0)
+
+**Commit:** *(this iteration's commit)*
 
 **User report (2026-08-21):** searching chats by folder does not work when the **folder name** is used instead of the id — impractical, terrible UX.
 
@@ -494,15 +496,16 @@ get_my_chats(limit=10, sort_by="updated_at", sort_order="desc", tag=None,
 - `folder:open_webui_meta` (underscore-joined, normalized) → **works**: the backend normalizes `_`≡space, so the single token matches exactly. `folder:ia_generativa_y_formatos_de_cuantización_de_modelos` → 38 chats.
 - `GET /api/v1/chats/folder/{folder_id}` (the obvious id-based route) → **401** for the user role on this instance — cannot be used as the fix path.
 
-**Design (`_search_chats`, zero new routes — reuses the existing `folder:` filter):**
-1. Tokenize the input; find `folder:` tokens. **Greedily match the longest phrase** against the user's folders (fetch `GET /api/v1/folders/` — already allowlisted — once per call, normalized with the backend's own semantics) so multi-word names resolve: "folder:Open WebUI meta" → folder "Open WebUI meta".
-2. **Rewrite the query** to the single-token normalized form (`folder:<name with spaces→underscores>`, case-insensitive) — the backend's exact-normalized match then succeeds. **Strip the consumed words** from the free text (fixes the leak: "folder:Open WebUI meta" must NOT search "WebUI meta").
-3. **Unknown folder → clean error** (listing the user's folder names from step 1) instead of the current silent no-filter — the model/user learns the valid names (mirrors how tags are surfaced).
-4. Mixed text works as AND: `"foo folder:Open WebUI meta"` → `foo folder:open_webui_meta` (text AND folder, server-side).
+**Design (implemented in `_search_chats` via `_resolve_folder_filters`, zero new routes — reuses the existing `folder:` filter and the already-allowlisted `GET /api/v1/folders/`):**
+1. Tokenize the input; find `folder:` tokens. **Greedily match the longest phrase** against the user's folders (fetch `GET /api/v1/folders/` once per call when a `folder:` token is present; names normalized with the backend's own semantics via `_normalize_folder` — `[\s_]+`→space, lowercase) so multi-word names resolve: "folder:Open WebUI meta" → folder "Open WebUI meta".
+2. **Rewrite the query** to the single-token form (`folder:<name with spaces→underscores>`, case-insensitive) — the backend's exact-normalized match then succeeds. **Strip the consumed words** from the free text (fixes the leak: "folder:Open WebUI meta" must NOT search "WebUI meta").
+3. **Unknown folder → clean error** listing the user's folder names from step 1 ("Unknown folder 'X'; valid folders: 'a', 'b'") instead of the current silent no-filter — the model/user learns the valid names (mirrors how tags are surfaced). A folders-route failure (e.g. 403, folders disabled) propagates as the mapped readable error.
+4. Mixed text works as AND: `"foo folder:Open WebUI meta"` → `foo folder:Open_WebUI_meta` (text AND folder, server-side).
+5. **9.8 interplay:** a resolved valid `folder:` counts as a legitimate scope (it returns exactly that folder's chats), so `search_chats("folder:Open WebUI meta")` is NOT rejected by the 9.8 text-term rule; unknown folder names and non-folder pure prefixes still error.
 
-**Acceptance:** `search_chats("folder:<any folder name with spaces>")` returns exactly that folder's chats (no text leak, no silent no-filter); `folder:<unknown>` → readable error listing valid folders; single-word and underscore names keep working; combinable with free text as AND; no new routes.
+**Acceptance (verified by tests, 2026-08-21):** `search_chats("folder:<any folder name with spaces>")` returns exactly that folder's chats (no text leak, no silent no-filter); `folder:<unknown>` → readable error listing valid folders; single-word and underscore names keep working (`folder:open_webui_meta` → rewritten to the real name form); combinable with free text as AND; no new routes.
 
-**Tests** (`test/test_iteration9.py`): mock — multi-word folder resolution, underscore rewrite, leak stripping, unknown-folder error, text+folder AND; live (env-gated) — the matrix above on the instance's real folders (name with spaces → folder's chats; id → error).
+**Tests** (`test/test_iteration9.py`): mock — multi-word folder resolution + leak stripping (asserts the exact `text` param sent), underscore single-token rewrite, single-word folder, unknown-folder error listing names (search endpoint never hit), text+folder AND, folders-route failure → clean error. Live (env-gated, `test_live.py::test_live_search_folder_name_resolution`): a real folder name (with spaces) resolves and returns that folder's chats; a folder UUID → clean "Unknown folder" error.
 
 ### 9.8 `search_chats` — require a search term ✅ DONE (v0.22.0)
 
@@ -622,7 +625,16 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 - Docstrings + README updated (search term requirement, pointer to list tools).
 - Frontmatter `version:` → v0.22.0.
 
-**Still pending for Iteration 9 (v0.22.0+):** 9.5 (`delete_files` destructive test), 9.7 (`folder:` search fix). 9.6 DEFERRED (see §7).
+**Task 9.7 delivered (v0.23.0, one commit):**
+
+- `search_chats` now resolves `folder:` prefixes client-side (`_resolve_folder_filters`): greedy longest-phrase match against the user's folders (fetched once via the already-allowlisted `GET /api/v1/folders/`), rewritten to the single canonical token `folder:<name with spaces→underscores>` (the backend treats `_`≡space), with the consumed words stripped from the free text (no more leak) and unknown folder names → clean error listing the valid names (no more silent no-filter).
+- New `_normalize_folder` (backend semantics `[\s_]+`→space, lowercase) and `_is_ui_prefix` helpers.
+- 9.8 interplay: a resolved valid `folder:` is a legitimate scope, so `search_chats("folder:Open WebUI meta")` returns exactly that folder's chats; unknown folder names and non-folder pure prefixes still error.
+- Tests: 6 new mock tests (multi-word resolution + leak stripping, underscore single-token, single-word, unknown-folder error listing names, text+folder AND, folders-route failure → clean error) + 1 new live test (`test_live_search_folder_name_resolution`, env-gated). Full suite green — **175 passed / 22 skipped** (live env-gated) on 2026-08-21.
+- Docstrings + README updated (folder: name resolution documented).
+- Frontmatter `version:` → v0.23.0.
+
+**Still pending for Iteration 9 (v0.23.0+):** 9.5 (`delete_files` destructive test). 9.6 DEFERRED (see §7).
 
 ## 8. Out of scope (per DESIGN §2)
 

@@ -92,9 +92,11 @@ async def test_search_chats_tag_none_passthrough():
 
 
 async def test_search_chats_pure_prefix_errors_for_each_prefix():
-    # 9.8 acceptance: every UI prefix alone → clean error, never a listing.
-    for term in ("pinned:true", "tag:meta", "folder:MyFolder",
-                 "archived:true", "shared:true", "tag:none"):
+    # 9.8 acceptance: every non-folder UI prefix alone → clean error, never
+    # a listing. (folder: is excluded — a valid folder: is a legitimate
+    # scope after the 9.7 resolution; an unknown one errors with the list.)
+    for term in ("pinned:true", "tag:meta", "archived:true",
+                 "shared:true", "tag:none"):
         seen = []
 
         def handler(request):
@@ -120,6 +122,101 @@ async def test_search_chats_text_plus_prefix_still_works():
     assert [c["id"] for c in data["chats"]] == ["c1"]
 
 
+# ── 9.7: folder: name resolution ─────────────────────────────────────
+
+_FOLDERS = [
+    {"id": "f1", "name": "Open WebUI meta", "parent_id": None},
+    {"id": "f2", "name": "IA generativa", "parent_id": None},
+    {"id": "f3", "name": "Single", "parent_id": None},
+]
+
+
+def _folder_handler(text_assert=None, chats=None):
+    """Handler that serves /api/v1/folders/ and asserts the search text."""
+    def handler(request):
+        if request.url.path == "/api/v1/folders/":
+            return json_response(_FOLDERS)
+        if request.url.path == "/api/v1/chats/search":
+            if text_assert is not None:
+                assert request.url.params["text"] == text_assert, request.url.params
+            return json_response(chats or [{"id": "c1", "title": "In folder"}])
+        return json_response({"unexpected": request.url.path}, status=404)
+    return handler
+
+
+async def test_search_chats_folder_multiword_resolves_and_strips_leak():
+    # 9.7: "folder:Open WebUI meta" must resolve to the canonical single
+    # token "folder:Open_WebUI_meta" — and the leaked words ("WebUI meta")
+    # must NOT remain in the free text.
+    tools = make_tools(_folder_handler(text_assert="folder:Open_WebUI_meta"),
+                       base_url="http://webui.example.test", output_format="json")
+    out = await tools.search_chats("folder:Open WebUI meta", FakeRequest())
+    data = json.loads(out)
+    assert data["query"] == "folder:Open_WebUI_meta"
+    assert [c["id"] for c in data["chats"]] == ["c1"]
+
+
+async def test_search_chats_folder_underscore_single_token():
+    # 9.7: the underscore-joined single token (which the backend already
+    # normalizes) keeps working and is rewritten to the real name form.
+    tools = make_tools(_folder_handler(text_assert="folder:Open_WebUI_meta"),
+                       base_url="http://webui.example.test", output_format="json")
+    out = await tools.search_chats("folder:open_webui_meta", FakeRequest())
+    data = json.loads(out)
+    assert data["query"] == "folder:Open_WebUI_meta"
+
+
+async def test_search_chats_folder_single_word():
+    # 9.7: a single-word folder name matches directly.
+    tools = make_tools(_folder_handler(text_assert="folder:Single"),
+                       base_url="http://webui.example.test", output_format="json")
+    out = await tools.search_chats("folder:Single", FakeRequest())
+    assert json.loads(out)["query"] == "folder:Single"
+
+
+async def test_search_chats_folder_unknown_clean_error_lists_names():
+    # 9.7: unknown folder → clean error listing the valid names, and no
+    # request to the search endpoint (no silent no-filter).
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        if request.url.path == "/api/v1/folders/":
+            return json_response(_FOLDERS)
+        return json_response([], status=200)
+
+    tools = make_tools(handler, base_url="http://webui.example.test")
+    out = await tools.search_chats("folder:NoExiste", FakeRequest())
+    assert seen == ["/api/v1/folders/"], "unknown folder must not hit search"
+    assert out.startswith("Error:")
+    assert "NoExiste" in out and "Open WebUI meta" in out and "Single" in out
+
+
+async def test_search_chats_folder_plus_text_is_and():
+    # 9.7: text + folder stays AND; the folder phrase is consumed (no leak).
+    tools = make_tools(
+        _folder_handler(text_assert="ventilador folder:Open_WebUI_meta"),
+        base_url="http://webui.example.test", output_format="json",
+    )
+    out = await tools.search_chats("ventilador folder:Open WebUI meta", FakeRequest())
+    data = json.loads(out)
+    assert data["query"] == "ventilador folder:Open_WebUI_meta"
+
+
+async def test_search_chats_folder_fetch_failure_is_clean_error():
+    # 9.7: if the folders route fails (e.g. folders disabled → 403), the
+    # call errors cleanly instead of silently ignoring the folder filter.
+    def handler(request):
+        if request.url.path == "/api/v1/folders/":
+            return json_response({"detail": "forbidden"}, status=403)
+        return json_response([], status=200)
+
+    tools = make_tools(handler, base_url="http://webui.example.test")
+    out = await tools.search_chats("folder:Open WebUI meta", FakeRequest())
+    assert out.startswith("Error:")
+    assert "Forbidden" in out
+
+
 async def test_get_chats_tag_uses_post_tags_route():
     def handler(request):
         assert request.method == "POST"
@@ -142,7 +239,8 @@ def test_tag_semantics_documented_in_docstrings():
 
     search_doc = flat(owui_meta.Tools.search_chats.__doc__ or "")
     for needle in ("scope limiters", "orphan-tag", "archived chats",
-                   "real search term", "get_folders"):
+                   "real search term", "get_folders", "resolved client-side",
+                   "unknown folder"):
         assert needle in search_doc, f"search_chats docstring missing {needle!r}"
     list_doc = flat(owui_meta.Tools.get_chats.__doc__ or "")
     for needle in ("orphan-tag", "archived chats"):

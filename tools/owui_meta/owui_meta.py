@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx, Pillow
-version: 0.22.0
+version: 0.23.0
 licence: MIT
 """
 
@@ -119,6 +119,12 @@ _SEARCH_UI_PREFIXES = (
     "archived:",
     "shared:",
 )
+
+# Backend folder-name normalization (v0.10.2 models/folders.py
+# search_folders_by_names): ``[\s_]+`` → single space, then lowercase. The
+# tool applies the same normalization client-side so a greedy phrase match
+# against the user's folders resolves multi-word names (task 9.7).
+_FOLDER_NORM_RE = re.compile(r"[\s_]+")
 
 # Content types that are useful as text when reading a file's content.
 _TEXT_CONTENT_TYPES = frozenset({
@@ -1900,7 +1906,8 @@ class Tools:
         filter prefix). A call whose tokens are ONLY UI filter prefixes
         (``pinned:true``, ``tag:meta``, ``folder:name``, ``tag:none``, ...)
         is an error — use get_chats(scope=...) or get_folders for filtered
-        listings instead; this tool matches text.
+        listings instead; this tool matches text. The one exception is a
+        valid ``folder:`` filter, which returns exactly that folder's chats.
 
         The backend supports the UI filter prefixes, all server-side:
         ``tag:name``, ``folder:name``, ``pinned:true/false``,
@@ -1911,13 +1918,20 @@ class Tools:
         ``"foo tag:bar"`` matches only chats matching ``foo`` that also
         carry the tag ``bar``.
 
+        ``folder:`` names are resolved client-side (verified live
+        2026-08-21, task 9.7): the backend splits the text on spaces, so a
+        multi-word name must be given with spaces or underscores
+        (``folder:Open WebUI meta`` or ``folder:open_webui_meta`` — both
+        match the folder "Open WebUI meta"; the backend treats ``_``≡space).
+        An unknown folder name is a clean error listing the valid names.
+
         Backend notes: (1) a LONE ``tag:`` query with zero matches triggers
         the backend's orphan-tag cleanup — the tag's catalog entry is
         deleted (intended behavior; per-chat tags are untouched); (2) search
         excludes archived chats, so a tag used only on archived chats is
         cleaned here while ``get_chats(tag=...)`` still sees it.
 
-        :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted as refinements).
+        :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted as refinements; folder: names resolved client-side).
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
@@ -1929,31 +1943,114 @@ class Tools:
             verbose=self._resolve_verbose(__user__),
         )
 
+    @staticmethod
+    def _normalize_folder(name: str) -> str:
+        """Backend folder-name normalization (v0.10.2 search_folders_by_names):
+        ``[\\s_]+`` → single space, then lowercase."""
+        return " ".join(_FOLDER_NORM_RE.split(name)).strip().lower()
+
+    @staticmethod
+    def _is_ui_prefix(tok: str) -> bool:
+        """True if a token is a UI filter prefix (tag:, folder:, pinned:, ...)."""
+        return tok.lower().startswith(_SEARCH_UI_PREFIXES)
+
+    async def _resolve_folder_filters(self, tokens: list, token: str) -> list:
+        """Resolve ``folder:`` search prefixes to the backend's canonical form.
+
+        Task 9.7: the backend splits the search text on spaces, so
+        ``folder:Open WebUI meta`` queries only "Open" — the remaining words
+        leak into the free text and the folder filter silently no-ops. We
+        fetch the user's folders once, greedily match the LONGEST phrase
+        against the backend-normalized names (``[\\s_]+``→space, lowercase),
+        rewrite to ``folder:<name with spaces→underscores>`` (the backend
+        treats ``_``≡space, so the single token matches exactly — verified
+        live) and strip the consumed words from the free text. An unresolved
+        folder name is a clean error listing the valid names (no more silent
+        no-filter).
+        """
+        if not any(tok.lower().startswith("folder:") for tok in tokens):
+            return tokens
+        _status, _ct, body = await self._api_get_json(token, _ROUTE_FOLDERS)
+        items, _total = self._extract_items(json.loads(body))
+        folders = [f for f in items if isinstance(f, dict) and f.get("name")]
+        valid_names = [f["name"] for f in folders]
+        norm_map: dict = {}
+        for f in folders:
+            n = self._normalize_folder(f["name"])
+            if n and n not in norm_map:
+                norm_map[n] = f["name"]
+
+        out: list = []
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok.lower().startswith("folder:"):
+                # Greedy phrase: the token tail + following non-prefix words.
+                tail = tok[len("folder:"):] if len(tok) > len("folder:") else ""
+                phrase = [tail] if tail else []
+                j = i + 1
+                while j < len(tokens) and not self._is_ui_prefix(tokens[j]):
+                    phrase.append(tokens[j])
+                    j += 1
+                # Probe longest-first against the normalized names.
+                match = None
+                for k in range(len(phrase), 0, -1):
+                    cand = " ".join(phrase[:k])
+                    n = self._normalize_folder(cand)
+                    if n and n in norm_map:
+                        match = (k, norm_map[n])
+                        break
+                if match is None:
+                    term = " ".join(phrase) if phrase else ""
+                    if valid_names:
+                        raise ToolError(
+                            f"Unknown folder {term!r}; valid folders: "
+                            + ", ".join(repr(v) for v in valid_names)
+                        )
+                    raise ToolError(
+                        f"Unknown folder {term!r} (no folders available)."
+                    )
+                k, real = match
+                out.append("folder:" + re.sub(r"\s+", "_", real).strip("_"))
+                i += 1 + (k - 1)  # consume the folder token + k-1 phrase words
+            else:
+                out.append(tok)
+                i += 1
+        return out
+
     async def _search_chats(self, text: Any, request: Any, __user__: Optional[dict] = None, output_format: Optional[str] = None) -> str:
         if not isinstance(text, str) or not text.strip():
             raise ToolError("search_chats requires a non-empty 'text' parameter.")
         text = text.strip()[:200]
-        # Task 9.8: a call whose tokens are ONLY UI filter prefixes searches
-        # nothing — it would silently return a full listing (the backend
-        # strips the prefixes and matches empty text). Reject it and point
-        # the model at the list tools; prefixes remain valid as refinements
-        # of a real text term (e.g. "foo tag:bar").
+        token = self._require_token(request)
         tokens = text.split()
-        if not any(
-            not tok.lower().startswith(_SEARCH_UI_PREFIXES) for tok in tokens
-        ):
+        # Task 9.7: resolve ``folder:`` prefixes (greedy phrase match against
+        # the user's folders; canonical underscore rewrite; leak stripping;
+        # unknown folder → clean error listing the valid names). May fetch
+        # /api/v1/folders/ once — already allowlisted.
+        if any(tok.lower().startswith("folder:") for tok in tokens):
+            tokens = await self._resolve_folder_filters(tokens, token)
+        # Task 9.8: a call whose tokens are ONLY non-folder UI prefixes
+        # searches nothing — it would silently return a full listing (the
+        # backend strips the prefixes and matches empty text). A resolved
+        # ``folder:`` counts as a legitimate scope (task 9.7: it returns
+        # exactly that folder's chats), so it is not rejected here; the
+        # prefixes remain refinements of a real text term ("foo tag:bar").
+        has_text = any(not self._is_ui_prefix(tok) for tok in tokens)
+        has_folder = any(tok.lower().startswith("folder:") for tok in tokens)
+        if not has_text and not has_folder:
             raise ToolError(
                 "search_chats requires a text term; use get_chats("
                 'scope="pinned"|"shared"|"archived") or get_folders for '
                 "filtered listings."
             )
-        token = self._require_token(request)
+        query = " ".join(tokens)
         _status, _ct, body = await self._api_get_json(
-            token, _ROUTE_CHATS_SEARCH, {"text": text}
+            token, _ROUTE_CHATS_SEARCH, {"text": query}
         )
         items, total = self._extract_items(json.loads(body))
         chats = self._summarize_chats(items)
-        return self._ok({"query": text, "count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
+        return self._ok({"query": query, "count": len(chats), "total": total, "chats": chats}, "chats", output_format=output_format)
 
     async def get_chat_stats(self, chat_id: str, __request__: Any = None,
                              __user__: dict = None,

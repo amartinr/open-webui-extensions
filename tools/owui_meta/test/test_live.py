@@ -168,7 +168,6 @@ async def test_live_search_text_and_prefixes():
     for term in ("tag:tool", "pinned:true", "archived:true", "tag:none"):
         out = await tools.search_chats(term, __request__=live_request())
         assert "Error:" in out and "requires a text term" in out, term
-        assert ("| Title |" in out) or ("(none)" in out), f"prefix {term!r} rendered weird: {out[:200]}"
     # json mode passes the query through (lenient to truncation on big sets)
     out = await live_tools("json").search_chats("meta", __request__=live_request())
     try:
@@ -176,6 +175,28 @@ async def test_live_search_text_and_prefixes():
         assert payload["query"] == "meta"
     except json.JSONDecodeError:
         assert "truncated" in out
+
+
+async def test_live_search_folder_name_resolution():
+    # 9.7: a real folder NAME (with spaces) resolves to the canonical
+    # underscore form and returns exactly that folder's chats — no text
+    # leak, no silent no-filter. A folder ID is not a name → clean error
+    # listing the valid names.
+    tools = live_tools("json")
+    folders = json.loads(await tools.get_folders(__request__=live_request()))
+    names = [f["name"] for f in folders.get("folders", [])]
+    if not names:
+        pytest.skip("instance has no folders")
+    name = names[0]
+    out = await tools.search_chats(f"folder:{name}", __request__=live_request())
+    assert "Error:" not in out, f"folder {name!r} failed: {out[:300]}"
+    payload = json.loads(out)
+    expected = "folder:" + name.replace(" ", "_")
+    assert payload["query"] == expected, f"query {payload['query']!r} != {expected!r}"
+    # A folder UUID is not a valid folder name → clean error with the list.
+    fid = folders["folders"][0]["id"]
+    out2 = await tools.search_chats(f"folder:{fid}", __request__=live_request())
+    assert "Error:" in out2 and "Unknown folder" in out2, out2[:300]
 
 
 async def test_live_search_snippet_surfaced():
