@@ -75,9 +75,10 @@ async def test_search_chats_passes_tag_prefix_text_through_unchanged():
 
 
 async def test_search_chats_tag_none_passthrough():
-    # 9.8: a call whose tokens are ONLY UI prefixes (here tag:none) is an
-    # error — it would silently return a full listing, indistinguishable
-    # from "nothing found". No request must be issued.
+    # 9.8: a call whose tokens are ONLY UI prefixes (here tag:none) searches
+    # nothing — it must NOT hit the network and must return a guiding hint
+    # (NOT a ToolError: that would emit chat:message:error and, in v0.10.2,
+    # mark the message errored and BLOCK the next send, breaking the chat).
     seen = []
 
     def handler(request):
@@ -87,16 +88,22 @@ async def test_search_chats_tag_none_passthrough():
     tools = make_tools(handler, base_url="http://webui.example.test")
     out = await tools.search_chats("tag:none", FakeRequest())
     assert seen == [], "pure-prefix call must not hit the network"
-    assert out.startswith("Error:")
-    assert "requires a text term" in out
+    assert out.startswith("Error:") is False
+    assert "get_chats" in out and "get_tags" in out
 
 
-async def test_search_chats_pure_prefix_errors_for_each_prefix():
-    # 9.8 acceptance: every non-folder UI prefix alone → clean error, never
-    # a listing. (folder: is excluded — a valid folder: is a legitimate
-    # scope after the 9.7 resolution; an unknown one errors with the list.)
-    for term in ("pinned:true", "tag:meta", "archived:true",
-                 "shared:true", "tag:none"):
+async def test_search_chats_pure_prefix_returns_guide_for_each_prefix():
+    # 9.8 acceptance: every non-folder UI prefix alone → guiding hint, never
+    # a listing and never a ToolError. (folder: is excluded — a valid
+    # folder: is a legitimate scope after the 9.7 resolution.)
+    expected_hints = {
+        "pinned:true": "get_chats(scope='pinned')",
+        "tag:meta": "get_chats(tag='meta')",
+        "archived:true": "get_chats(scope='archived')",
+        "shared:true": "get_chats(scope='shared')",
+        "tag:none": "get_tags",
+    }
+    for term, needle in expected_hints.items():
         seen = []
 
         def handler(request):
@@ -106,7 +113,8 @@ async def test_search_chats_pure_prefix_errors_for_each_prefix():
         tools = make_tools(handler, base_url="http://webui.example.test")
         out = await tools.search_chats(term, FakeRequest())
         assert seen == [], f"pure-prefix {term!r} must not hit the network"
-        assert out.startswith("Error:") and "requires a text term" in out, term
+        assert out.startswith("Error:") is False, term
+        assert needle in out, f"{term!r}: missing {needle!r} in {out!r}"
 
 
 async def test_search_chats_text_plus_prefix_still_works():
@@ -240,7 +248,7 @@ def test_tag_semantics_documented_in_docstrings():
     search_doc = flat(owui_meta.Tools.search_chats.__doc__ or "")
     for needle in ("scope limiters", "orphan-tag", "archived chats",
                    "real search term", "get_folders", "resolved client-side",
-                   "unknown folder"):
+                   "unknown folder", "get_tags"):
         assert needle in search_doc, f"search_chats docstring missing {needle!r}"
     list_doc = flat(owui_meta.Tools.get_chats.__doc__ or "")
     for needle in ("orphan-tag", "archived chats"):

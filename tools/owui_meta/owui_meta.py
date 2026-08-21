@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions
 description: Queries Open WebUI's own internal API to answer questions about the requesting user's data (chats, files, prompts, tools, models, knowledge), plus explicit user-authorized file deletion for cleanup. Authenticates automatically with the requesting user's token — no credentials to configure. Allowlisted endpoints only.
 required_open_webui_version: 0.9.0
 requirements: httpx, Pillow
-version: 0.24.0
+version: 0.25.0
 licence: MIT
 """
 
@@ -764,6 +764,11 @@ class Tools:
         items = p.get("chats", [])
         count = p.get("count", len(items))
         query = p.get("query")
+        hint = p.get("hint")
+        if hint:
+            # Task 9.8: search called without a text term — render the
+            # guiding hint instead of an empty table.
+            return f"**{hint}**"
         if query:
             head = f"**Search results for '{query}': {count}**"
         else:
@@ -1160,10 +1165,12 @@ class Tools:
         When ``emitter`` is provided, ``action`` (a short progress label such
         as "Querying your chats…") drives the UI status events: a ``status``
         ``done=False`` at start and ``done=True`` at completion, both gated by
-        ``verbose`` (the user's choice, else the admin valve). On failure a
-        single ``chat:message:error`` is emitted — ALWAYS visible, never gated
-        by verbose, and at most one per call (callers consolidate batch
-        failures into one summary instead of flooding the user).
+        ``verbose`` (the user's choice, else the admin valve). Failures are
+        returned to the model as plain text (``Error: …``) — the model sees
+        them in the tool call output and can react. No ``chat:message:error``
+        event is emitted: in Open WebUI v0.10.2 that event marks the message
+        as errored and the frontend BLOCKS the next send ("Oops! There was an
+        error in the previous response."), breaking the conversation.
         """
         secret = self._extract_token_quiet(request)
         show_status = emitter is not None and action is not None
@@ -1174,8 +1181,6 @@ class Tools:
         try:
             result = await coro
         except ToolError as exc:
-            if emitter is not None:
-                await self._emit_error(emitter, str(exc))
             return self._redact(self._error(str(exc), output_format), secret)
         except Exception as exc:  # pragma: no cover - defensive
             # The token is never part of an exception message (it travels in a
@@ -1184,8 +1189,6 @@ class Tools:
             message = (
                 f"Unexpected internal error ({type(exc).__name__}); see server logs."
             )
-            if emitter is not None:
-                await self._emit_error(emitter, message)
             return self._redact(
                 self._error(message, output_format),
                 secret,
@@ -1907,9 +1910,11 @@ class Tools:
         ``text`` must contain a real search term (a word that is not a UI
         filter prefix). A call whose tokens are ONLY UI filter prefixes
         (``pinned:true``, ``tag:meta``, ``folder:name``, ``tag:none``, ...)
-        is an error — use get_chats(scope=...) or get_folders for filtered
-        listings instead; this tool matches text. The one exception is a
-        valid ``folder:`` filter, which returns exactly that folder's chats.
+        searches nothing: instead of an error the tool returns a short
+        pointer to the right list tool (e.g. for ``tag:tool`` it suggests
+        ``get_chats(tag="tool")``, for ``pinned:true``
+        ``get_chats(scope="pinned")``). The one exception is a valid
+        ``folder:`` filter, which returns exactly that folder's chats.
 
         The backend supports the UI filter prefixes, all server-side:
         ``tag:name``, ``folder:name``, ``pinned:true/false``,
@@ -1929,12 +1934,13 @@ class Tools:
 
         Backend notes: (1) the backend's orphan-tag cleanup (a ``tag:``
         query with zero matches deletes the tag's catalog entry) only fires
-        through ``get_chats(tag=...)`` — a lone ``tag:`` here is an error
-        before any request, so this tool can never trigger it; (2) search
-        excludes archived chats, so a tag used only on archived chats is
-        visible via ``get_chats(tag=...)`` but not searchable here.
+        through ``get_chats(tag=...)`` — a lone ``tag:`` here never reaches
+        the backend (it returns the pointer above), so this tool can never
+        trigger it; (2) search excludes archived chats, so a tag used only
+        on archived chats is visible via ``get_chats(tag=...)`` but not
+        searchable here.
 
-        :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted as refinements; folder: names resolved client-side).
+        :param text: the search term (matched against chat titles and messages; UI filter prefixes accepted as refinements; folder: names resolved client-side; a call with no text term returns a pointer to get_chats()/get_tags()/get_folders()).
         """
         output_format = self._resolve_output_format(__user__)
         return await self._run(
@@ -1956,6 +1962,53 @@ class Tools:
     def _is_ui_prefix(tok: str) -> bool:
         """True if a token is a UI filter prefix (tag:, folder:, pinned:, ...)."""
         return tok.lower().startswith(_SEARCH_UI_PREFIXES)
+
+    @staticmethod
+    def _search_no_term_hint(tokens: list) -> str:
+        """Guide for search_chats called without a text term (task 9.8).
+
+        Maps the pure-prefix tokens to the correct list tool, so the agent
+        self-corrects instead of guessing:
+        - tag:NAME -> get_chats(tag="NAME") (or get_tags() for the catalog)
+        - pinned:true -> get_chats(scope="pinned")
+        - shared:true -> get_chats(scope="shared")
+        - archived:true -> get_chats(scope="archived")
+        - tag:none -> get_tags() + get_chats() (no tag-filtered listing)
+        - anything else -> get_chats(scope=...)/get_folders
+        """
+        lower = [t.lower() for t in tokens]
+        for t in lower:
+            if t.startswith("tag:") and t != "tag:none":
+                name = t[len("tag:"):]
+                return (
+                    f"search_chats needs a text term to search; to list chats "
+                    f"with the tag {name!r} use get_chats(tag={name!r}) (or "
+                    "get_tags() for the tag catalog)."
+                )
+        if any(t == "pinned:true" for t in lower):
+            return (
+                "search_chats needs a text term to search; to list pinned "
+                "chats use get_chats(scope='pinned')."
+            )
+        if any(t == "shared:true" for t in lower):
+            return (
+                "search_chats needs a text term to search; to list shared "
+                "chats use get_chats(scope='shared')."
+            )
+        if any(t == "archived:true" for t in lower):
+            return (
+                "search_chats needs a text term to search; to list archived "
+                "chats use get_chats(scope='archived')."
+            )
+        if any(t == "tag:none" for t in lower):
+            return (
+                "search_chats needs a text term to search; chats without "
+                "tags are listed by get_chats() (tags come from get_tags())."
+            )
+        return (
+            "search_chats needs a text term to search; for filtered listings "
+            "use get_chats(scope='pinned'|'shared'|'archived') or get_folders()."
+        )
 
     async def _resolve_folder_filters(self, tokens: list, token: str) -> list:
         """Resolve ``folder:`` search prefixes to the backend's canonical form.
@@ -2042,10 +2095,19 @@ class Tools:
         has_text = any(not self._is_ui_prefix(tok) for tok in tokens)
         has_folder = any(tok.lower().startswith("folder:") for tok in tokens)
         if not has_text and not has_folder:
-            raise ToolError(
-                "search_chats requires a text term; use get_chats("
-                'scope="pinned"|"shared"|"archived") or get_folders for '
-                "filtered listings."
+            # Task 9.8: a call whose tokens are ONLY UI filter prefixes
+            # searches nothing — it would silently return a full listing
+            # (the backend strips the prefixes and matches empty text). This
+            # is a USAGE error by the agent, not a data failure: return an
+            # informative guide instead of a ToolError. A ToolError would
+            # emit the chat:message:error path and, in v0.10.2, mark the
+            # message errored and BLOCK the next send — breaking the
+            # conversation. As a plain result the model sees the pointer and
+            # can correct itself with get_chats()/get_tags().
+            hint = self._search_no_term_hint(tokens)
+            return self._ok(
+                {"query": " ".join(tokens), "count": 0, "total": 0, "chats": [], "hint": hint},
+                "chats", output_format=output_format,
             )
         query = " ".join(tokens)
         _status, _ct, body = await self._api_get_json(
@@ -2495,29 +2557,6 @@ class Tools:
         except Exception:
             pass  # Event emission is best-effort
 
-    async def _emit_error(self, emitter: Optional[Any], message: str) -> None:
-        """Emit a single visible error event for the message.
-
-        Uses ``chat:message:error`` (the error block the frontend renders in
-        the assistant message — Error.svelte) rather than a status event, so
-        failures stand out from progress. Errors are NOT gated by ``verbose``
-        (they must always be visible), but callers consolidate: at most ONE
-        error event per tool call — e.g. delete_files reports a batch failure
-        as a single "N of M files failed" instead of one event per file, so
-        the user is never flooded.
-        """
-        if emitter is None:
-            return
-        try:
-            await emitter({
-                "type": "chat:message:error",
-                "data": {"error": {"content": message}},
-            })
-        except asyncio.CancelledError:
-            raise  # never swallow cancellation
-        except Exception:
-            pass  # Event emission is best-effort
-
     async def delete_files(self, file_ids: list, __request__: Any = None,
                            __user__: dict = None,
                            __event_emitter__: Any = None) -> str:
@@ -2575,14 +2614,10 @@ class Tools:
             except Exception as exc:  # defensive — per-file isolation
                 failed.append({"file_id": file_id, "error": f"Unexpected error ({type(exc).__name__})"})
 
-        # A batch with failures emits ONE consolidated error event (the
-        # per-id detail stays in the returned text), so a multi-file cleanup
-        # never floods the user with one error per failed file.
-        if failed and __event_emitter__ is not None:
-            await self._emit_error(
-                __event_emitter__,
-                f"{len(failed)} of {len(unique)} file(s) could not be deleted.",
-            )
+        # Batch failures are reported in the returned text (per id, and the
+        # count below). No chat:message:error event is emitted — in v0.10.2
+        # that event marks the message as errored and blocks the next send.
+        # The model sees the failures in the tool-call output and can react.
 
         return self._ok({
             "requested": len(unique),

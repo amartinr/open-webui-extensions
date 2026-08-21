@@ -164,10 +164,11 @@ async def test_live_search_text_and_prefixes():
         out = await tools.search_chats(term, __request__=live_request())
         assert "Error:" not in out, f"term {term!r} failed: {out[:200]}"
         assert "Search results for" in out, f"term {term!r} missing header"
-    # 9.8: pure-prefix calls are errors, never silent full listings.
+    # 9.8: pure-prefix calls return a guiding hint (no Error:, no listing).
     for term in ("tag:tool", "pinned:true", "archived:true", "tag:none"):
         out = await tools.search_chats(term, __request__=live_request())
-        assert "Error:" in out and "requires a text term" in out, term
+        assert "Error:" not in out, f"pure-prefix {term!r} must not be an Error: {out[:200]}"
+        assert "get_chats" in out or "get_tags" in out, f"{term!r} missing guide: {out[:200]}"
     # json mode passes the query through (lenient to truncation on big sets)
     out = await live_tools("json").search_chats("meta", __request__=live_request())
     try:

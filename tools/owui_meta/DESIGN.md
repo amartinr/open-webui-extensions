@@ -306,11 +306,13 @@ async def <method>(self, __user__: dict, __request__: Request, <typed parameters
 Via `__event_emitter__`, statuses can be emitted during execution (implemented in Iteration 4):
 - `status` "Querying your chats…" (start, `done=False`)
 - `status` same action with `done=True` (completion — stops the shimmer)
-- `chat:message:error` on failure (the error block rendered in the message)
+- *Failures are NOT emitted as events* (v0.25.0) — see below.
 
 This makes the tool's execution visible in the UI, just like `search_web` or the built-in tools.
 
-**Verbosity (2026-08-03):** progress `status` events are gated by a `verbose` valve (admin + per-user; per-user overrides admin; default `True`). **Errors are NOT gated**: `chat:message:error` is always emitted on failure, and **consolidated** — at most one error event per tool call. A batch `delete_files` with several failures emits a single "N of M file(s) could not be deleted" summary (the per-id detail stays in the returned text), so repeated failures never flood the user with toasts.
+**Verbosity (2026-08-03):** progress `status` events are gated by a `verbose` valve (admin + per-user; per-user overrides admin; default `True`).
+
+**Errors are returned as plain text to the model, never as a `chat:message:error` event (v0.25.0).** In Open WebUI v0.10.2 the frontend (`Chat.svelte` send path) does `if (currentMessage.error && !currentMessage.content) { toast.error('Oops! There was an error in the previous response.'); return; }` — a `chat:message:error` event marks the assistant message errored and **blocks the next send**, breaking the conversation (the user can only continue via a new branch). Verified live 2026-08-21 (logs show the tool calls returning 200 while the UI still blocked). Since v0.25.0 the tool never emits that event: a failure returns `Error: …` as the tool-call output (which the model sees and can react to), and the conversation continues. `delete_files` batch failures are likewise reported only in the returned text (count + per-id detail), never as an event.
 
 **File attachments (2026-08-03, Option B for images):** `get_file_content` shows the file in the assistant message without dumping bytes into the context:
 - **Images** → `embeds` event with an HTML `<img>` fragment (contained, rounded, capped height) rendered by `FullHeightIframe` srcdoc — the non-markdown, non-artifact embed mechanism. The returned note tells the model the image is already visible and must not embed/display it again as markdown (mirrors `generate_image`'s contract).
@@ -568,17 +570,19 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 
 **Design (implemented in `_search_chats` via `_resolve_folder_filters`, zero new routes):** greedy multi-word phrase matching against the user's folders (`GET /api/v1/folders/`, already allowlisted, fetched once per call when a `folder:` token is present; backend normalization semantics via `_normalize_folder`) → **rewrite to the underscore-joined single token** (`folder:Open_WebUI_meta` — the backend treats `_`≡space, so it matches exactly; verified live: 38 chats for the long folder name) → **strip the consumed words** from the free text (kills the leak) → **unknown folder → clean error listing the valid names** (no more silent no-filter; a folders-route failure such as 403 propagates as the mapped error). Mixed text stays AND (`"foo folder:Open WebUI meta"` → `foo folder:Open_WebUI_meta`). **9.8 interplay:** a resolved valid `folder:` is a legitimate scope, so `search_chats("folder:Open WebUI meta")` returns exactly that folder's chats instead of the 9.8 text-term error; unknown folder names and non-folder pure prefixes still error.
 
-### 8.9.8 `search_chats` — search term required ✅ DONE (v0.22.0)
+### 8.9.8 `search_chats` — search term required ✅ DONE (v0.22.0, refined v0.25.0)
 
-**Decision (implemented):** `search_chats(text)` must require a **textual search term**. Calls whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must **error** — never return a full listing. The prefixes stay as **optional refinements** of an actual text search; pure filtered listing belongs to the list tools (`get_chats(scope=…)`, `get_folders`, …), never to `search_chats`.
+**Decision (implemented):** `search_chats(text)` must require a **textual search term**. Calls whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must never return a full listing. The prefixes stay as **optional refinements** of an actual text search; pure filtered listing belongs to the list tools (`get_chats(scope=…)`, `get_folders`, …), never to `search_chats`.
 
 **Why:** `search_chats` was being (mis)used as a filtered listing — `"pinned:true"` / `"tag:none"` returned full listings, and `"folder:Open WebUI meta"` returned 1 chat instead of the folder's (the 9.7 bug). Searching (text matching) and listing (filtered collections) must stay separate: predictable ("nothing searched" ≠ "nothing found") and correct API usage (list tools already exist).
 
-**Implementation (done in `_search_chats`):** tokenize by whitespace; a token is a UI prefix if it starts with `_SEARCH_UI_PREFIXES` (`tag:`/`folder:`/`pinned:`/`archived:`/`shared:`); **no text token → `ToolError`** pointing to the list tools — raised before any request (no network, no orphan-tag side effect). Otherwise proceed (9.1 tag AND + the remaining text). Signature unchanged.
+**Implementation (done in `_search_chats`):** tokenize by whitespace; a token is a UI prefix if it starts with `_SEARCH_UI_PREFIXES` (`tag:`/`folder:`/`pinned:`/`archived:`/`shared:`); **no text token → a guiding hint** via `_search_no_term_hint` (per-prefix pointer to the correct list tool; see PLAN §9.8), rendered by `_render_chats` — raised before any request (no network, no orphan-tag side effect). A `folder:` prefix resolves through 9.7 and counts as a legitimate scope. Otherwise proceed (9.1 tag AND + the remaining text). Signature unchanged.
 
-**Alternatives considered:** empty result instead of error (rejected — indistinguishable from "nothing found"); keep hybrid search+listing (rejected — the current confusing state); a `list_only` flag (rejected — redundant with list tools).
+**v0.25.0 refinement — the v0.10.2 blocking-error problem:** the original implementation raised a `ToolError`, and `_run` emitted a `chat:message:error` event. In v0.10.2 the frontend (`Chat.svelte` send path) blocks the next send when `currentMessage.error && !currentMessage.content` ("Oops! There was an error in the previous response."), breaking the conversation. **Fix:** `_run` never emits `chat:message:error` (errors are plain text to the model), and the 9.8 usage case returns a hint instead of an error. See §8.5.
 
-**Synergies realized:** the lone-`tag:` **orphan-tag cleanup is now unreachable via `search_chats`** (pure-prefix calls error before the backend — simplifies §8.9.1); `get_chats(tag=)` keeps its documented cleanup side effect; the 9.7 folder fix remains needed for text+folder combos.
+**Alternatives considered:** empty result instead of error (initially rejected — indistinguishable from "nothing found"; adopted in the refined hint form); keep hybrid search+listing (rejected — the current confusing state); a `list_only` flag (rejected — redundant with list tools).
+
+**Synergies realized:** the lone-`tag:` **orphan-tag cleanup is now unreachable via `search_chats`** (pure-prefix calls never reach the backend — simplifies §8.9.1); `get_chats(tag=)` keeps its documented cleanup side effect; the 9.7 folder fix remains needed for text+folder combos.
 
 ### 8.9.9 Unify chat listing into `get_chats(scope=…)` ✅ DONE (v0.21.0)
 

@@ -96,7 +96,12 @@ async def test_user_valve_verbose_overrides_admin():
     assert len(statuses) == 2
 
 
-async def test_failure_emits_single_error_event():
+async def test_failure_does_not_emit_error_event():
+    # v0.10.2: a chat:message:error event marks the message errored and the
+    # frontend BLOCKS the next send ("Oops! There was an error in the
+    # previous response."). So failures must NOT emit it — the error is
+    # returned to the model as plain text (visible in the tool-call output)
+    # and the conversation can continue.
     def handler(request):
         return json_response({"unexpected": request.url.path}, status=500)
 
@@ -105,13 +110,12 @@ async def test_failure_emits_single_error_event():
     out = await tools.get_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
     errors = [e for e in emitter.events if e["type"] == "chat:message:error"]
-    assert len(errors) == 1
-    assert "HTTP 500" in errors[0]["data"]["error"]["content"]
-    # error is shown even though the request failed
+    assert errors == [], "chat:message:error must not be emitted (breaks the chat in v0.10.2)"
+    # the error is still visible to the model as plain text
     assert "Error:" in out
 
 
-async def test_error_event_shown_even_when_verbose_false():
+async def test_error_never_emits_event_even_when_verbose_false():
     def handler(request):
         return json_response({"unexpected": request.url.path}, status=500)
 
@@ -121,12 +125,13 @@ async def test_error_event_shown_even_when_verbose_false():
     await tools.get_files(__request__=FakeRequest(), __event_emitter__=emitter)
 
     errors = [e for e in emitter.events if e["type"] == "chat:message:error"]
-    assert len(errors) == 1  # errors are never gated by verbose
+    assert errors == []  # never emitted, regardless of verbose
 
 
-async def test_batch_delete_failures_emit_single_consolidated_error():
-    # Two files: one ok, one fails at the DELETE stage -> ONE error event,
-    # never two toasts, even though a failure happened per file.
+async def test_batch_delete_failures_do_not_emit_error_event():
+    # Two files: one ok, one fails at the DELETE stage. The failure is
+    # reported in the returned text (count + per-id detail); NO
+    # chat:message:error event (it would break the chat in v0.10.2).
     file_map = {
         FILE_ID: ("a.pdf", True),
         FILE_ID_2: ("b.pdf", False),  # shared / no write access
@@ -150,12 +155,13 @@ async def test_batch_delete_failures_emit_single_consolidated_error():
                                    __event_emitter__=emitter)
 
     errors = [e for e in emitter.events if e["type"] == "chat:message:error"]
-    assert len(errors) == 1
-    assert "1 of 2 file(s) could not be deleted" in errors[0]["data"]["error"]["content"]
+    assert errors == [], "chat:message:error must not be emitted for batch failures"
 
     payload = json.loads(out)
     assert payload["deleted_count"] == 1
     assert payload["failed_count"] == 1
+    assert payload["requested"] == 2
+    assert "could not be deleted" in payload["failed"][0]["error"] or "Forbidden" in payload["failed"][0]["error"]
 
 
 async def test_events_never_contain_the_token():

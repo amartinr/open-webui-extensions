@@ -507,11 +507,11 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 
 **Tests** (`test/test_iteration9.py`): mock — multi-word folder resolution + leak stripping (asserts the exact `text` param sent), underscore single-token rewrite, single-word folder, unknown-folder error listing names (search endpoint never hit), text+folder AND, folders-route failure → clean error. Live (env-gated, `test_live.py::test_live_search_folder_name_resolution`): a real folder name (with spaces) resolves and returns that folder's chats; a folder UUID → clean "Unknown folder" error.
 
-### 9.8 `search_chats` — require a search term ✅ DONE (v0.22.0)
+### 9.8 `search_chats` — require a search term ✅ DONE (v0.22.0, refined v0.25.0)
 
 **Commit:** *(this iteration's commit)*
 
-**Decision (implemented):** `search_chats(text)` must require a **textual search term**. A call whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must **error** — never return a full listing. The prefixes remain available as **optional refinements** that narrow an actual text search. Pure filtered listing belongs to the dedicated list tools (`get_chats(scope=…)`, `get_folders`, `get_tags`) — never to `search_chats`.
+**Decision (implemented):** `search_chats(text)` must require a **textual search term**. A call whose tokens are ONLY UI filter prefixes (`pinned:true`, `tag:meta`, `folder:<name>`, `tag:none`, …) must never return a full listing. The prefixes remain available as **optional refinements** that narrow an actual text search. Pure filtered listing belongs to the dedicated list tools (`get_chats(scope=…)`, `get_folders`, `get_tags`) — never to `search_chats`.
 
 **Why (the mis-use that prompted it, live 2026-08-21):**
 - `search_chats("pinned:true")` and `search_chats("tag:none")` returned **full listings** — search silently doubling as listing, with the `tag:none` → dozens-of-chats surprise.
@@ -521,31 +521,35 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 
 **Implementation (done in `_search_chats`):**
 1. Tokenize `text` by whitespace; a token is a UI prefix if it starts with `_SEARCH_UI_PREFIXES` (`tag:`, `folder:`, `pinned:`, `archived:`, `shared:` — case-insensitive), otherwise it is a text token.
-2. **No text token → `ToolError`** with a pointer to the list tools: `search_chats requires a text term; use get_chats(scope="pinned"|"shared"|"archived") or get_folders for filtered listings.` (raised before any request — no network hit, no orphan-tag side effect).
+2. **No text token → a guiding hint, NOT a `ToolError`.** The hint is mapped per prefix by `_search_no_term_hint`: `tag:NAME` → `get_chats(tag="NAME")` (or `get_tags()`), `pinned:true` → `get_chats(scope="pinned")`, `shared:true`/`archived:true` → the matching scope, `tag:none` → `get_tags()` + `get_chats()`, anything else → `get_chats(scope=...)`/`get_folders()`. No request is issued. (v0.22.0 originally raised a `ToolError`; **refined v0.25.0** — see below.)
 3. Otherwise proceed as before — 9.1 (tag AND passthrough) applies; 9.7 (folder-name resolution) remains for text+folder combos. Signature unchanged (`text` stays the only required param).
 
-**Synergies realized:** the **lone-`tag:` orphan-tag cleanup is now unreachable via `search_chats`** (pure-prefix calls error before the backend is hit); `get_chats(tag=)` remains the listing path and keeps its documented cleanup side effect; the 9.7 folder fix is still needed for text+folder combos (`"ventilador folder:Open WebUI meta"`).
+**Refinement v0.25.0 — the v0.10.2 blocking-error problem:** a `ToolError` from any method made `_run` emit a `chat:message:error` event. In Open WebUI v0.10.2 the frontend (`Chat.svelte`, send path) does `if (currentMessage.error && !currentMessage.content) { toast.error('Oops! There was an error in the previous response.'); return; }` — the message is marked errored and the NEXT SEND IS BLOCKED, breaking the conversation (the user could only continue via a new branch). This affected every ToolError (e.g. `get_skill` 404, `get_chats` invalid scope, and the 9.8 usage error). **Fix (v0.25.0):** `_run` no longer emits `chat:message:error` at all — errors are returned to the model as plain text (visible in the tool-call output) and the conversation can continue. The 9.8 usage case became a normal guiding result (a hint) rather than an error, so the model self-corrects.
+
+**Synergies realized:** the **lone-`tag:` orphan-tag cleanup is now unreachable via `search_chats`** (pure-prefix calls never reach the backend); `get_chats(tag=)` remains the listing path and keeps its documented cleanup side effect; the 9.7 folder fix is still needed for text+folder combos (`"ventilador folder:Open WebUI meta"`).
 
 **Alternatives considered:**
-- *Return an empty result instead of an error* — **rejected**: "nothing searched" would be indistinguishable from "nothing found" (the exact predictability problem this decision fixes); an error teaches the model the correct tool.
+- *Return an empty result instead of an error* — initially rejected ("nothing searched" would be indistinguishable from "nothing found"), later adopted in the refined form: the hint makes the two distinguishable while not breaking the chat.
 - *Keep `search_chats` as a hybrid search+listing* — rejected: the current state and the source of the confusion.
 - *Add a flag (e.g. `list_only`) to `search_chats`* — rejected: extra surface; the dedicated list tools already exist.
+- *Keep the `ToolError` but drop the `chat:message:error` event* — effectively what v0.25.0 does; the 9.8 case is a plain result (no error path at all), the other methods keep their text error.
 
 **Acceptance (verified by tests, 2026-08-21):**
-- `search_chats("pinned:true")` → **error** (never a listing of pinned chats). ✓
-- `search_chats("tag:comfyui")` / `search_chats("tag:none")` → **error**. ✓ (`folder:MyFolder` also errors when it is a single token; multi-word `folder:` names are the 9.7 case — the trailing words are text and the call proceeds)
+- `search_chats("pinned:true")` → hint pointing to `get_chats(scope="pinned")` (never a listing, never an Error:). ✓
+- `search_chats("tag:tool")` → hint pointing to `get_chats(tag="tool")` / `get_tags()`. ✓ (`folder:MyFolder` also hints when it is a single token; multi-word `folder:` names are the 9.7 case — the trailing words are text and the call proceeds)
 - `search_chats("ventilador pinned:true")` → only pinned chats matching "ventilador" (prefix still narrows). ✓
-- `search_chats("Open WebUI folder:Open WebUI meta")` → a real search (text AND folder) — depends on 9.7 (still planned).
+- `search_chats("Open WebUI folder:Open WebUI meta")` → a real search (text AND folder) — depends on 9.7.
 - Listing all chats / by tag / by folder / pinned → via `get_chats(scope=…)` (9.9) and `get_folders` (9.10), never via `search_chats`.
 
-**Tests updated** (`test/test_iteration9.py`, `test/test_live.py`):
-- `test_search_chats_tag_none_passthrough` (mock) → now expects the error (no request issued).
-- `test_search_chats_pure_prefix_errors_for_each_prefix` (new): every UI prefix alone → error, zero network.
+**Tests updated** (`test/test_iteration9.py`, `test/test_events.py`, `test/test_live.py`):
+- `test_search_chats_tag_none_passthrough` (mock) → now expects the hint (no request issued).
+- `test_search_chats_pure_prefix_returns_guide_for_each_prefix` (new): every UI prefix alone → hint, zero network.
+- `test_events`: `chat:message:error` no longer emitted on failure (single failure, verbose off, batch delete) — replaced by `test_failure_does_not_emit_error_event`, `test_error_never_emits_event_even_when_verbose_false`, `test_batch_delete_failures_do_not_emit_error_event`.
 - `test_search_chats_text_plus_prefix_still_works` (new): text+prefix passes through unchanged (AND).
-- `test_live_chats_tag_filter_matches_search_prefix` → reworked: a real term (a title from the tag's own chats) + `tag:` must be a subset of `get_chats(tag=)`.
+- `test_live_chats_tag_filter_matches_search_prefix` → reworked: a real term + `tag:` must be a subset of `get_chats(tag=)`.
 - `test_live_search_tag_consistent_with_get_chats_tag` → reworked: same subset check.
-- `test_live_search_text_and_prefixes` → split: text(+prefix) terms succeed; pure-prefix terms assert the error.
-- `test_tag_semantics_documented_in_docstrings` → + "real search term" / "get_folders" needles.
+- `test_live_search_text_and_prefixes` → split: text(+prefix) terms succeed; pure-prefix terms assert the hint (no Error:).
+- `test_tag_semantics_documented_in_docstrings` → + "real search term" / "get_folders" / "get_tags" needles.
 
 ### 9.9 Unify the chat list methods into `get_chats(scope=…)` ✅ DONE (v0.21.0)
 
@@ -634,7 +638,16 @@ get_chats(scope="all", limit=10, sort_by="updated_at", sort_order="desc", tag=No
 - Docstrings + README updated (folder: name resolution documented).
 - Frontmatter `version:` → v0.23.0.
 
-**Still pending for Iteration 9 (v0.23.0+):** 9.5 (`delete_files` destructive test). 9.6 DEFERRED (see §7).
+**Task 9.8 refinement + conversation-blocking fix (v0.25.0, one commit):**
+
+- **v0.10.2 blocking-error problem (root-caused from Chat.svelte + live logs):** any `ToolError` made `_run` emit `chat:message:error`; the frontend then marks the assistant message errored and BLOCKS the next send ("Oops! There was an error in the previous response."), breaking the conversation. Affected every error path (e.g. `get_skill` 404, `search_chats` usage error).
+- **Fix:** `_run` no longer emits `chat:message:error` — errors are returned to the model as plain text (visible in the tool-call output); the conversation continues. `delete_files` batch failures likewise stop emitting the consolidated error event (the per-id detail stays in the text).
+- **9.8 refined:** the pure-prefix case is no longer a `ToolError` — `_search_no_term_hint` returns a per-prefix guiding hint (`tag:NAME` → `get_chats(tag="NAME")`/`get_tags()`; `pinned:true` → `get_chats(scope="pinned")`; `shared:true`/`archived:true` → the scope; `tag:none` → `get_tags()`+`get_chats()`; else → scopes/`get_folders()`). `_render_chats` renders the hint instead of an empty table.
+- Tests: `test_events.py` rewritten (no `chat:message:error` on failure/verbose-off/batch-delete); `test_iteration9.py` pure-prefix tests now assert the hint per prefix; `test_live.py` pure-prefix loop asserts the hint. Full suite green — **175 passed / 22 skipped** (live env-gated) on 2026-08-21.
+- Docs: PLAN §9.8 rewritten with the refinement + the v0.10.2 blocking-error root cause; DESIGN §8.5/§8.9.8 updated; README search_chats + error-events wording updated.
+- Frontmatter `version:` → v0.25.0.
+
+**Still pending for Iteration 9 (v0.25.0+):** 9.5 (`delete_files` destructive test). 9.6 DEFERRED (see §7).
 
 ## 8. Out of scope (per DESIGN §2)
 
