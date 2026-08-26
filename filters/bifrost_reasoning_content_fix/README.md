@@ -48,71 +48,63 @@ break clients that expect the standard `reasoning_content` field.
 }
 ```
 
-## Why this matters: how Bifrost's SSE differs from OpenAI-compatible SSE
+## Bifrost SSE vs. OpenAI-compatible SSE
 
-If you're calling Bifrost directly with an OpenAI-compatible client (ours is),
-the difference becomes obvious in the raw stream. A proper OpenAI SSE sends
-each chunk as a self-contained event where the message flows through a single
-standard field (`delta.content`) and, for reasoning models, a standard
-`delta.reasoning_content` field.
+An OpenAI SSE sends each chunk as a self-contained event: message text flows
+through a single `delta.content` and reasoning through `delta.reasoning_content`.
 
 Bifrost instead:
 
-- puts the reasoning in **proprietary** fields `delta.reasoning` and
+- puts reasoning in **proprietary** fields `delta.reasoning` and
   `delta.reasoning_details` instead of `delta.reasoning_content`;
-- **sends the same fragment twice** — `reasoning` and `reasoning_details`
-  carry the same incremental text, and both accumulate chunk by chunk
-  (nothing is ever sent in the standard field);
-- never emits the standard `reasoning_content`, so to an OpenAI-compatible
-  client it looks like the model quietly never reasoned;
+- sends each fragment **twice** — both fields carry the same incremental
+  text, and neither is the standard field;
+- never emits the standard `reasoning_content`, so an OpenAI-compatible
+  client sees no reasoning at all;
 - emits `reasoning_tokens` (non-standard) in the final `usage`.
 
-The filter exists to re-map all of that back to the OpenAI shape so your
-OpenAI-compatible harness can consume it.
+The filter re-maps this to the OpenAI shape so an OpenAI-compatible client
+can consume it.
 
 ## How it works
 
 ### stream (provider → Open WebUI, streaming)
 
-Open WebUI >= 0.11 refactored the filter pipeline: it no longer lets a
-filter wrap the `StreamingResponse` from the `outlet`. Instead it parses
-**each SSE chunk into a dict** (`JSONCodec.loads(payload)`), passes that
-dict to the filter's `stream()` method (`filter_type='stream'`), and
-re-serialises the result. So the fix now runs **per event** on
-`event['choices'][i]['delta']`:
+Open WebUI >= 0.11 no longer lets a filter wrap the `StreamingResponse`
+from the `outlet`. It parses **each SSE chunk into a dict**
+(`JSONCodec.loads(payload)`), passes it to the filter's `stream()`
+(`filter_type='stream'`), and re-serialises the result. The fix runs
+**per event** on `event['choices'][i]['delta']`:
 
 1. **`delta.reasoning`** → appended to `delta.reasoning_content`.
-2. **`delta.reasoning_details`** → only used as a fallback when
-   `reasoning` carried no text (some providers drop `delta.reasoning`);
-   its text blocks are appended to `reasoning_content`. Never discarded —
-   this was the cause of the "model stops reasoning" regression.
-3. **Top-level `event['usage']`** (final streaming chunk) → stripped of
-   `reasoning_tokens`.
-4. **Exception safety**: errors are logged and the event is passed
-   through unchanged to avoid crashing the SSE stream.
+2. **`delta.reasoning_details`** → fallback only when `reasoning` carried
+   no text (some providers drop `delta.reasoning`); its blocks are appended
+   to `reasoning_content`. Never discarded — dropping it was the "model
+   stops reasoning" bug.
+3. **Top-level `event['usage']`** (final streaming chunk) → `reasoning_tokens`
+   stripped.
+4. **Exception safety**: errors are logged and the event passes through
+   unchanged.
 
-### Validated empirically against a live Bifrost endpoint
+### Validation (live Bifrost endpoint)
 
 Captured raw SSE from Bifrost (`deepseek/deepseek-v4-flash`, `stream: true`)
-and ran the full stream through `stream()` exactly as Open WebUI >= 0.11
-does (parse chunk → `stream()` → re-serialise). Findings:
+and ran the stream through `stream()` exactly as Open WebUI >= 0.11 does
+(parse chunk → `stream()` → re-serialise). Findings:
 
-- The chunk carries `choices[0].delta` plus a top-level `model` and a final
+- Each chunk carries `choices[0].delta`, a top-level `model`, and a final
   `usage`.
-- Each reasoning fragment arrives **duplicated** in both `delta.reasoning`
-  and `delta.reasoning_details` with the **same incremental text**; the
-  rewriter keeps `delta.reasoning` as the source of truth and drops the
-  redundant `reasoning_details` to avoid double-appending.
-- Detection in `stream()` is **content-driven** (it only rewrites chunks
-  that actually carry Bifrost fields), so it works regardless of the
-  `event['model']` value — which Open WebUI does not always expose in a
-  way that matches the valve prefixes. Ordinary non-Bifrost chunks pass
-  through untouched.
-- Result: 125 chunks processed live (and a larger live run),
-  `reasoning_content` reconstructed without duplication, `content`
-  untouched, `usage.completion_tokens_details` no longer contains
-  `reasoning_tokens`, and no Bifrost residue left in any delta (the
-  SSE stays valid for the OpenAI-compatible client).
+- Reasoning fragments are sent **twice**, in both `delta.reasoning` and
+  `delta.reasoning_details`, with the same incremental text. The rewriter
+  uses `delta.reasoning` as the source of truth and drops the redundant
+  `reasoning_details` to avoid double-appending.
+- `stream()` detection is **content-driven**: it only rewrites chunks that
+  carry Bifrost fields, so it does not depend on `event['model']` matching
+  the valve prefixes. Non-Bifrost chunks are left unchanged.
+- Result: `reasoning_content` reconstructed without duplication, `content`
+  untouched, `completion_tokens_details.reasoning_tokens` stripped, and no
+  Bifrost residue left in any delta (SSE stays valid for an
+  OpenAI-compatible client).
 
 ### outlet (provider → Open WebUI, non-streaming only)
 

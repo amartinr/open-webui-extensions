@@ -198,24 +198,19 @@ side-by-side before/after walkthrough.
 
 ## Robust SSE forwarding (v2.6.0)
 
-When streaming, the pipe proxies the gateway's raw SSE to Open WebUI. In
-v2.6.0 `_stream` filters the relay so **only well-formed OpenAI `data:`
-chunk events** are forwarded. It drops everything else:
+The pipe proxies the gateway's raw SSE to Open WebUI. `_stream` forwards
+only well-formed OpenAI `data: { ... }` chunks; everything else is
+dropped:
 
-- **SSE comments / keep-alives** (lines starting with `:`), which a proxy
-  or a long-thinking Bifrost may inject mid-stream. Open WebUI's pipe
-  handler turns any line that does **not** start with `data:` into **chat
-  content**, so a stray `: heartbeat` used to be rendered into the reply
-  and desynced the reasoning delta stream — making reasoning
-  appear/disappear intermittently.
-- Blank lines and `data: [DONE]` (Open WebUI emits its own closing
-  `[DONE]`/`finish_reason: "stop"` chunk, so duplicating it is avoided).
+- **SSE comments / keep-alives** (lines starting with `:`). Open WebUI's
+  pipe handler renders any non-`data:` line as chat content, so keep-alives
+  (e.g. a proxy's `: heartbeat`) leaked into the reply and desynced the
+  reasoning deltas.
+- Blank lines and `data: [DONE]` (Open WebUI emits its own closing chunk).
 - Any other non-JSON noise.
 
-Only lines that start with `data: {` (a JSON chunk) are passed through.
-This keeps the relay OpenAI-compatible and the reasoning deltas aligned
-with the frontend. Validated against a live Bifrost stream (long
-reasoning): 1917 events, 0 corruption, reasoning aligned.
+Validated against a live Bifrost stream (long reasoning): 1917 events,
+0 corruption.
 
 ---
 
