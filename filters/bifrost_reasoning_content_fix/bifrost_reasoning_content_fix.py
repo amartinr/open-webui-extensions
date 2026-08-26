@@ -5,23 +5,36 @@ author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
 description: >
   Fixes Bifrost's non-standard response format by converting
-  'reasoning' + 'reasoning_details' back to proper 'reasoning_content'.
+  'reasoning' + 'reasoning_details' back to proper 'reasoning_content'
+  using the Open WebUI >= 0.11 per-event stream() filter API.
+  Detection in stream() is content-driven (auto-selective) so it works
+  regardless of the event model id.
   Also cleans up historical messages on the way IN to prevent
   stale non-standard fields from being re-sent.
-required_open_webui_version: 0.9.0
-version: 2.1.0
+required_open_webui_version: 0.11.0
+version: 3.0.1
 """
 
-import json
 import logging
-from typing import Optional, Union
+from typing import Optional
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────
-#  HELPERS (apply to both inlet and outlet)
+#  HELPERS (apply to inlet, outlet and stream)
 # ──────────────────────────────────────────────
+
+
+def _extract_reasoning_text(details) -> str:
+    """reasoning_details is a list of blocks {type: 'reasoning.text', text: ...}."""
+    if not isinstance(details, list):
+        return ""
+    return "".join(
+        item.get("text", "")
+        for item in details
+        if isinstance(item, dict) and item.get("type") == "reasoning.text"
+    )
 
 
 def _has_bifrost_residue(msg: dict) -> bool:
@@ -30,186 +43,21 @@ def _has_bifrost_residue(msg: dict) -> bool:
 
 
 def _normalize_assistant_message(msg: dict) -> dict:
-    """
-    Normalize an assistant message to remove any Bifrost residue:
-      - reasoning_details → reconstruct reasoning_content from its text blocks
-      - reasoning          → reasoning_content
-    """
+    """Normalize an assistant message to remove any Bifrost residue."""
     msg = dict(msg)  # shallow copy to avoid mutating the original
 
-    # 1. Reconstruct reasoning_content from reasoning_details if present
     reasoning_details = msg.pop("reasoning_details", None)
-    if reasoning_details and isinstance(reasoning_details, list):
-        texts = []
-        for item in reasoning_details:
-            if isinstance(item, dict) and item.get("type") == "reasoning.text":
-                texts.append(item.get("text", ""))
-        if texts and not msg.get("reasoning_content"):
-            msg["reasoning_content"] = "".join(texts)
+    if reasoning_details:
+        text = _extract_reasoning_text(reasoning_details)
+        if text and not msg.get("reasoning_content"):
+            msg["reasoning_content"] = text
 
-    # 2. If Bifrost put the field 'reasoning' instead of 'reasoning_content'
     if "reasoning" in msg and "reasoning_content" not in msg:
         msg["reasoning_content"] = msg.pop("reasoning")
     elif "reasoning" in msg:
-        # Both coexist → keep reasoning_content and remove reasoning
         msg.pop("reasoning")
 
     return msg
-
-
-def _fix_chunk(data: dict) -> dict:
-    """Fix a response chunk (streaming or non-streaming)."""
-    choices = data.get("choices")
-    if not choices or not isinstance(choices, list):
-        return data
-
-    for choice in choices:
-        # --- Streaming: delta ---
-        delta = choice.get("delta")
-        if isinstance(delta, dict):
-            if "reasoning" in delta:
-                delta["reasoning_content"] = delta.pop("reasoning")
-            delta.pop("reasoning_details", None)
-
-
-        # --- Non-streaming: message ---
-        msg = choice.get("message")
-        if isinstance(msg, dict):
-            _normalize_assistant_message(msg)
-
-    return data
-
-
-def _fix_sse_line(payload: str) -> str:
-    payload = payload.strip()
-    if not payload or payload == "[DONE]":
-        return payload
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse SSE payload: %s - %s", exc, payload[:200])
-        return payload
-    data = _fix_chunk(data)
-    return json.dumps(data, ensure_ascii=False)
-
-
-def _clean_messages(body: dict) -> dict:
-    """
-    Walk the body 'messages' array and normalize any assistant
-    message carrying non-standard Bifrost fields from previous turns.
-    """
-    body = dict(body)
-    messages = body.get("messages", [])
-    if not messages:
-        return body
-
-    cleaned = []
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            if _has_bifrost_residue(msg):
-                msg = _normalize_assistant_message(msg)
-        cleaned.append(msg)
-
-    body["messages"] = cleaned
-    return body
-
-
-# ──────────────────────────────────────────────
-#  FILTER
-# ──────────────────────────────────────────────
-
-
-class Filter:
-    class Valves(BaseModel):
-        priority: int = Field(default=0, description="Lower runs first.")
-        model_prefixes: str = Field(
-            default="deepseek",
-            description="Comma-separated model ID prefixes that route through Bifrost.",
-        )
-
-    def __init__(self):
-        self.valves = self.Valves()
-
-    async def inlet(self, body: dict, __model__: Optional[dict] = None) -> dict:
-        """
-        On the way in (Open WebUI → provider): clean historical
-        messages so stale reasoning_details / broken Bifrost fields
-        are not re-sent to the upstream API.
-        """
-        model = __model__ or {}
-        model_id = model.get("id", "")
-
-        prefixes = {
-            p.strip() for p in self.valves.model_prefixes.split(",") if p.strip()
-        }
-        if not any(model_id.startswith(p) for p in prefixes):
-            return body
-
-        return _clean_messages(body)
-
-    async def outlet(
-        self, body, __model__: Optional[dict] = None, **kwargs
-    ) -> Union[dict, "StreamingResponse"]:
-        """
-        On the way out (provider → Open WebUI): convert non-standard
-        Bifrost fields back to the standard format.
-        """
-        from starlette.responses import StreamingResponse
-
-        model = __model__ or {}
-        model_id = model.get("id", "")
-
-        prefixes = {
-            p.strip() for p in self.valves.model_prefixes.split(",") if p.strip()
-        }
-        if not any(model_id.startswith(p) for p in prefixes):
-            return body
-
-        # --- Streaming ---
-        if isinstance(body, StreamingResponse):
-            return self._wrap_stream(body)
-
-        # --- Non-streaming (dict) ---
-        if isinstance(body, dict):
-            return _fix_non_streaming(body)
-
-        return body
-
-    def _wrap_stream(self, response: StreamingResponse) -> StreamingResponse:
-        from starlette.responses import StreamingResponse
-
-        async def patched_generator():
-            raw_chunk = b""
-            try:
-                async for raw_chunk in response.body_iterator:
-                    chunk = (
-                        raw_chunk.decode("utf-8", errors="replace")
-                        if isinstance(raw_chunk, bytes)
-                        else raw_chunk
-                    )
-
-                    lines = chunk.split("\n")
-                    out_lines = []
-                    for line in lines:
-                        if line.startswith("data: "):
-                            payload = line[6:]
-                            fixed = _fix_sse_line(payload)
-                            out_lines.append(f"data: {fixed}")
-                        else:
-                            out_lines.append(line)
-
-                    yield "".join(out_lines).encode("utf-8")
-            except Exception:
-                logger.exception("Unhandled error in Bifrost reasoning filter stream - passing through original chunk")
-                if raw_chunk:
-                    yield raw_chunk if isinstance(raw_chunk, bytes) else str(raw_chunk).encode("utf-8")
-
-        return StreamingResponse(
-            patched_generator(),
-            media_type=response.media_type,
-            headers=dict(response.headers),
-            status_code=response.status_code,
-        )
 
 
 def _strip_reasoning_tokens(usage: dict) -> dict:
@@ -230,10 +78,173 @@ def _strip_reasoning_tokens(usage: dict) -> dict:
     return usage
 
 
-def _fix_non_streaming(body: dict) -> dict:
-    """Fix a complete non-streaming response."""
-    body = _fix_chunk(body)
-    usage = body.get("usage")
-    if usage is not None:
-        body["usage"] = _strip_reasoning_tokens(usage)
-    return body
+# ──────────────────────────────────────────────
+#  STREAM HELPERS (Open WebUI >= 0.11 event contract)
+# ──────────────────────────────────────────────
+
+
+def _fix_delta(delta: dict) -> dict:
+    """Normalize a streaming delta in place.
+
+    Bifrost sends each reasoning fragment duplicated in BOTH
+    delta.reasoning (incremental plain text) and delta.reasoning_details
+    (list of blocks). To avoid double-appending we use delta.reasoning as
+    the primary source and only fall back to reasoning_details when
+    reasoning carried no text (Bifrost #974 drops delta.reasoning for some
+    providers). Keep the text even when it only arrives via details — this
+    is the piece that made the model 'stop reasoning' when the old filter
+    discarded it.
+    """
+    if not isinstance(delta, dict):
+        return delta
+
+    used = False
+
+    # Variant A: delta.reasoning (incremental plain text)
+    if "reasoning" in delta:
+        reasoning = delta.pop("reasoning")
+        used = True  # field present; we consume it as the source of truth
+        if isinstance(reasoning, str) and reasoning:
+            existing = delta.get("reasoning_content", "")
+            existing = existing if isinstance(existing, str) else ""
+            delta["reasoning_content"] = existing + reasoning
+
+    # Variant B: delta.reasoning_details (list of blocks) -> fallback only.
+    if not used:
+        details = delta.pop("reasoning_details", None)
+        if details:
+            text = _extract_reasoning_text(details)
+            if text:
+                existing = delta.get("reasoning_content", "")
+                existing = existing if isinstance(existing, str) else ""
+                delta["reasoning_content"] = existing + text
+    else:
+        # reasoning already consumed; drop the redundant details payload.
+        delta.pop("reasoning_details", None)
+
+    return delta
+
+
+def _event_has_bifrost(event: dict) -> bool:
+    """True if any delta still carries non-standard Bifrost fields."""
+    choices = event.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, dict):
+                delta = choice.get("delta")
+                if isinstance(delta, dict) and _has_bifrost_residue(delta):
+                    return True
+    return False
+
+
+def _usage_has_reasoning_tokens(usage) -> bool:
+    """True if usage (dict) still contains non-standard reasoning_tokens."""
+    if not isinstance(usage, dict):
+        return False
+    for details_key in ("completion_tokens_details", "audio_tokens_details"):
+        details = usage.get(details_key)
+        if isinstance(details, dict) and "reasoning_tokens" in details:
+            return True
+    return False
+
+
+def _fix_event(event: dict) -> dict:
+    """Normalize a full stream event (OpenAI shape).
+
+    Content-driven (auto-selective): only touches an event when it actually
+    carries Bifrost residue. This is what makes stream() work regardless of
+    the event['model'] value, which is not reliably the model ID Open WebUI
+    exposes (so a name/prefix gate would silently skip every chunk and the
+    model would appear to 'stop reasoning').
+    """
+    if _event_has_bifrost(event):
+        choices = event.get("choices")
+        for choice in choices:
+            if isinstance(choice, dict):
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    _fix_delta(delta)
+    # The final streaming chunk carries top-level usage with reasoning_tokens.
+    if _usage_has_reasoning_tokens(event.get("usage")):
+        event["usage"] = _strip_reasoning_tokens(event["usage"])
+    return event
+
+
+# ──────────────────────────────────────────────
+#  FILTER
+# ──────────────────────────────────────────────
+
+
+class Filter:
+    class Valves(BaseModel):
+        priority: int = Field(default=0, description="Lower runs first.")
+        model_prefixes: str = Field(
+            default="deepseek",
+            description="Comma-separated model ID prefixes that route through Bifrost.",
+        )
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    def _targets(self, model_id: str) -> bool:
+        prefixes = {
+            p.strip() for p in self.valves.model_prefixes.split(",") if p.strip()
+        }
+        return any(model_id.startswith(p) for p in prefixes)
+
+    async def inlet(self, body: dict, __model__: Optional[dict] = None) -> dict:
+        """
+        On the way in (Open WebUI → provider): clean historical
+        messages so stale reasoning_details / broken Bifrost fields
+        are not re-sent to the upstream API.
+        """
+        model = __model__ or {}
+        if not self._targets(model.get("id", "")):
+            return body
+
+        messages = body.get("messages", [])
+        cleaned = []
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                if _has_bifrost_residue(msg):
+                    msg = _normalize_assistant_message(msg)
+            cleaned.append(msg)
+        body["messages"] = cleaned
+        return body
+
+    async def stream(self, event: dict) -> dict:
+        """Per-stream-event fix (Open WebUI >= 0.11 stream contract).
+
+        Content-driven: _fix_event only touches chunks that actually carry
+        Bifrost residue, so we don't gate on event['model'] (which is not
+        reliably the Open WebUI model id) — that name/prefix gate was the
+        reason the model appeared to 'stop reasoning' when the field value
+        didn't match the valve prefixes.
+        """
+        try:
+            return _fix_event(event)
+        except Exception:
+            logger.exception("Error fixing Bifrost event - passing through unchanged")
+            return event
+
+    async def outlet(
+        self, body, __model__: Optional[dict] = None, **kwargs
+    ) -> dict:
+        """
+        Only NON-streaming responses here (dict). Streaming is handled
+        by stream() in Open WebUI >= 0.11.
+        """
+        model = __model__ or {}
+        if not self._targets(model.get("id", "")):
+            return body
+
+        if isinstance(body, dict):
+            choices = body.get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
+                        choice["message"] = _normalize_assistant_message(choice["message"])
+            usage = body.get("usage")
+            if usage is not None:
+                body["usage"] = _strip_reasoning_tokens(usage)
+        return body
