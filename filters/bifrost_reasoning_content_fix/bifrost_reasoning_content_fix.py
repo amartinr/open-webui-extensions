@@ -7,10 +7,12 @@ description: >
   Fixes Bifrost's non-standard response format by converting
   'reasoning' + 'reasoning_details' back to proper 'reasoning_content'
   using the Open WebUI >= 0.11 per-event stream() filter API.
+  Detection in stream() is content-driven (auto-selective) so it works
+  regardless of the event model id.
   Also cleans up historical messages on the way IN to prevent
   stale non-standard fields from being re-sent.
 required_open_webui_version: 0.11.0
-version: 3.0.0
+version: 3.0.1
 """
 
 import logging
@@ -123,17 +125,47 @@ def _fix_delta(delta: dict) -> dict:
     return delta
 
 
-def _fix_event(event: dict) -> dict:
-    """Normalize a full stream event (OpenAI shape)."""
+def _event_has_bifrost(event: dict) -> bool:
+    """True if any delta still carries non-standard Bifrost fields."""
     choices = event.get("choices")
     if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, dict):
+                delta = choice.get("delta")
+                if isinstance(delta, dict) and _has_bifrost_residue(delta):
+                    return True
+    return False
+
+
+def _usage_has_reasoning_tokens(usage) -> bool:
+    """True if usage (dict) still contains non-standard reasoning_tokens."""
+    if not isinstance(usage, dict):
+        return False
+    for details_key in ("completion_tokens_details", "audio_tokens_details"):
+        details = usage.get(details_key)
+        if isinstance(details, dict) and "reasoning_tokens" in details:
+            return True
+    return False
+
+
+def _fix_event(event: dict) -> dict:
+    """Normalize a full stream event (OpenAI shape).
+
+    Content-driven (auto-selective): only touches an event when it actually
+    carries Bifrost residue. This is what makes stream() work regardless of
+    the event['model'] value, which is not reliably the model ID Open WebUI
+    exposes (so a name/prefix gate would silently skip every chunk and the
+    model would appear to 'stop reasoning').
+    """
+    if _event_has_bifrost(event):
+        choices = event.get("choices")
         for choice in choices:
             if isinstance(choice, dict):
                 delta = choice.get("delta")
                 if isinstance(delta, dict):
                     _fix_delta(delta)
     # The final streaming chunk carries top-level usage with reasoning_tokens.
-    if event.get("usage"):
+    if _usage_has_reasoning_tokens(event.get("usage")):
         event["usage"] = _strip_reasoning_tokens(event["usage"])
     return event
 
@@ -183,12 +215,13 @@ class Filter:
     async def stream(self, event: dict) -> dict:
         """Per-stream-event fix (Open WebUI >= 0.11 stream contract).
 
-        event arrives already parsed as a dict; mutate and return it.
+        Content-driven: _fix_event only touches chunks that actually carry
+        Bifrost residue, so we don't gate on event['model'] (which is not
+        reliably the Open WebUI model id) — that name/prefix gate was the
+        reason the model appeared to 'stop reasoning' when the field value
+        didn't match the valve prefixes.
         """
         try:
-            # Prefer the event's own model id; fall back to the valve prefixes.
-            if not self._targets(event.get("model", "")):
-                return event
             return _fix_event(event)
         except Exception:
             logger.exception("Error fixing Bifrost event - passing through unchanged")
