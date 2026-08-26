@@ -4,10 +4,10 @@ id: agent_loop_guard
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens.
+description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.5.2
+version: 2.6.0
 licence: MIT
 """
 
@@ -784,8 +784,27 @@ class Pipe:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
-                    if line:
-                        yield line
+                    # Only forward well-formed OpenAI SSE data events. The rest is
+                    # discarded so it can never reach the OpenAI-compatible
+                    # consumer (Open WebUI's pipe handler turns any non-"data:"
+                    # line into chat CONTENT, and it emits its own closing
+                    # [DONE]/finish chunk). Concretely we keep:
+                    #   - "data: {...}" chunk events
+                    # and skip:
+                    #   - blank lines
+                    #   - SSE comments / keep-alives (": ..."), which a proxy or
+                    #     long-thinking Bifrost may inject; passing them through
+                    #     would corrupt the reasoning delta stream
+                    #   - "data: [DONE]" and any other noise
+                    if not isinstance(line, str):
+                        continue
+                    stripped = line.strip()
+                    if not stripped.startswith("data:") or stripped == "data: [DONE]":
+                        continue
+                    payload = stripped.removeprefix("data:").strip()
+                    if not payload.startswith("{"):
+                        continue
+                    yield line
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
         async with httpx.AsyncClient(timeout=300) as client:
