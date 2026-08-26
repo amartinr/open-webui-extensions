@@ -212,6 +212,11 @@ dropped:
 Validated against a live Bifrost stream (long reasoning): 1917 events,
 0 corruption.
 
+This guard exists because Bifrost's OpenAI-compatible SSE is not reliable
+(see upstream [#6523](https://github.com/maximhq/bifrost/issues/6523), which
+breaks stream assembly in OpenAI-compatible SDKs, and the keep-alive noise
+above). If Bifrost's SSE normalization is fixed, the filter can be relaxed.
+
 ---
 
 ## Architecture

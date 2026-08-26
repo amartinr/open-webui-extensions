@@ -130,6 +130,28 @@ non-standard Bifrost fields (`reasoning` or `reasoning_details`).
 Messages that were already normalized by the outlet in a previous
 turn are left untouched.
 
+## Why this exists (upstream Bifrost issues)
+
+This filter compensates for Bifrost's non-standard reasoning and SSE
+handling. The underlying problems are tracked upstream and remain open:
+
+- **#5325** — Reasoning is emitted in Bifrost-specific fields
+  (`reasoning` / `reasoning_details`) instead of `reasoning_content`, so a
+  generic OpenAI-compatible client ignores it. This filter is the reason
+  your OpenAI-compatible client (e.g. Open WebUI) sees the reasoning.
+- **#974** — Streaming `delta.reasoning` is silently dropped for some
+  providers (Gemini). The filter cannot recover reasoning that never
+  arrives; pin a known-good Bifrost version or report upstream.
+- **#6523** — Opening role-only SSE chunks are dropped, breaking
+  stream-assembly in OpenAI-compatible SDKs (LangChain tool-calls/usage).
+  Mitigated by the `agent_loop_guard` SSE filter (v2.6.0).
+- **#5169** — Chat→Responses stream converter emits reasoning deltas
+  without the opening event, crashing strict Anthropic SDK clients.
+  Bifrost-side; affects Anthropic-compat streaming only.
+
+If Bifrost implements a standard `reasoning_content` dialect (#5325) and
+fixes its SSE normalization, this filter can be relaxed or removed.
+
 ## Important caveats
 
 - **Open WebUI >= 0.11 required**: the per-event `stream()` contract is a
@@ -141,13 +163,6 @@ turn are left untouched.
   returns Bifrost fields, whatever its id. The `model_prefixes` valve only
   gates the `inlet`/`outlet` cleanup (those do get Open WebUI's real model
   id). If you only route DeepSeek via Bifrost this needs no attention.
-- **Bifrost #974** (streaming `delta.reasoning` silently dropped for
-  Gemini): this is a Bifrost-side bug; the filter cannot recover
-  reasoning that never arrives. Pin a known-good Bifrost version or
-  report upstream.
-- **Bifrost #5169** (Chat→Responses stream converter emits reasoning
-  deltas without an opening event, crashing Anthropic SDK clients):
-  also a Bifrost-side bug affecting Anthropic-compat streaming.
 - The filter **does not** inspect `content` for embedded XML
   reasoning tags - that is Open WebUI's own responsibility via its
   `reasoning_tags` configuration.
