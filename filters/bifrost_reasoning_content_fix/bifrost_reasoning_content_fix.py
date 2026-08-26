@@ -12,7 +12,7 @@ description: >
   Also cleans up historical messages on the way IN to prevent
   stale non-standard fields from being re-sent.
 required_open_webui_version: 0.11.0
-version: 3.0.1
+version: 3.1.0
 """
 
 import logging
@@ -148,7 +148,7 @@ def _usage_has_reasoning_tokens(usage) -> bool:
     return False
 
 
-def _fix_event(event: dict) -> dict:
+def _fix_event(event: dict, strip_reasoning: bool = False) -> dict:
     """Normalize a full stream event (OpenAI shape).
 
     Content-driven (auto-selective): only touches an event when it actually
@@ -156,6 +156,10 @@ def _fix_event(event: dict) -> dict:
     the event['model'] value, which is not reliably the model ID Open WebUI
     exposes (so a name/prefix gate would silently skip every chunk and the
     model would appear to 'stop reasoning').
+
+    The final streaming chunk carries top-level usage with reasoning_tokens.
+    By default these are preserved (Open WebUI and token-usage filters read
+    them); only strip them when the caller opts in via strip_reasoning.
     """
     if _event_has_bifrost(event):
         choices = event.get("choices")
@@ -164,8 +168,7 @@ def _fix_event(event: dict) -> dict:
                 delta = choice.get("delta")
                 if isinstance(delta, dict):
                     _fix_delta(delta)
-    # The final streaming chunk carries top-level usage with reasoning_tokens.
-    if _usage_has_reasoning_tokens(event.get("usage")):
+    if strip_reasoning and _usage_has_reasoning_tokens(event.get("usage")):
         event["usage"] = _strip_reasoning_tokens(event["usage"])
     return event
 
@@ -181,6 +184,14 @@ class Filter:
         model_prefixes: str = Field(
             default="deepseek",
             description="Comma-separated model ID prefixes that route through Bifrost.",
+        )
+        strip_reasoning_tokens: bool = Field(
+            default=False,
+            description=(
+                "Remove non-standard 'reasoning_tokens' from usage. Default False: keep them "
+                "so token-usage display filters (e.g. Token Usage Display) and Open WebUI can "
+                "report reasoning tokens. Set True only when a strict OpenAI client rejects them."
+            ),
         )
 
     def __init__(self):
@@ -222,7 +233,7 @@ class Filter:
         didn't match the valve prefixes.
         """
         try:
-            return _fix_event(event)
+            return _fix_event(event, strip_reasoning=self.valves.strip_reasoning_tokens)
         except Exception:
             logger.exception("Error fixing Bifrost event - passing through unchanged")
             return event
@@ -245,6 +256,6 @@ class Filter:
                     if isinstance(choice, dict) and isinstance(choice.get("message"), dict):
                         choice["message"] = _normalize_assistant_message(choice["message"])
             usage = body.get("usage")
-            if usage is not None:
+            if usage is not None and self.valves.strip_reasoning_tokens:
                 body["usage"] = _strip_reasoning_tokens(usage)
         return body
