@@ -34,7 +34,9 @@ break clients that expect the standard `reasoning_content` field.
 
 - `reasoning` and `reasoning_details` are **not part of the OpenAI spec**.
 - `reasoning_content` (the standard field) is absent.
-- `usage.reasoning_tokens` is also non-standard and stripped.
+- `reasoning_tokens` is a non-standard usage field that Open WebUI and
+  token-usage filters understand; it is **kept** by default (only removed
+  when the `strip_reasoning_tokens` valve is enabled).
 
 ## What the filter produces (standard OpenAI)
 
@@ -44,7 +46,11 @@ break clients that expect the standard `reasoning_content` field.
     "content": "hello",
     "reasoning_content": "We ask..."
   },
-  "usage": {}
+  "usage": {
+    "completion_tokens_details": {
+      "reasoning_tokens": 49
+    }
+  }
 }
 ```
 
@@ -82,7 +88,8 @@ from the `outlet`. It parses **each SSE chunk into a dict**
    to `reasoning_content`. Never discarded — dropping it was the "model
    stops reasoning" bug.
 3. **Top-level `event['usage']`** (final streaming chunk) → `reasoning_tokens`
-   stripped.
+   are kept by default (Open WebUI and token-usage filters read them). Only
+   stripped when the `strip_reasoning_tokens` valve is enabled.
 4. **Exception safety**: errors are logged and the event passes through
    unchanged.
 
@@ -102,8 +109,8 @@ and ran the stream through `stream()` exactly as Open WebUI >= 0.11 does
   carry Bifrost fields, so it does not depend on `event['model']` matching
   the valve prefixes. Non-Bifrost chunks are left unchanged.
 - Result: `reasoning_content` reconstructed without duplication, `content`
-  untouched, `completion_tokens_details.reasoning_tokens` stripped, and no
-  Bifrost residue left in any delta (SSE stays valid for an
+  untouched, `reasoning_tokens` preserved (unless the valve is enabled),
+  and no Bifrost residue left in any delta (SSE stays valid for an
   OpenAI-compatible client).
 
 ### outlet (provider → Open WebUI, non-streaming only)
@@ -113,7 +120,8 @@ The `outlet` now only handles **non-streaming** (dict) responses:
 1. **`message.reasoning`** → `reasoning_content` (rename).
 2. **`message.reasoning_details`** → text blocks concatenated into
    `reasoning_content`.
-3. **`reasoning_tokens`** in `usage.*_details` stripped (non-standard).
+3. **`reasoning_tokens`** in `usage.*_details` kept by default; only stripped
+   when the `strip_reasoning_tokens` valve is enabled.
 
 ### inlet (Open WebUI → provider)
 
