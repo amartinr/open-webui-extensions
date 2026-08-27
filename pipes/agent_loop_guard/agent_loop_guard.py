@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.11.0
+version: 2.10.0
 licence: MIT
 """
 
@@ -692,16 +692,6 @@ class Pipe:
             "messages stay byte-stable between turns, so the prefix cache is preserved. "
             "Set to False to forward payloads unchanged.",
         )
-        REASONING_EFFORT: str = Field(
-            default="high",
-            description=(
-                "reasoning_effort forced for deepseek models when the incoming payload "
-                "carries 'low' or none. DeepSeek v4 flash drops reasoning on turns with "
-                "history when tools + thinking + effort=low are combined (validated against "
-                "a live Bifrost endpoint: low=0/8, high=5/8, max=7/8). pi-bifrost-reasoning-fix "
-                "never sends 'low' for real work. Set empty to disable the upgrade."
-            ),
-        )
 
         @model_validator(mode="after")
         def _check_runaway_gt_loop(self):
@@ -1005,18 +995,6 @@ class Pipe:
     # ------------------------------------------------------------------
 
 
-    def _upgrade_reasoning_effort(self, body: dict) -> bool:
-        """Upgrade reasoning_effort for deepseek models (v2.11.0)."""
-        real_model = str(body.get("model", ""))
-        effort_target = (self.valves.REASONING_EFFORT or "").strip().lower()
-        if not effort_target or "deepseek" not in real_model.lower():
-            return False
-        incoming = body.get("reasoning_effort")
-        if isinstance(incoming, str) and incoming.strip().lower() != "low":
-            return False
-        body["reasoning_effort"] = effort_target
-        return True
-
     async def pipe(
 
         self,
@@ -1164,15 +1142,6 @@ class Pipe:
                 params,
             )
 
-            # reasoning_effort upgrade for deepseek models: effort=low (or
-            # absent) combined with tools + thinking + history makes DeepSeek
-            # v4 flash skip reasoning (measured 0/8 vs 5-7/8 for high/max).
-            if self._upgrade_reasoning_effort(body):
-                log.info(
-                    "bf-reasoning: reasoning_effort upgraded (model=%s, now=%s)",
-                    real_model,
-                    body.get("reasoning_effort"),
-                )
         except Exception as exc:
             log.warning("reasoning normalization failed (fail-open): %s", exc)
 
