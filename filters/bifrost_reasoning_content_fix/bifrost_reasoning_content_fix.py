@@ -14,9 +14,11 @@ description: >
   'reasoning_content' on every assistant message once the history
   contains a tool call or the request carries tools — DeepSeek drops
   reasoning on the next turn otherwise (same fix as the
-  pi-bifrost-reasoning-fix pi extension).
+  pi-bifrost-reasoning-fix pi extension). Since v3.4.0 the stream()
+  conversion leaves reasoning_details in place so Open WebUI can store
+  and replay the real reasoning text.
 required_open_webui_version: 0.11.0
-version: 3.3.0
+version: 3.4.0
 """
 
 import logging
@@ -148,6 +150,15 @@ def _fix_delta(delta: dict) -> dict:
     providers). Keep the text even when it only arrives via details — this
     is the piece that made the model 'stop reasoning' when the old filter
     discarded it.
+
+    `reasoning_details` are intentionally LEFT in the delta (v3.4.0):
+    Open WebUI stores them on the reasoning output item, the history
+    replay (convert_output_to_messages raw=True) then carries the real
+    reasoning text back to the provider, and the agent_loop_guard pipe
+    converts them into `reasoning_content`. Dropping them here is what
+    made the replayed history carry an empty reasoning_content — and
+    DeepSeek stops reasoning on later turns when the previous assistant
+    shows no reasoning.
     """
     if not isinstance(delta, dict):
         return delta
@@ -164,17 +175,14 @@ def _fix_delta(delta: dict) -> dict:
             delta["reasoning_content"] = existing + reasoning
 
     # Variant B: delta.reasoning_details (list of blocks) -> fallback only.
+    # Details are read but never removed: they must reach Open WebUI so the
+    # stored reasoning item can replay the real text on the next turn.
     if not used:
-        details = delta.pop("reasoning_details", None)
-        if details:
-            text = _extract_reasoning_text(details)
-            if text:
-                existing = delta.get("reasoning_content", "")
-                existing = existing if isinstance(existing, str) else ""
-                delta["reasoning_content"] = existing + text
-    else:
-        # reasoning already consumed; drop the redundant details payload.
-        delta.pop("reasoning_details", None)
+        text = _extract_reasoning_text(delta.get("reasoning_details"))
+        if text:
+            existing = delta.get("reasoning_content", "")
+            existing = existing if isinstance(existing, str) else ""
+            delta["reasoning_content"] = existing + text
 
     return delta
 

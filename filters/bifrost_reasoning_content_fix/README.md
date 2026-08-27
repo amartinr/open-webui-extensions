@@ -127,7 +127,13 @@ from the `outlet`. It parses **each SSE chunk into a dict**
 2. **`delta.reasoning_details`** — fallback only when `reasoning` carried
    no text (some providers drop `delta.reasoning`; see
    [maximhq/bifrost#974](https://github.com/maximhq/bifrost/issues/974)).
-   Its blocks are appended to `reasoning_content`. Never discarded.
+   Its blocks are appended to `reasoning_content`. The blocks are also
+   **left in the delta** (v3.4.0): Open WebUI stores them on the reasoning
+   output item, so the next turn's history replay carries the real
+   reasoning text back to the provider (the `agent_loop_guard` pipe
+   converts them into `reasoning_content`). Dropping them made the
+   replayed history carry an empty `reasoning_content` and DeepSeek stop
+   reasoning on later turns.
 3. **Top-level `event['usage']`** (final streaming chunk) —
    `reasoning_tokens` are kept by default (Open WebUI and token-usage
    filters read them) and are removed only when the

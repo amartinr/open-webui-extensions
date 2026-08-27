@@ -154,3 +154,36 @@ def test_inlet_ignores_non_target_models():
     }
     out = _run_inlet(body, {"id": "other/model"})
     assert out["messages"][1] == {"role": "assistant", "content": "r1"}
+
+
+def test_fix_delta_converts_and_preserves_details():
+    """v3.4.0: reasoning_details are kept in the delta (not dropped) so
+    Open WebUI stores them and the next turn replays the real text."""
+    from bifrost_reasoning_content_fix import _fix_delta
+
+    # normal fragment: reasoning + duplicated details -> converted, details kept
+    delta = {
+        "reasoning": "El usuario",
+        "reasoning_details": [{"index": 0, "type": "reasoning.text", "text": "El usuario"}],
+    }
+    _fix_delta(delta)
+    assert delta["reasoning_content"] == "El usuario"
+    assert delta["reasoning_details"] == [
+        {"index": 0, "type": "reasoning.text", "text": "El usuario"}
+    ]  # preserved for replay
+    assert "reasoning" not in delta
+
+    # empty reasoning + details with text (Bifrost #974 case) -> details used
+    delta = {
+        "reasoning": "",
+        "reasoning_details": [{"index": 0, "type": "reasoning.text", "text": "primera parte"}],
+    }
+    _fix_delta(delta)
+    assert delta["reasoning_content"] == "primera parte"
+    assert delta["reasoning_details"]  # still preserved
+
+    # details absent -> nothing
+    delta = {"reasoning": "solo texto"}
+    _fix_delta(delta)
+    assert delta["reasoning_content"] == "solo texto"
+    assert "reasoning_details" not in delta
