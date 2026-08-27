@@ -1,47 +1,45 @@
 # Agent Loop Guard
 
-> 🛡️ An Open WebUI **Pipe Function** that prevents AI agents from entering
-> infinite tool-calling loops — without wasting tool results or burning
-> LLM tokens.
+Open WebUI **Pipe Function** that interrupts tool-calling loops in LLM
+agents by replacing the offending tool result with a guard message, without
+discarding the tool results already collected.
 
 ---
 
 ## Problem
 
-LLM agents with tool access can easily fall into loops:
+LLM agents with tool access can repeat tool calls:
 
-- Calling `search_web("X")` with the same arguments over and over
-- Executing expensive tools in endless chains until a hard iteration limit
-  (default **256**) kicks in
-- Wasting tokens, API credits, and time — especially with batch tool calls
+- calling `search_web("X")` with the same arguments repeatedly;
+- chaining expensive tools until Open WebUI's hard iteration limit
+  (default **256**) stops them;
+- consuming tokens and credits at scale, particularly with batch tool calls.
 
 Open WebUI's built-in `CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS` (256) is a
-brute-force limit that lets the agent exhaust all iterations before stopping.
-The Agent Loop Guard intercepts **much earlier** and with **more
-intelligence**.
+brute-force ceiling: it lets the agent exhaust all iterations before
+stopping. The Agent Loop Guard stops earlier and on a more specific signal
+(repeated calls), not on a raw iteration count.
 
 ---
 
 ## Solution
 
-The Agent Loop Guard is an **Open WebUI Pipe Function** that sits between
-the UI and your LLM gateway (e.g. Bifrost, LiteLLM). It:
+The Agent Loop Guard is an **Open WebUI Pipe Function** placed between the
+UI and the LLM gateway (e.g. Bifrost, LiteLLM). It:
 
-1. **Analyses** every request for consecutive identical tool calls
-2. **Replaces** the last tool result with a guard message when a loop or
-   runaway is detected — the LLM receives a clear instruction to stop
-   repeating and summarise
-3. **Preserves** all collected tool results — nothing is wasted
-4. **Prevents runaway** loops with a configurable tool-call limit per turn
+1. **analyses** each request for consecutive identical tool calls;
+2. **replaces** the last tool result with a guard message when a loop or
+   runaway is detected, instructing the model to stop and summarise;
+3. **preserves** the tool results already collected;
+4. **caps** runaway with a configurable tool-call limit per turn.
 
-### Result replacement vs Force-terminate
+### Result replacement vs. force-terminate
 
-Unlike a hard force-terminate (which wastes the last batch of tool results),
-result replacement preserves everything the agent has already gathered. The
-LLM gets all tool results, with the most recent one replaced by a guard
-instruction to summarise. Tools remain available in the body, so the LLM
-*could* make new calls — but the guard message strongly discourages this,
-and the guard will fire again if the agent persists.
+A hard force-terminate discards the pending batch of tool results. Result
+replacement instead keeps all collected results and swaps only the last one
+for a guard instruction to summarise. Tools stay present in the body, so the
+model could issue new calls, but the guard message discourages it and the
+guard re-fires if it persists.
 
 ---
 
@@ -199,23 +197,48 @@ side-by-side before/after walkthrough.
 ## Robust SSE forwarding (v2.6.0)
 
 The pipe proxies the gateway's raw SSE to Open WebUI. `_stream` forwards
-only well-formed OpenAI `data: { ... }` chunks; everything else is
+only well-formed OpenAI `data: { ... }` chunk events; everything else is
 dropped:
 
 - **SSE comments / keep-alives** (lines starting with `:`). Open WebUI's
-  pipe handler renders any non-`data:` line as chat content, so keep-alives
-  (e.g. a proxy's `: heartbeat`) leaked into the reply and desynced the
+  pipe handler renders any non-`data:` line as chat content, so a keep-alive
+  (e.g. `: heartbeat`) is otherwise rendered into the reply and desyncs the
   reasoning deltas.
-- Blank lines and `data: [DONE]` (Open WebUI emits its own closing chunk).
-- Any other non-JSON noise.
+- **Blank lines** and **`data: [DONE]`** (Open WebUI emits its own closing
+  chunk).
+- **Any other non-JSON noise** (lines that do not start with `data: {`).
 
-Validated against a live Bifrost stream (long reasoning): 1917 events,
-0 corruption.
+The relay, before and after filtering:
 
-This guard exists because Bifrost's OpenAI-compatible SSE is not reliable
-(see upstream [#6523](https://github.com/maximhq/bifrost/issues/6523), which
-breaks stream assembly in OpenAI-compatible SDKs, and the keep-alive noise
-above). If Bifrost's SSE normalization is fixed, the filter can be relaxed.
+```text
+# Gateway emits (raw SSE)
+: heartbeat
+
+data: {"id":"1","choices":[{"delta":{"reasoning_content":"let me"}}]}
+
+data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}
+data: [DONE]
+```
+
+```text
+# After _stream filtering (what reaches Open WebUI)
+data: {"id":"1","choices":[{"delta":{"reasoning_content":"let me"}}]}
+data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}
+```
+
+The keep-alive `: heartbeat`, the blank line, and `data: [DONE]` are
+dropped; only the two `data: { ... }` chunk events pass through. This
+keeps the relay OpenAI-compatible and the reasoning deltas aligned with
+the frontend. Validated against a live Bifrost stream (long reasoning):
+1917 events, 0 corruption.
+
+### Why the guard exists
+
+Bifrost's OpenAI-compatible SSE is not reliable: keep-alive lines leak into
+the stream, and upstream
+[#6523](https://github.com/maximhq/bifrost/issues/6523) dropped opening
+role-only chunks break stream assembly in OpenAI-compatible SDKs. If
+Bifrost's SSE normalization is fixed, the filter can be relaxed or removed.
 
 ---
 
