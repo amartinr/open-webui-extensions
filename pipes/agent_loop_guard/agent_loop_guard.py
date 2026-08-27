@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.13.0
+version: 2.14.0
 licence: MIT
 """
 
@@ -313,6 +313,26 @@ def _normalize_reasoning_for_gateway(body: dict) -> tuple[int, int]:
         forced = _force_reasoning_content_on_tools(messages)
         return renamed, forced
     return renamed, 0
+
+
+def _normalize_thinking_for_gateway(body: dict) -> bool:
+    """Strip Open WebUI's thinking:disabled on tool-call continuations.
+
+    Open WebUI sends thinking={'type': 'disabled'} (and drops reasoning_effort)
+    on server-side tool-call continuations. For DeepSeek that is a hard
+    kill-switch: it disables reasoning entirely (0 reasoning deltas), and a
+    demanding system prompt cannot override it. The user's own turns never
+    send 'disabled' — they send 'enabled' or omit the field — so removing the
+    disabled marker restores DeepSeek's default thinking and reasoning resumes
+    (verified: no thinking field + no effort still reasons).
+
+    Returns True when the field was removed.
+    """
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        body.pop("thinking", None)
+        return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -1230,6 +1250,7 @@ class Pipe:
         # only hop that sees every outbound request to the gateway.
         try:
             renamed, forced = _normalize_reasoning_for_gateway(body)
+            thinking_stripped = _normalize_thinking_for_gateway(body)
             has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
             params = {
                 k: v
@@ -1237,10 +1258,12 @@ class Pipe:
                 if k not in ("messages", "tools", "model", "metadata", "files")
             }
             log.info(
-                "bf-reasoning: renamed=%d forced=%d (model=%s, tools=%s, "
-                "history_has_tool_calls=%s) | messages: %s | params: %s",
+                "bf-reasoning: renamed=%d forced=%d thinking_stripped=%s "
+                "(model=%s, tools=%s, history_has_tool_calls=%s) "
+                "| messages: %s | params: %s",
                 renamed,
                 forced,
+                "yes" if thinking_stripped else "no",
                 real_model,
                 has_tools,
                 _history_has_tool_calls(messages),
