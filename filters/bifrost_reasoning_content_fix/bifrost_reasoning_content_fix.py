@@ -10,9 +10,13 @@ description: >
   Detection in stream() is content-driven (auto-selective) so it works
   regardless of the event model id.
   Also cleans up historical messages on the way IN to prevent
-  stale non-standard fields from being re-sent.
+  stale non-standard fields from being re-sent, and (v3.2.0) forces
+  'reasoning_content' on every assistant message once the history
+  contains a tool call or the request carries tools — DeepSeek drops
+  reasoning on the next turn otherwise (same fix as the
+  pi-bifrost-reasoning-fix pi extension).
 required_open_webui_version: 0.11.0
-version: 3.1.0
+version: 3.2.0
 """
 
 import logging
@@ -38,26 +42,76 @@ def _extract_reasoning_text(details) -> str:
 
 
 def _has_bifrost_residue(msg: dict) -> bool:
-    """Check if a message still carries non-standard Bifrost fields."""
-    return bool(msg.get("reasoning") or msg.get("reasoning_details"))
+    """Check if a message still carries non-standard Bifrost fields.
+
+    Mirrors pi-bifrost-reasoning-fix: a `reasoning` field counts even when
+    empty (it must be replayed as reasoning_content, and an empty string
+    is what DeepSeek accepts), and `reasoning_details` counts whenever it
+    is a list (even an empty one).
+    """
+    return "reasoning" in msg and isinstance(msg["reasoning"], str) or isinstance(
+        msg.get("reasoning_details"), list
+    )
 
 
 def _normalize_assistant_message(msg: dict) -> dict:
-    """Normalize an assistant message to remove any Bifrost residue."""
+    """Normalize an assistant message to remove any Bifrost residue.
+
+    Mirrors pi-bifrost-reasoning-fix's normalizeAssistant(): plain-text
+    `reasoning` is the source of truth (both fields carry the same
+    incremental text upstream), and `reasoning_details` is only used as a
+    fallback when no text landed in reasoning_content. Both non-standard
+    fields are always removed.
+    """
     msg = dict(msg)  # shallow copy to avoid mutating the original
 
+    reasoning = msg.pop("reasoning", None)
+    if isinstance(reasoning, str) and "reasoning_content" not in msg:
+        msg["reasoning_content"] = reasoning
+
     reasoning_details = msg.pop("reasoning_details", None)
-    if reasoning_details:
+    if reasoning_details and (
+        not isinstance(msg.get("reasoning_content"), str)
+        or msg["reasoning_content"] == ""
+    ):
         text = _extract_reasoning_text(reasoning_details)
-        if text and not msg.get("reasoning_content"):
+        if text:
             msg["reasoning_content"] = text
 
-    if "reasoning" in msg and "reasoning_content" not in msg:
-        msg["reasoning_content"] = msg.pop("reasoning")
-    elif "reasoning" in msg:
-        msg.pop("reasoning")
-
     return msg
+
+
+def _history_has_tool_calls(messages: list) -> bool:
+    """True when the history contains an assistant message with tool calls.
+
+    Once a tool call has happened, DeepSeek requires `reasoning_content` on
+    every assistant message of every subsequent request — regardless of
+    whether that request still ships `tools` (Open WebUI re-sends history
+    after a tool call without the tool definitions).
+    """
+    return any(
+        isinstance(msg, dict)
+        and msg.get("role") == "assistant"
+        and isinstance(msg.get("tool_calls"), list)
+        and len(msg["tool_calls"]) > 0
+        for msg in messages
+    )
+
+
+def _force_reasoning_content_on_tools(messages: list) -> None:
+    """Guarantee every assistant message carries `reasoning_content`.
+
+    DeepSeek stops reasoning (silently, no error) when a tool-calling
+    history replays an assistant message without `reasoning_content`. An
+    empty string is enough — the field just has to be present. This is the
+    same forcing step as pi-bifrost-reasoning-fix's normalizePayload().
+    It is deterministic and monotonic (a tool call once present stays in
+    the history), so the provider prefix cache is not invalidated.
+    """
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            if not isinstance(msg.get("reasoning_content"), str):
+                msg["reasoning_content"] = ""
 
 
 def _strip_reasoning_tokens(usage: dict) -> dict:
@@ -207,7 +261,17 @@ class Filter:
         """
         On the way in (Open WebUI → provider): clean historical
         messages so stale reasoning_details / broken Bifrost fields
-        are not re-sent to the upstream API.
+        are not re-sent to the upstream API, and force
+        `reasoning_content` on every assistant once tool-calling is in
+        scope (see _force_reasoning_content_on_tools).
+
+        Without the forcing step, DeepSeek silently drops reasoning on
+        any turn whose replayed history contains an assistant tool call
+        but an assistant message missing `reasoning_content` — that is
+        the default Open WebUI replay shape (it rebuilds assistant
+        messages from stored output items and omits the field for
+        OpenAI-compatible providers). The loss looks spurious and
+        self-heals only when history compaction removes the tool call.
         """
         model = __model__ or {}
         if not self._targets(model.get("id", "")):
@@ -221,6 +285,11 @@ class Filter:
                     msg = _normalize_assistant_message(msg)
             cleaned.append(msg)
         body["messages"] = cleaned
+
+        has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
+        if has_tools or _history_has_tool_calls(cleaned):
+            _force_reasoning_content_on_tools(cleaned)
+
         return body
 
     async def stream(self, event: dict) -> dict:

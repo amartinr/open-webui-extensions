@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.6.0
+version: 2.7.0
 licence: MIT
 """
 
@@ -56,6 +56,119 @@ def _build_guard_message(
             marker=GUARD_MARKER, total=total, max_calls=max_calls
         )
     return ""
+
+
+# --------------------------------------------------------------------------
+# Bifrost reasoning normalization (DeepSeek tool-calling)
+# --------------------------------------------------------------------------
+#
+# DeepSeek requires `reasoning_content` on every assistant message of a
+# tool-calling history; a missing field makes it silently drop reasoning on
+# the next turn (validated against a live Bifrost endpoint). Open WebUI
+# rebuilds assistant messages from stored output items and, for
+# OpenAI-compatible providers, omits `reasoning_content` (it only keeps
+# reasoning_details or nothing at all). Filter inlets do not run on
+# tool-call continuations, so this pipe — the single choke point for every
+# outbound request to the gateway — applies the same normalization as
+# pi-bifrost-reasoning-fix's before_provider_request hook.
+
+
+def _extract_reasoning_text(details) -> str:
+    """reasoning_details is a list of blocks {type: 'reasoning.text', text: ...}."""
+    if not isinstance(details, list):
+        return ""
+    return "".join(
+        item.get("text", "")
+        for item in details
+        if isinstance(item, dict) and item.get("type") == "reasoning.text"
+    )
+
+
+def _has_bifrost_residue(msg: dict) -> bool:
+    """Non-standard Bifrost fields on an assistant message.
+
+    Mirrors pi-bifrost-reasoning-fix: a `reasoning` field counts even when
+    empty, and `reasoning_details` counts whenever it is a list.
+    """
+    return "reasoning" in msg and isinstance(msg["reasoning"], str) or isinstance(
+        msg.get("reasoning_details"), list
+    )
+
+
+def _normalize_reasoning_message(msg: dict) -> dict:
+    """Convert Bifrost residue to reasoning_content (pi-bifrost-reasoning-fix).
+
+    Plain-text `reasoning` wins; `reasoning_details` is the fallback when no
+    text landed in reasoning_content. Both non-standard fields are removed.
+    """
+    msg = dict(msg)
+    reasoning = msg.pop("reasoning", None)
+    if isinstance(reasoning, str) and "reasoning_content" not in msg:
+        msg["reasoning_content"] = reasoning
+    details = msg.pop("reasoning_details", None)
+    if details and (
+        not isinstance(msg.get("reasoning_content"), str)
+        or msg["reasoning_content"] == ""
+    ):
+        text = _extract_reasoning_text(details)
+        if text:
+            msg["reasoning_content"] = text
+    return msg
+
+
+def _history_has_tool_calls(messages: list) -> bool:
+    """True when the history contains an assistant message with tool calls.
+
+    Once a tool call has happened, DeepSeek requires `reasoning_content` on
+    every assistant message of every subsequent request — regardless of
+    whether that request still ships `tools`. Tool-call continuations from
+    Open WebUI bypass filter inlets, so this pipe is the single choke point
+    that sees every outbound request to the gateway.
+    """
+    return any(
+        isinstance(msg, dict)
+        and msg.get("role") == "assistant"
+        and isinstance(msg.get("tool_calls"), list)
+        and len(msg["tool_calls"]) > 0
+        for msg in messages
+    )
+
+
+def _force_reasoning_content_on_tools(messages: list) -> None:
+    """Guarantee every assistant message carries `reasoning_content`.
+
+    DeepSeek silently drops reasoning when a tool-calling history replays an
+    assistant message without `reasoning_content` (empty string is enough).
+    Same forcing step as pi-bifrost-reasoning-fix's normalizePayload().
+    """
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            if not isinstance(msg.get("reasoning_content"), str):
+                msg["reasoning_content"] = ""
+
+
+def _normalize_reasoning_for_gateway(body: dict) -> None:
+    """Normalize the outbound payload in place (Bifrost → DeepSeek fix).
+
+    1. Rename assistant `reasoning` / `reasoning_details` into
+       `reasoning_content` (content-driven).
+    2. Once tool-calling is in scope (request `tools` or tool-call history),
+       force `reasoning_content` (even empty) on every assistant message —
+       DeepSeek drops reasoning on the next turn otherwise.
+
+    Never touches user/system/tool messages and is deterministic, so the
+    provider prefix cache is not invalidated by the rewrite.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    for i, msg in enumerate(messages):
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            if _has_bifrost_residue(msg):
+                messages[i] = _normalize_reasoning_message(msg)
+    has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
+    if has_tools or _history_has_tool_calls(messages):
+        _force_reasoning_content_on_tools(messages)
 
 
 # --------------------------------------------------------------------------
@@ -936,6 +1049,16 @@ class Pipe:
                 _cleanup_attached_files(messages, base_url, hash_lookup=hash_lookup)
             except Exception as exc:
                 log.warning("attached_files cleanup failed (fail-open): %s", exc)
+
+        # --- Bifrost reasoning normalization (DeepSeek tool-calling) --------
+        # Converts Bifrost residue and forces reasoning_content on every
+        # assistant once tool-calling is in scope. Must run here — Open WebUI
+        # tool-call continuations bypass filter inlets, so this pipe is the
+        # only hop that sees every outbound request to the gateway.
+        try:
+            _normalize_reasoning_for_gateway(body)
+        except Exception as exc:
+            log.warning("reasoning normalization failed (fail-open): %s", exc)
 
         payload = {**body, "model": real_model, "messages": messages}
 

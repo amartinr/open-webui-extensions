@@ -1,8 +1,12 @@
 # Bifrost reasoning_content fix
 
-Open WebUI filter (>= 0.11, v3.1.0) that converts Bifrost's non-standard
+Open WebUI filter (>= 0.11, v3.2.0) that converts Bifrost's non-standard
 `reasoning` + `reasoning_details` response fields back to the standard
-OpenAI `reasoning_content` format.
+OpenAI `reasoning_content` format, and keeps DeepSeek reasoning alive
+across tool-calling turns.
+`reasoning` + `reasoning_details` response fields back to the standard
+OpenAI `reasoning_content` format, and keeps DeepSeek reasoning alive
+across tool-calling turns.
 
 ## Scope
 
@@ -155,6 +159,31 @@ Cleans historical assistant messages **only** if they still carry
 non-standard Bifrost fields (`reasoning` or `reasoning_details`).
 Messages already normalised by the `outlet` in a previous turn are left
 untouched.
+
+Since v3.2.0 it also ports the fix from the
+[`pi-bifrost-reasoning-fix`](https://github.com/amartinr/pi-bifrost-reasoning-fix)
+pi extension: **once the history contains an assistant tool call (or the
+request carries `tools`), every assistant message is forced to carry
+`reasoning_content`** (empty string if none yet). Without this, DeepSeek
+silently drops reasoning on the next turn:
+
+- Open WebUI rebuilds assistant messages from stored `output` items and,
+  for OpenAI-compatible providers, omits `reasoning_content` (it only
+  keeps the non-standard `reasoning_details`, or nothing at all).
+- DeepSeek requires `reasoning_content` on every assistant message of a
+  tool-calling history — whether or not the current request still ships
+  `tools`. A missing field makes it stop reasoning for that turn (no
+  error), which looks spurious and only self-heals once history
+  compaction removes the tool call from the context.
+
+Validated against a live Bifrost endpoint (`deepseek/deepseek-v4-flash`):
+
+| History replayed on the next turn | Reasoning on next turn |
+|---|---|
+| assistant with tool_calls, **no** `reasoning_content` | ❌ lost |
+| assistant with tool_calls, `reasoning_content` (even `""`) | ✅ kept |
+| assistant with tool_calls, `reasoning_details` (Bifrost dialect) | ❌ lost |
+| no tool_calls in history (with or without `tools` in payload) | ✅ kept |
 
 ## Upstream Bifrost issues
 

@@ -240,6 +240,40 @@ the stream, and upstream
 role-only chunks break stream assembly in OpenAI-compatible SDKs. If
 Bifrost's SSE normalization is fixed, the filter can be relaxed or removed.
 
+## Bifrost reasoning normalization (v2.7.0)
+
+DeepSeek requires `reasoning_content` on **every** assistant message of a
+tool-calling history. When Open WebUI executes a tool call, it rebuilds the
+assistant `tool_calls` message from stored output items and omits
+`reasoning_content` (OpenAI-compatible providers replay reasoning as
+`reasoning_details`, or nothing at all), and the request goes straight back
+to the pipe — filter inlets do **not** run on tool-call continuations.
+Bifrost does not translate the fields back, so DeepSeek silently drops
+reasoning on that turn.
+
+Since v2.7.0 the pipe normalizes every outbound payload before forwarding
+(mirroring `pi-bifrost-reasoning-fix`):
+
+1. Renames assistant `reasoning` / `reasoning_details` into
+   `reasoning_content` (content-driven).
+2. Once tool-calling is in scope (request `tools` or tool-call history),
+   forces `reasoning_content` (empty if none yet) on every assistant
+   message.
+
+The rewrite is deterministic and never touches user/system/tool messages,
+so the provider prefix cache is preserved. Validated against a live Bifrost
+endpoint (`deepseek/deepseek-v4-flash`):
+
+| Continuation history (assistant with `tool_calls`) | Reasoning on next turn |
+|---|---|
+| no `reasoning_content` | ❌ lost |
+| `reasoning_content` (even `""`) | ✅ kept |
+| `reasoning_details` (Bifrost dialect) | ❌ lost |
+
+This complements `filters/bifrost_reasoning_content_fix` (v3.2.0), whose
+`inlet` applies the same normalization to fresh user turns (where history
+from earlier tool-calling turns is replayed).
+
 ---
 
 ## Architecture
