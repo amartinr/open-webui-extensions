@@ -147,3 +147,44 @@ def test_gateway_normalization_is_deterministic():
     }
     _normalize_reasoning_for_gateway(body2)
     assert body["messages"] == body2["messages"]
+
+
+def test_reasoning_effort_upgrade_logic():
+    """v2.11.0: low/absent effort for deepseek models is upgraded to the
+    valve target; high/max and non-deepseek models are untouched."""
+    from agent_loop_guard import Pipe
+
+    p = Pipe()
+    p.valves = Pipe.Valves(REASONING_EFFORT="high")
+
+    # low -> upgraded
+    body = {"model": "deepseek/deepseek-v4-flash", "reasoning_effort": "low"}
+    assert p._upgrade_reasoning_effort(body) is True
+    assert body["reasoning_effort"] == "high"
+
+    # absent -> set
+    body = {"model": "deepseek/deepseek-v4-flash"}
+    assert p._upgrade_reasoning_effort(body) is True
+    assert body["reasoning_effort"] == "high"
+
+    # high -> untouched
+    body = {"model": "deepseek/deepseek-v4-flash", "reasoning_effort": "high"}
+    assert p._upgrade_reasoning_effort(body) is False
+    assert body["reasoning_effort"] == "high"
+
+    # max -> untouched
+    body = {"model": "deepseek/deepseek-v4-flash", "reasoning_effort": "max"}
+    assert p._upgrade_reasoning_effort(body) is False
+    assert body["reasoning_effort"] == "max"
+
+    # non-deepseek model -> untouched
+    body = {"model": "anthropic/claude-haiku-4-5", "reasoning_effort": "low"}
+    assert p._upgrade_reasoning_effort(body) is False
+    assert body["reasoning_effort"] == "low"
+
+    # valve disabled (empty) -> untouched
+    p2 = Pipe()
+    p2.valves = Pipe.Valves(REASONING_EFFORT="")
+    body = {"model": "deepseek/deepseek-v4-flash", "reasoning_effort": "low"}
+    assert p2._upgrade_reasoning_effort(body) is False
+    assert body["reasoning_effort"] == "low"
