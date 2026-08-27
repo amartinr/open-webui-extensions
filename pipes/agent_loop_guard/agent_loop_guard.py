@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.8.0
+version: 2.9.0
 licence: MIT
 """
 
@@ -114,6 +114,34 @@ def _normalize_reasoning_message(msg: dict) -> dict:
         if text:
             msg["reasoning_content"] = text
     return msg
+
+
+def _messages_summary(messages: list) -> str:
+    """Compact per-message shape summary for diagnostics.
+
+    One token per message: role + flags — T (has tool_calls), R (has
+    reasoning_content), r (has non-standard reasoning), D (has
+    reasoning_details), c (content is a list).
+    """
+    parts = []
+    for m in messages if isinstance(messages, list) else []:
+        if not isinstance(m, dict):
+            parts.append("?")
+            continue
+        role = m.get("role", "?")
+        flags = ""
+        if isinstance(m.get("tool_calls"), list) and len(m["tool_calls"]) > 0:
+            flags += "T"
+        if isinstance(m.get("reasoning_content"), str):
+            flags += "R"
+        if "reasoning" in m:
+            flags += "r"
+        if "reasoning_details" in m:
+            flags += "D"
+        if isinstance(m.get("content"), list):
+            flags += "c"
+        parts.append(f"{role}{flags or '-'}")
+    return "[" + " ".join(parts) + "]"
 
 
 def _history_has_tool_calls(messages: list) -> bool:
@@ -908,6 +936,7 @@ class Pipe:
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
+                stats = {"events": 0, "reasoning": 0, "content": 0, "tool_calls": 0, "done": False}
                 async for line in r.aiter_lines():
                     # Only forward well-formed OpenAI SSE data events. The rest is
                     # discarded so it can never reach the OpenAI-compatible
@@ -926,10 +955,34 @@ class Pipe:
                     stripped = line.strip()
                     if not stripped.startswith("data:") or stripped == "data: [DONE]":
                         continue
-                    payload = stripped.removeprefix("data:").strip()
-                    if not payload.startswith("{"):
+                    body = stripped.removeprefix("data:").strip()
+                    if not body.startswith("{"):
                         continue
+                    stats["events"] += 1
+                    try:
+                        ev = json.loads(body)
+                        delta = ((ev.get("choices") or [{}])[0].get("delta") or {})
+                        if isinstance(delta, dict):
+                            if delta.get("reasoning") or delta.get("reasoning_details") or delta.get("reasoning_content"):
+                                stats["reasoning"] += 1
+                            if delta.get("content"):
+                                stats["content"] += 1
+                            if delta.get("tool_calls"):
+                                stats["tool_calls"] += 1
+                        fr = ((ev.get("choices") or [{}])[0].get("finish_reason"))
+                        if fr:
+                            stats["done"] = True
+                    except Exception:
+                        pass
                     yield line
+                log.info(
+                    "bf-reasoning: response events=%d reasoning_deltas=%d content_deltas=%d tool_call_deltas=%d finish=%s",
+                    stats["events"],
+                    stats["reasoning"],
+                    stats["content"],
+                    stats["tool_calls"],
+                    "yes" if stats["done"] else "no",
+                )
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
         async with httpx.AsyncClient(timeout=300) as client:
@@ -1069,11 +1122,16 @@ class Pipe:
         # only hop that sees every outbound request to the gateway.
         try:
             renamed, forced = _normalize_reasoning_for_gateway(body)
+            has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
             log.info(
-                "bf-reasoning: renamed=%d forced=%d (model=%s, tool-call history present)",
+                "bf-reasoning: renamed=%d forced=%d (model=%s, tools=%s, "
+                "history_has_tool_calls=%s) | messages: %s",
                 renamed,
                 forced,
                 real_model,
+                has_tools,
+                _history_has_tool_calls(messages),
+                _messages_summary(messages),
             )
         except Exception as exc:
             log.warning("reasoning normalization failed (fail-open): %s", exc)
