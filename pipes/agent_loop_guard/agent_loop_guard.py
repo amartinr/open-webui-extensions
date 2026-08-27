@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.9.0
+version: 2.10.0
 licence: MIT
 """
 
@@ -1123,15 +1123,21 @@ class Pipe:
         try:
             renamed, forced = _normalize_reasoning_for_gateway(body)
             has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
+            params = {
+                k: v
+                for k, v in body.items()
+                if k not in ("messages", "tools", "model", "metadata", "files")
+            }
             log.info(
                 "bf-reasoning: renamed=%d forced=%d (model=%s, tools=%s, "
-                "history_has_tool_calls=%s) | messages: %s",
+                "history_has_tool_calls=%s) | messages: %s | params: %s",
                 renamed,
                 forced,
                 real_model,
                 has_tools,
                 _history_has_tool_calls(messages),
                 _messages_summary(messages),
+                params,
             )
         except Exception as exc:
             log.warning("reasoning normalization failed (fail-open): %s", exc)
