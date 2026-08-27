@@ -16,7 +16,7 @@ description: >
   reasoning on the next turn otherwise (same fix as the
   pi-bifrost-reasoning-fix pi extension).
 required_open_webui_version: 0.11.0
-version: 3.2.0
+version: 3.3.0
 """
 
 import logging
@@ -289,6 +289,18 @@ class Filter:
         has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
         if has_tools or _history_has_tool_calls(cleaned):
             _force_reasoning_content_on_tools(cleaned)
+            logger.info(
+                "bf-reasoning: inlet forced reasoning_content on tool-calling "
+                "history (model=%s, tools=%s)",
+                model.get("id", ""),
+                has_tools,
+            )
+        else:
+            logger.info(
+                "bf-reasoning: inlet cleanup only (model=%s, no tool-calling "
+                "scope)",
+                model.get("id", ""),
+            )
 
         return body
 
