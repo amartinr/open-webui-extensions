@@ -18,7 +18,7 @@ description: >
   conversion leaves reasoning_details in place so Open WebUI can store
   and replay the real reasoning text.
 required_open_webui_version: 0.11.0
-version: 3.4.0
+version: 3.4.1
 """
 
 import logging
@@ -168,8 +168,10 @@ def _fix_delta(delta: dict) -> dict:
     # Variant A: delta.reasoning (incremental plain text)
     if "reasoning" in delta:
         reasoning = delta.pop("reasoning")
-        used = True  # field present; we consume it as the source of truth
+        # only consume it as the source of truth when it carries text — an
+        # empty-string opening event must still fall back to the details
         if isinstance(reasoning, str) and reasoning:
+            used = True
             existing = delta.get("reasoning_content", "")
             existing = existing if isinstance(existing, str) else ""
             delta["reasoning_content"] = existing + reasoning
