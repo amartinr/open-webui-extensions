@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.7.0
+version: 2.8.0
 licence: MIT
 """
 
@@ -134,20 +134,26 @@ def _history_has_tool_calls(messages: list) -> bool:
     )
 
 
-def _force_reasoning_content_on_tools(messages: list) -> None:
+def _force_reasoning_content_on_tools(messages: list) -> int:
     """Guarantee every assistant message carries `reasoning_content`.
 
     DeepSeek silently drops reasoning when a tool-calling history replays an
     assistant message without `reasoning_content` (empty string is enough).
     Same forcing step as pi-bifrost-reasoning-fix's normalizePayload().
+
+    Returns the number of assistant messages that were given an empty
+    `reasoning_content` (for diagnostics).
     """
+    forced = 0
     for msg in messages:
         if isinstance(msg, dict) and msg.get("role") == "assistant":
             if not isinstance(msg.get("reasoning_content"), str):
                 msg["reasoning_content"] = ""
+                forced += 1
+    return forced
 
 
-def _normalize_reasoning_for_gateway(body: dict) -> None:
+def _normalize_reasoning_for_gateway(body: dict) -> tuple[int, int]:
     """Normalize the outbound payload in place (Bifrost → DeepSeek fix).
 
     1. Rename assistant `reasoning` / `reasoning_details` into
@@ -158,17 +164,23 @@ def _normalize_reasoning_for_gateway(body: dict) -> None:
 
     Never touches user/system/tool messages and is deterministic, so the
     provider prefix cache is not invalidated by the rewrite.
+
+    Returns (renamed, forced) counts for diagnostics.
     """
     messages = body.get("messages")
     if not isinstance(messages, list):
-        return
+        return 0, 0
+    renamed = 0
     for i, msg in enumerate(messages):
         if isinstance(msg, dict) and msg.get("role") == "assistant":
             if _has_bifrost_residue(msg):
                 messages[i] = _normalize_reasoning_message(msg)
+                renamed += 1
     has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
     if has_tools or _history_has_tool_calls(messages):
-        _force_reasoning_content_on_tools(messages)
+        forced = _force_reasoning_content_on_tools(messages)
+        return renamed, forced
+    return renamed, 0
 
 
 # --------------------------------------------------------------------------
@@ -1056,7 +1068,13 @@ class Pipe:
         # tool-call continuations bypass filter inlets, so this pipe is the
         # only hop that sees every outbound request to the gateway.
         try:
-            _normalize_reasoning_for_gateway(body)
+            renamed, forced = _normalize_reasoning_for_gateway(body)
+            log.info(
+                "bf-reasoning: renamed=%d forced=%d (model=%s, tool-call history present)",
+                renamed,
+                forced,
+                real_model,
+            )
         except Exception as exc:
             log.warning("reasoning normalization failed (fail-open): %s", exc)
 
