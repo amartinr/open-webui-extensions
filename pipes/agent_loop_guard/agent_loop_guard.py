@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.12.0
+version: 2.13.0
 licence: MIT
 """
 
@@ -169,6 +169,55 @@ def _normalize_reasoning_message(msg: dict) -> dict:
         if text:
             msg["reasoning_content"] = text
     return msg
+
+
+def _clean_stream_delta(delta: dict) -> bool:
+    """Normalize a Bifrost stream delta for Open WebUI's streaming handler.
+
+    Bifrost sends each reasoning fragment in BOTH delta.reasoning (plain text)
+    and delta.reasoning_details (list of blocks). Open WebUI's handler reads
+    delta.reasoning natively as reasoning_content, but it SUPPRESSES the live
+    `response.reasoning_text.delta` event whenever a delta carries
+    reasoning_details (it sets data=None and only saves to DB). Left unstripped,
+    the reasoning never streams live: it pops in only at the end, expanded, and
+    briefly interleaves with the content (the reported "glitch").
+
+    This mirrors the bifrost_reasoning_content_fix filter's stream handling:
+    reasoning -> reasoning_content, and both non-standard fields are removed.
+    The pipe is the single choke point for every gateway response, so doing it
+    here works even when that filter is not attached to the pipe model.
+
+    Returns True when the delta was modified (caller must re-serialize the
+    enclosing event).
+    """
+    if not isinstance(delta, dict):
+        return False
+
+    modified = False
+    used = False
+
+    if "reasoning" in delta:
+        reasoning = delta.pop("reasoning")
+        modified = True
+        if isinstance(reasoning, str) and reasoning:
+            used = True
+            existing = delta.get("reasoning_content", "")
+            existing = existing if isinstance(existing, str) else ""
+            delta["reasoning_content"] = existing + reasoning
+
+    if not used:
+        text = _extract_reasoning_text(delta.get("reasoning_details"))
+        if text:
+            existing = delta.get("reasoning_content", "")
+            existing = existing if isinstance(existing, str) else ""
+            delta["reasoning_content"] = existing + text
+            modified = True
+
+    if "reasoning_details" in delta:
+        delta.pop("reasoning_details", None)
+        modified = True
+
+    return modified
 
 
 def _messages_summary(messages: list) -> str:
@@ -1024,6 +1073,10 @@ class Pipe:
                                 stats["content"] += 1
                             if delta.get("tool_calls"):
                                 stats["tool_calls"] += 1
+                            # Normalize Bifrost's non-standard reasoning fields so
+                            # Open WebUI streams reasoning live (see _clean_stream_delta).
+                            if _clean_stream_delta(delta):
+                                line = "data: " + json.dumps(ev, ensure_ascii=False)
                         fr = ((ev.get("choices") or [{}])[0].get("finish_reason"))
                         if fr:
                             stats["done"] = True
