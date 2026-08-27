@@ -994,9 +994,7 @@ class Pipe:
     # Main entry point
     # ------------------------------------------------------------------
 
-
     async def pipe(
-
         self,
         body: dict,
         __user__: Optional[dict] = None,
@@ -1141,7 +1139,6 @@ class Pipe:
                 _messages_summary(messages),
                 params,
             )
-
         except Exception as exc:
             log.warning("reasoning normalization failed (fail-open): %s", exc)
 
