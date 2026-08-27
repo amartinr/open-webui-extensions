@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.10.0
+version: 2.12.0
 licence: MIT
 """
 
@@ -22,6 +22,61 @@ log = logging.getLogger(__name__)
 
 
 GUARD_MARKER = "[Tool call budget exhausted]"
+
+
+# --------------------------------------------------------------------------
+# Open WebUI reasoning-replay patch (DeepSeek/Bifrost tool-calling)
+# --------------------------------------------------------------------------
+#
+# Open WebUI's get_reasoning_format() returns None for every OpenAI-compatible
+# model (owned_by='openai'), including pipe models. convert_output_to_messages()
+# therefore DROPS the stored reasoning when it rebuilds assistant history for a
+# tool-call continuation, so the replayed assistant reaches Bifrost without
+# reasoning_content and DeepSeek silently stops reasoning on the next turn.
+#
+# This monkey-patches get_reasoning_format so OUR pipe model replays reasoning
+# as 'reasoning_content'. Open WebUI then reconstructs the assistant with the
+# REAL reasoning text and this pipe forwards it unchanged. It is scoped to pipe
+# models only (owned_by='openai' AND a 'pipe' key), so direct OpenAI connections
+# and Ollama/llama.cpp models keep their original behavior. It fails open: if
+# Open WebUI ever changes these internals, the pipe still falls back to the
+# empty-string forcing below (no crash, no complete reasoning loss).
+def _install_reasoning_replay_patch() -> None:
+    try:
+        from open_webui.utils import middleware as _mw
+
+        current = _mw.get_reasoning_format
+        if getattr(current, "_bf_reasoning_patched", False):
+            return
+
+        original = current
+
+        def _patched(model):
+            result = original(model)
+            if result is not None:
+                return result
+            if (
+                isinstance(model, dict)
+                and model.get("owned_by") == "openai"
+                and model.get("pipe")
+            ):
+                return "reasoning_content"
+            return result
+
+        _patched._bf_reasoning_patched = True
+        _mw.get_reasoning_format = _patched
+        log.info(
+            "bf-reasoning: patched get_reasoning_format for pipe-model reasoning replay"
+        )
+    except Exception as exc:
+        log.warning(
+            "bf-reasoning: could not patch get_reasoning_format "
+            "(falling back to empty-string forcing): %s",
+            exc,
+        )
+
+
+_install_reasoning_replay_patch()
 
 
 # --------------------------------------------------------------------------
