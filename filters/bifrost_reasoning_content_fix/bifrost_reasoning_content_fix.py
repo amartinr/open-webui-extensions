@@ -18,7 +18,7 @@ description: >
   conversion leaves reasoning_details in place so Open WebUI can store
   and replay the real reasoning text.
 required_open_webui_version: 0.11.0
-version: 3.4.1
+version: 3.5.0
 """
 
 import logging
@@ -151,25 +151,25 @@ def _fix_delta(delta: dict) -> dict:
     is the piece that made the model 'stop reasoning' when the old filter
     discarded it.
 
-    `reasoning_details` are intentionally LEFT in the delta (v3.4.0):
-    Open WebUI stores them on the reasoning output item, the history
-    replay (convert_output_to_messages raw=True) then carries the real
-    reasoning text back to the provider, and the agent_loop_guard pipe
-    converts them into `reasoning_content`. Dropping them here is what
-    made the replayed history carry an empty reasoning_content — and
-    DeepSeek stops reasoning on later turns when the previous assistant
-    shows no reasoning.
+    `reasoning_details` are ALWAYS removed from the delta (v3.5.0):
+    Open WebUI's stream handler suppresses the frontend
+    `response.reasoning_text.delta` event whenever a delta carries
+    reasoning_details (it sets data=None and only saves to DB), so
+    keeping them broke the streaming display. The display text is already
+    in `reasoning_content`; the history-replay of the real text is not
+    possible from the stream side without breaking SSE, so the inlet/pipe
+    forcing (v3.2.0+) covers the replay requirement instead.
     """
     if not isinstance(delta, dict):
         return delta
 
     used = False
 
-    # Variant A: delta.reasoning (incremental plain text)
+    # Variant A: delta.reasoning (incremental plain text). Only consume it
+    # as the source of truth when it carries text — an empty-string opening
+    # event must still fall back to the details.
     if "reasoning" in delta:
         reasoning = delta.pop("reasoning")
-        # only consume it as the source of truth when it carries text — an
-        # empty-string opening event must still fall back to the details
         if isinstance(reasoning, str) and reasoning:
             used = True
             existing = delta.get("reasoning_content", "")
@@ -177,14 +177,17 @@ def _fix_delta(delta: dict) -> dict:
             delta["reasoning_content"] = existing + reasoning
 
     # Variant B: delta.reasoning_details (list of blocks) -> fallback only.
-    # Details are read but never removed: they must reach Open WebUI so the
-    # stored reasoning item can replay the real text on the next turn.
     if not used:
         text = _extract_reasoning_text(delta.get("reasoning_details"))
         if text:
             existing = delta.get("reasoning_content", "")
             existing = existing if isinstance(existing, str) else ""
             delta["reasoning_content"] = existing + text
+
+    # Never let Bifrost's non-standard fields reach Open WebUI: the handler
+    # uses their presence to decide display events (see docstring).
+    delta.pop("reasoning", None)
+    delta.pop("reasoning_details", None)
 
     return delta
 

@@ -156,22 +156,22 @@ def test_inlet_ignores_non_target_models():
     assert out["messages"][1] == {"role": "assistant", "content": "r1"}
 
 
-def test_fix_delta_converts_and_preserves_details():
-    """v3.4.0: reasoning_details are kept in the delta (not dropped) so
-    Open WebUI stores them and the next turn replays the real text."""
+def test_fix_delta_converts_and_strips_details():
+    """v3.5.0: reasoning_details are stripped from the delta so Open
+    WebUI keeps emitting response.reasoning_text.delta events (its handler
+    suppresses them when details are present). Text lands in
+    reasoning_content; the empty-string fallback covers Bifrost #974."""
     from bifrost_reasoning_content_fix import _fix_delta
 
-    # normal fragment: reasoning + duplicated details -> converted, details kept
+    # normal fragment: reasoning + duplicated details -> converted, details stripped
     delta = {
         "reasoning": "El usuario",
         "reasoning_details": [{"index": 0, "type": "reasoning.text", "text": "El usuario"}],
     }
     _fix_delta(delta)
     assert delta["reasoning_content"] == "El usuario"
-    assert delta["reasoning_details"] == [
-        {"index": 0, "type": "reasoning.text", "text": "El usuario"}
-    ]  # preserved for replay
     assert "reasoning" not in delta
+    assert "reasoning_details" not in delta  # stripped: keeps SSE streaming alive
 
     # empty reasoning + details with text (Bifrost #974 case) -> details used
     delta = {
@@ -180,10 +180,10 @@ def test_fix_delta_converts_and_preserves_details():
     }
     _fix_delta(delta)
     assert delta["reasoning_content"] == "primera parte"
-    assert delta["reasoning_details"]  # still preserved
+    assert "reasoning" not in delta and "reasoning_details" not in delta
 
     # details absent -> nothing
     delta = {"reasoning": "solo texto"}
     _fix_delta(delta)
     assert delta["reasoning_content"] == "solo texto"
-    assert "reasoning_details" not in delta
+    assert "reasoning" not in delta and "reasoning_details" not in delta
