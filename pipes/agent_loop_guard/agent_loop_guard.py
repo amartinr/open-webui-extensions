@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.16.0
+version: 2.16.1
 licence: MIT
 """
 
