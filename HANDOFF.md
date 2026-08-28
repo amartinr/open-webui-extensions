@@ -195,13 +195,39 @@ unrelated to the current issue.
    same tool-call-continuation payload → non-stream has `reasoning` (128+
    chars), stream emits only the empty opening delta. Reference #6523.
    Include the probe script invocation and the observed mismatch sample.
-2. **Optional, only if the residual drop is unacceptable:** probe
-   `transports/v2.0.0` (core 1.8.3) — it may include stream fixes, but there
-   is no evidence either way yet. Do NOT expect a fix in this repo.
+2. **Probe `transports/v2.0.0` (core 1.8.3) — now the primary candidate.**
+   Session 6 found that core 1.8.0+ added a `MarshalJSON` to
+   `ChatStreamResponseChoiceDelta` that emits the reasoning phase under BOTH
+   `reasoning` and `reasoning_content` in streaming deltas (see below). This
+   directly targets the SSE-side bug #2. User is testing 2.0.0 now — if the
+   intermittent drop disappears, bug #2 is fixed upstream and the
+   extension's `_clean_stream_delta` / monkey patch can be relaxed.
 3. **Optional:** fix the secondary chip-off bug (strip `thinking:disabled`
    only when opt-in).
 4. Re-check the original downgrade reason (1.6.11 harness integration issues)
    now that 1.6.11 is re-deployed — separate concern from reasoning.
+
+## Session 6 finding: SSE fix landed in core 1.8.0 (relevant for bug #2)
+
+Verified in the `transports/v2.0.0` tag (embeds core 1.8.3) vs the current
+`transports/v1.6.11` (core 1.7.10):
+
+- **NEW in core 1.8.0** — `core/schemas/chatcompletions.go`,
+  `ChatStreamResponseChoiceDelta` now has a custom `MarshalJSON` that emits
+  the reasoning phase under BOTH `reasoning` AND `reasoning_content` on
+  outbound stream deltas (absent in 1.7.10, present in 1.8.0/1.8.3). Code
+  comment: *"DeepSeek streams its thinking phase under `reasoning_content`,
+  so a client written against that wire watched a Bifrost stream emit the
+  entire reasoning phase under a key it never read."* This is exactly the
+  #6523-family mismatch observed in session 5 (non-stream has reasoning,
+  stream does not deliver it in a field clients read).
+- Other relevant changes in 1.7.10→1.8.3: #5900 (omit `name` on streaming
+  continuation deltas), #6293 (finer reasoning-with-tools param handling in
+  `dropUnsupportedParams`), several streaming telemetry/heartbeat fixes.
+- If 2.0.0 (core 1.8.3) resolves the intermittent drop, the extensions stay
+  as a safety net but the reasoning replay patch and delta normalization
+  become redundant for the stream side (still needed for the OWUI
+  history-reconstruction path, which is independent of Bifrost).
 
 ## Lessons (all sessions)
 
