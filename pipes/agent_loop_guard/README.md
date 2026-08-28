@@ -274,6 +274,50 @@ This complements `filters/bifrost_reasoning_content_fix` (v3.2.0), whose
 `inlet` applies the same normalization to fresh user turns (where history
 from earlier tool-calling turns is replayed).
 
+### ⚠️ We monkey-patch Open WebUI's internals (v2.12.0) — and here is why
+
+To make the replay above work, this pipe **replaces a function inside Open
+WebUI at import time** (`_install_reasoning_replay_patch`): it swaps
+`open_webui.utils.middleware.get_reasoning_format` for a wrapped version.
+
+**Why it is needed.** When Open WebUI rebuilds assistant history for a
+tool-call continuation, it asks `get_reasoning_format(model)` how to replay
+the stored reasoning. In v0.11.x that function returns a format only for
+Ollama (`'thinking'`) and llama.cpp (`'reasoning_content'`) models, and
+**`None` for every OpenAI-compatible model — including pipe models**. With
+`None`, `convert_output_to_messages` **discards the reasoning entirely**, so
+the replayed assistant reaches Bifrost without `reasoning_content` and
+DeepSeek silently stops reasoning on the next turn. No amount of payload
+normalization downstream can recover text that was already dropped here.
+
+**What the patch does.** For models that are `owned_by == "openai"` **and**
+carry a `pipe` key (i.e. *our* pipe model), it makes
+`get_reasoning_format` return `'reasoning_content'`. Open WebUI then
+rebuilds the assistant with the **real reasoning text** in that field, and
+the pipe's normalization (above) forwards it unchanged. It is scoped so
+direct OpenAI connections and Ollama/llama.cpp models keep their original
+behavior.
+
+**Why this is acceptable (fail-open, idempotent).**
+
+- The patch is applied once, at import, and short-circuits on a marker
+  attribute (`_bf_reasoning_patched`) if already installed.
+- It is **fail-open**: if Open WebUI ever changes these internals, the
+  patch raises and the pipe falls back to the empty-string forcing below —
+  no crash, no total reasoning loss, just a less ideal replay.
+- It only ever *adds* a return value for a case that previously returned
+  `None`; it never removes or alters behavior for other models.
+
+**The cost / the trade-off.** This is a deliberate dependency on Open
+WebUI's private implementation details (`middleware.get_reasoning_format`
+and the `convert_output_to_messages` contract). A future Open WebUI
+release can break or supersede it (e.g. by returning `'reasoning_content'`
+natively for pipe models, which would make this patch a no-op). The patch
+is the difference between "reasoning text survives the tool-call
+continuation" and "DeepSeek stops reasoning mid-conversation" on the
+current stack (Open WebUI v0.11.x + Bifrost + DeepSeek v4), which is why we
+accept the coupling — documented here so the decision is explicit.
+
 ---
 
 ## Architecture
