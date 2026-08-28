@@ -1,6 +1,6 @@
 # Bifrost reasoning_content fix
 
-Open WebUI filter (>= 0.11, v3.2.0) that converts Bifrost's non-standard
+Open WebUI filter (>= 0.11) that converts Bifrost's non-standard
 `reasoning` + `reasoning_details` response fields back to the standard
 OpenAI `reasoning_content` format, and keeps DeepSeek reasoning alive
 across tool-calling turns.
@@ -99,10 +99,12 @@ Differences:
 
 - reasoning is carried in `delta.reasoning` and `delta.reasoning_details`
   instead of `delta.reasoning_content`;
-- the same incremental text is duplicated across both fields (neither is
-  the standard field);
-- `delta.reasoning_content` is never emitted, so an OpenAI-compatible
-  client sees no reasoning;
+- the same incremental text is duplicated across both fields;
+- before Bifrost core 1.8.0, `delta.reasoning_content` was never emitted,
+  so an OpenAI-compatible client saw no reasoning. Since core 1.8.0 the
+  delta also carries `reasoning_content` (verified on Bifrost 2.0.0), but
+  `reasoning_details` is still present and Open WebUI v0.11.1 still
+  suppresses the frontend reasoning event when a delta carries it;
 - the final `usage` carries non-standard `reasoning_tokens`.
 
 The filter maps the Bifrost event to the OpenAI shape:
@@ -131,8 +133,7 @@ from the `outlet`. It parses **each SSE chunk into a dict**
    **stripped from the delta**: Open WebUI's stream handler suppresses the
    frontend `response.reasoning_text.delta` event whenever a delta carries
    `reasoning_details` (it sets `data=None` and only saves to DB), so
-   keeping them broke the streaming display (v3.4.x regression, reverted
-   in v3.5.0).
+   keeping them breaks the streaming display.
 3. **Top-level `event['usage']`** (final streaming chunk) —
    `reasoning_tokens` are kept by default (Open WebUI and token-usage
    filters read them) and are removed only when the
@@ -162,7 +163,7 @@ non-standard Bifrost fields (`reasoning` or `reasoning_details`).
 Messages already normalised by the `outlet` in a previous turn are left
 untouched.
 
-Since v3.2.0 it also ports the fix from the
+The `inlet` also ports the fix from the
 [`pi-bifrost-reasoning-fix`](https://github.com/amartinr/pi-bifrost-reasoning-fix)
 pi extension: **once the history contains an assistant tool call (or the
 request carries `tools`), every assistant message is forced to carry
@@ -188,28 +189,23 @@ Validated against a live Bifrost endpoint (`deepseek/deepseek-v4-flash`):
 
 ## Upstream Bifrost issues
 
-The underlying problems are tracked upstream and remain open:
+Reference links for the behaviors this filter addresses (state not tracked
+here — see the linked issues for current status):
 
 - **[maximhq/bifrost#5325](https://github.com/maximhq/bifrost/issues/5325)** —
-  reasoning is emitted in Bifrost-specific fields (`reasoning` /
-  `reasoning_details`) instead of `reasoning_content`, so a generic
-  OpenAI-compatible client ignores it.
+  reasoning emitted in Bifrost-specific fields (`reasoning` /
+  `reasoning_details`) instead of `reasoning_content`.
 - **[maximhq/bifrost#974](https://github.com/maximhq/bifrost/issues/974)** —
-  streaming `delta.reasoning` is dropped for some providers (Gemini). The
-  filter cannot recover reasoning that never arrives; pin a known-good
-  Bifrost version or report upstream.
+  streaming `delta.reasoning` dropped for some providers (Gemini). The
+  filter cannot recover reasoning that never arrives.
 - **[maximhq/bifrost#6523](https://github.com/maximhq/bifrost/issues/6523)** —
-  opening role-only SSE chunks are dropped, breaking stream assembly in
-  OpenAI-compatible SDKs (LangChain tool-calls/usage). Mitigated by the
-  `agent_loop_guard` SSE filter (v2.6.0).
+  opening role-only SSE chunks dropped, breaking stream assembly in
+  OpenAI-compatible SDKs. The `agent_loop_guard` pipe's SSE filter drops
+  non-`data:` lines from the relay.
 - **[maximhq/bifrost#5169](https://github.com/maximhq/bifrost/issues/5169)** —
   the Chat→Responses stream converter emits reasoning deltas without an
-  opening event, crashing strict Anthropic SDK clients. Bifrost-side;
-  affects Anthropic-compat streaming only.
-
-If Bifrost implements a standard `reasoning_content` dialect
-([#5325](https://github.com/maximhq/bifrost/issues/5325)) and fixes its SSE
-normalization, this filter can be relaxed or removed.
+  opening event, crashing strict Anthropic SDK clients. Affects
+  Anthropic-compat streaming only.
 
 ## Requirements
 
