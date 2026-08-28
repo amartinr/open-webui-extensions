@@ -4,19 +4,22 @@
 > anything. It supersedes the previous HANDOFFs.
 >
 > **Versioning warning (IMPORTANT):** Bifrost is a monorepo where the
-> **transport** (the deployable package, `npx/bifrost/v*`, what `/api/version`
-> reports) and the **core** (the gateway engine, `core/v*`) are versioned
-> independently. A transport release embeds a specific core+framework version
-> (see `docs.getbifrost.ai/changelogs/<transport-version>`). **Never assume the
-> numbers match**: e.g. the GitHub tag `npx/bifrost/v1.6.3` contains core
-> v1.5.11 (outdated, no DeepSeek provider) and is NOT representative of what
-> runs in production. The reliable code reference is the `core/v*` tags.
+> **transport** (the deployable package, tag `transports/v*` — an old alias
+> `npx/bifrost/v*` exists but is stale, what `/api/version` reports) and the
+> **core** (the gateway engine, tag `core/v*`) are versioned independently. A
+> transport release embeds a specific core version, declared in the file
+> `core/version` inside that transport's tag (authoritative — do NOT infer it
+> from the changelog page, which lists several core versions per transport
+> page and is easy to misread). **Never assume the numbers match**: e.g. the
+> GitHub tag `npx/bifrost/v1.6.3` contains core v1.5.11 (outdated, no DeepSeek
+> provider) and is NOT representative of what runs in production; and the
+> transport `transports/v1.6.11` embeds core **1.7.10** (NOT 1.6.11). The
+> reliable code reference is the `core/v*` tags.
 
-## TL;DR (session 3 conclusion)
+## TL;DR (session 3 conclusion, updated session 4)
 
-- User runs **Bifrost transport v1.6.3** (= core v1.6.3 + framework v1.4.3 per
-  the changelog: "feat: added DeepSeek as a first-class provider (#4852)" +
-  "chore: upgraded core to v1.6.3 and framework to v1.4.3"). Confirmed live:
+- User runs **Bifrost transport v1.6.3** (embeds core 1.6.3 — verified from
+  `core/version` in tag `transports/v1.6.3`). Confirmed live:
   `GET http://bifrost.private/api/version` → `"v1.6.3"`.
 - **ROOT CAUSE FOUND** — it is a Bifrost **core v1.6.3** bug, not an Open WebUI
   or extension bug. In `core/providers/openai/chat.go`, DeepSeek is handled in
@@ -31,7 +34,7 @@
   contract (reasoning_content must be replayed on tool-call turns). Result:
   on tool-call continuations DeepSeek intermittently refuses to reason and only
   emits the empty opening delta (`reasoning_deltas=1`).
-- **The fix exists upstream in core v1.7.10 and v1.7.11** (verified by cloning
+- The fix exists upstream in **core v1.7.10 and v1.7.11** (verified by cloning
   both tags): DeepSeek gets its own case with
   `stripReasoningDetailsExceptToolCalls()`, which preserves reasoning_content on
   assistant tool-call turns (issue **#5887**). Code comment:
@@ -83,16 +86,29 @@ reasoning. The v1.7.10/1.7.11 "retry after unverifiable reasoning refusal"
 changes from the changelog are a related hardening, but the mechanism that
 matches our symptom exactly is the `stripReasoningDetailsExceptToolCalls` fix.
 
-## Transport ↔ core version mapping (from docs.getbifrost.ai changelogs)
+## Transport ↔ core version mapping (from `core/version` in each tag — authoritative)
 
-| Transport (what `/api/version` reports) | Embedded core | Notes |
+| Transport tag (`/api/version` reports this) | Embedded core (`core/version`) | Notes |
 |---|---|---|
-| v1.6.3 (current) | core v1.6.3 + framework v1.4.3 | has the bug |
-| v1.6.11 (user's previous) | was downgraded from — check its changelog before assuming | integration issues with other harnesses (unrelated to reasoning) |
-| v1.7.10 / v1.7.11 transports | core v1.7.10 + framework v1.5.10 per changelog ("1.6.10", "1.6.14", "0.1.36", "1.5.37" etc. also embed core v1.7.10) | has the fix |
+| `transports/v1.6.3` (current) | **1.6.3** | has the bug |
+| `transports/v1.6.11` (user's previous) | **1.7.10** | **has the fix** — this is the recommended re-upgrade |
+| `transports/v2.0.0-prerelease1` | 1.7.0 | — |
+| `transports/v2.0.0-prerelease2` | 1.7.2 | — |
+| `transports/v2.0.0-prerelease3` | 1.7.11 | has the fix |
+| `transports/v2.0.0` | 1.8.3 | has the fix (bigger jump, not needed for this bug) |
 
-When picking an upgrade, look at the transport's changelog to confirm it
-embeds **core ≥ v1.7.10**, do not trust the number alone.
+How to read the mapping (no Docker needed, repo is already cloned at
+`/srv/pi/bifrost-npx`):
+
+```bash
+cd /srv/pi/bifrost-npx
+for tag in transports/v1.6.3 transports/v1.6.11 transports/v2.0.0; do
+  echo "$tag -> $(git show $tag:core/version | head -1)"
+done
+```
+
+When picking an upgrade, check `core/version` in the transport's tag — do not
+trust the transport number alone.
 
 ## Symptom (live Open WebUI)
 
@@ -161,19 +177,24 @@ remove the strip or gate behind an opt-in valve (default off).
   tool-call-continuation + thinking+effort combination).
 - Cloned Bifrost core v1.6.3, v1.7.10, v1.7.11 and the (misleading) npx
   transport tag. Found the exact bug and the exact fix with line-level diff.
+- Fetched all tags in the existing `/srv/pi/bifrost-npx` clone and read
+  `core/version` per transport tag — established the authoritative
+  transport↔core map (v1.6.11 → core 1.7.10, v2.0.0 → core 1.8.3).
 - Confirmed via the user's DB that reasoning storage in OWUI is intact.
 - Ran unit tests: filter 9/9; pipe 8/8 (via `python3 -m pytest`; in-repo
   `.venv` no longer exists).
 
 ## Next steps
 
-1. **Upgrade Bifrost transport to one embedding core ≥ v1.7.10** (e.g. a
-   v1.7.10/v1.7.11 transport; confirm via changelog). Re-run
-   `node /tmp/repro3.mjs 10 toolhistory` and the live trace — the drops
-   should disappear on tool-call continuations.
+1. **Re-upgrade to `transports/v1.6.11`** (embeds core 1.7.10, has the fix;
+   user has already done this). Re-run `node /tmp/repro3.mjs 10 toolhistory`
+   and the live trace — the drops should disappear on tool-call
+   continuations. (The user's earlier downgrade from 1.6.11 to 1.6.3 was for
+   harness-integration reasons; 1.6.11 also has the reasoning fix, so both
+   concerns should now be re-tested together.)
 2. **Revisit the downgrade reason** (1.6.11 integration issues with other
-   harnesses) once reasoning is confirmed fixed on a core ≥ v1.7.10, so the
-   version choice is a single decision.
+   harnesses) — now that 1.6.11 is re-deployed, confirm whether those issues
+   persist; they are unrelated to the reasoning fix.
 3. Keep the extensions as a safety net (dialect normalization + forcing are
    correct and harmless); they just cannot fix the core wipe.
 4. Optional: fix the secondary chip-off bug (strip `thinking:disabled` only
@@ -194,9 +215,10 @@ remove the strip or gate behind an opt-in valve (default off).
    this repo.** Deploy = re-paste + restart if `stream()` changed.
 4. **Do not commit the Bifrost API key** (lives in `models.json` /
    `BIFROST_*` / pi extension config).
-5. **Bifrost transport and core versions are independent** — map them via
-   `docs.getbifrost.ai/changelogs`, never assume equal numbers; the GitHub
-   `npx/bifrost/v*` tags are stale (v1.6.3 tag contains core v1.5.11).
+5. **Bifrost transport and core versions are independent** — read `core/version`
+   inside the transport's tag, never assume equal numbers; the changelog page
+   and the stale `npx/bifrost/v*` tags are both misleading (the npx v1.6.3
+   tag contains core v1.5.11).
 
 ## Useful commands
 
