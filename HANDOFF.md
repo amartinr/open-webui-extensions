@@ -38,7 +38,7 @@
   `reasoning` (89–300+ chars) even on tool-call turns — DeepSeek low is not
   "skipping reasoning". The reasoning disappears in Bifrost's SSE emission,
   not in the model.
-- **The extensions (filter v3.5.0 + pipe v2.14.1) are correct, still
+- **The extensions (filter v3.5.0 + pipe v2.15.0) are correct, still
   necessary, and cannot fix either upstream bug.** They are a safety net for
   the dialect normalization + replay; nothing to change in this repo.
 - **Nothing more can be done from this side** beyond reporting the SSE loss
@@ -57,7 +57,7 @@
 | `../bifrost-core-1711` | Bifrost core v1.7.11 (fix #1 present) |
 | `../bifrost-npx` | full monorepo clone with all `transports/v*` + `core/v*` tags (source of truth for version map) |
 | `filters/bifrost_reasoning_content_fix` | filter v3.5.0 |
-| `pipes/agent_loop_guard` | pipe v2.14.1 (gateway proxy + loop guard + reasoning fix + R0/R{n} trace) |
+| `pipes/agent_loop_guard` | pipe v2.15.0 (gateway proxy + loop guard + reasoning fix + R0/R{n} trace) |
 | `pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs` | **integration probe** (committed): detects SSE-vs-request-side reasoning loss against a live Bifrost |
 
 Deployment: **Open WebUI v0.11.1** → **Bifrost transport 1.6.11** (core 1.7.10,

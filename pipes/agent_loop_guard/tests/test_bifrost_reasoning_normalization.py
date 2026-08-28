@@ -148,3 +148,24 @@ def test_gateway_normalization_is_deterministic():
     _normalize_reasoning_for_gateway(body2)
     assert body["messages"] == body2["messages"]
 
+
+
+def test_messages_summary_verbose_flag():
+    """The R0/R{n} trace is opt-in via the verbose flag (REASONING_DEBUG_LOG).
+
+    Default (verbose=False) keeps the compact 'R' flag for a reasoning_content
+    that is present, matching the pre-debug behavior; verbose=True distinguishes
+    R0 (present-but-empty) from R<n> (text length).
+    """
+    from agent_loop_guard import _messages_summary
+
+    msgs = [
+        _assistant(content="", reasoning_content=""),
+        _assistant(content="", reasoning_content="some text"),
+        {"role": "user", "content": "q"},
+    ]
+    compact = _messages_summary(msgs)
+    verbose = _messages_summary(msgs, verbose=True)
+    assert "R0" not in compact
+    assert "R" in compact
+    assert "R0" in verbose and "R9" in verbose
