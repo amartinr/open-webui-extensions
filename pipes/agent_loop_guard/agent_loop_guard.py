@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.14.0
+version: 2.15.0
 licence: MIT
 """
 
@@ -220,12 +220,16 @@ def _clean_stream_delta(delta: dict) -> bool:
     return modified
 
 
-def _messages_summary(messages: list) -> str:
+def _messages_summary(messages: list, verbose: bool = False) -> str:
     """Compact per-message shape summary for diagnostics.
 
     One token per message: role + flags — T (has tool_calls), R (has
     reasoning_content), r (has non-standard reasoning), D (has
     reasoning_details), c (content is a list).
+
+    With `verbose=True` the reasoning flag distinguishes R0 (present-but-
+    empty — the dangerous case: DeepSeek sees empty reasoning and may stop
+    reasoning) from R<n> (present with text of length n).
     """
     parts = []
     for m in messages if isinstance(messages, list) else []:
@@ -236,8 +240,12 @@ def _messages_summary(messages: list) -> str:
         flags = ""
         if isinstance(m.get("tool_calls"), list) and len(m["tool_calls"]) > 0:
             flags += "T"
-        if isinstance(m.get("reasoning_content"), str):
-            flags += "R"
+        rc = m.get("reasoning_content")
+        if isinstance(rc, str):
+            if verbose:
+                flags += "R0" if rc == "" else f"R{len(rc)}"
+            else:
+                flags += "R"
         if "reasoning" in m:
             flags += "r"
         if "reasoning_details" in m:
@@ -816,6 +824,13 @@ class Pipe:
             "messages stay byte-stable between turns, so the prefix cache is preserved. "
             "Set to False to forward payloads unchanged.",
         )
+        REASONING_DEBUG_LOG: bool = Field(
+            default=False,
+            description="Trace reasoning_content on the outbound payload: messages summary with "
+            "R0 (present-but-empty) vs R<n> (text length) flags, plus a log line with the "
+            "last assistant's reasoning_content length/empty/prefix. Off by default — "
+            "verbose per-request logging, only needed when debugging reasoning drops.",
+        )
 
         @model_validator(mode="after")
         def _check_runaway_gt_loop(self):
@@ -1267,9 +1282,36 @@ class Pipe:
                 real_model,
                 has_tools,
                 _history_has_tool_calls(messages),
-                _messages_summary(messages),
+                _messages_summary(
+                    messages, verbose=getattr(self.valves, "REASONING_DEBUG_LOG", False)
+                ),
                 params,
             )
+            # Debug (opt-in via REASONING_DEBUG_LOG): what does the LAST
+            # assistant carry as reasoning_content? R0 (empty) replayed to
+            # DeepSeek can seed a reasoning drop that then cascades across
+            # tool-call continuations.
+            if getattr(self.valves, "REASONING_DEBUG_LOG", False):
+                last_rc = None
+                for m in reversed(messages):
+                    if isinstance(m, dict) and m.get("role") == "assistant":
+                        last_rc = m.get("reasoning_content")
+                        break
+                if isinstance(last_rc, str):
+                    preview = last_rc[:80].replace("\n", "\\n")
+                    log.info(
+                        "bf-reasoning: last assistant reasoning_content len=%d empty=%s preview=%r",
+                        len(last_rc),
+                        last_rc == "",
+                        preview,
+                    )
+                elif last_rc is None:
+                    log.info("bf-reasoning: last assistant has NO reasoning_content field")
+                else:
+                    log.info(
+                        "bf-reasoning: last assistant reasoning_content is non-string (%s)",
+                        type(last_rc).__name__,
+                    )
         except Exception as exc:
             log.warning("reasoning normalization failed (fail-open): %s", exc)
 
