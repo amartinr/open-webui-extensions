@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.15.1
+version: 2.16.0
 licence: MIT
 """
 
@@ -1271,31 +1271,31 @@ class Pipe:
             renamed, forced = _normalize_reasoning_for_gateway(body)
             thinking_stripped = _normalize_thinking_for_gateway(body)
             has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
-            params = {
-                k: v
-                for k, v in body.items()
-                if k not in ("messages", "tools", "model", "metadata", "files")
-            }
-            log.info(
-                "bf-reasoning: renamed=%d forced=%d thinking_stripped=%s "
-                "(model=%s, tools=%s, history_has_tool_calls=%s) "
-                "| messages: %s | params: %s",
-                renamed,
-                forced,
-                "yes" if thinking_stripped else "no",
-                real_model,
-                has_tools,
-                _history_has_tool_calls(messages),
-                _messages_summary(
-                    messages, verbose=getattr(self.valves, "REASONING_DEBUG_LOG", False)
-                ),
-                params,
-            )
-            # Debug (opt-in via REASONING_DEBUG_LOG): what does the LAST
-            # assistant carry as reasoning_content? R0 (empty) replayed to
-            # DeepSeek can seed a reasoning drop that then cascades across
-            # tool-call continuations.
+            # All reasoning diagnostics are gated behind REASONING_DEBUG_LOG
+            # (default off): with the valve disabled no bf-reasoning line is
+            # emitted per request.
             if getattr(self.valves, "REASONING_DEBUG_LOG", False):
+                params = {
+                    k: v
+                    for k, v in body.items()
+                    if k not in ("messages", "tools", "model", "metadata", "files")
+                }
+                log.info(
+                    "bf-reasoning: renamed=%d forced=%d thinking_stripped=%s "
+                    "(model=%s, tools=%s, history_has_tool_calls=%s) "
+                    "| messages: %s | params: %s",
+                    renamed,
+                    forced,
+                    "yes" if thinking_stripped else "no",
+                    real_model,
+                    has_tools,
+                    _history_has_tool_calls(messages),
+                    _messages_summary(messages, verbose=True),
+                    params,
+                )
+                # What does the LAST assistant carry as reasoning_content?
+                # R0 (empty) replayed to DeepSeek can seed a reasoning drop
+                # that then cascades across tool-call continuations.
                 last_rc = None
                 for m in reversed(messages):
                     if isinstance(m, dict) and m.get("role") == "assistant":

@@ -18,7 +18,7 @@ description: >
   conversion leaves reasoning_details in place so Open WebUI can store
   and replay the real reasoning text.
 required_open_webui_version: 0.11.0
-version: 3.5.1
+version: 3.6.0
 """
 
 import logging
@@ -263,6 +263,11 @@ class Filter:
                 "report reasoning tokens. Set True only when a strict OpenAI client rejects them."
             ),
         )
+        debug_log: bool = Field(
+            default=False,
+            description="Log per-request inlet activity (forced reasoning_content vs cleanup only). "
+            "Off by default; enable only when debugging reasoning behavior.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -305,13 +310,14 @@ class Filter:
         has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
         if has_tools or _history_has_tool_calls(cleaned):
             _force_reasoning_content_on_tools(cleaned)
-            logger.info(
-                "bf-reasoning: inlet forced reasoning_content on tool-calling "
-                "history (model=%s, tools=%s)",
-                model.get("id", ""),
-                has_tools,
-            )
-        else:
+            if self.valves.debug_log:
+                logger.info(
+                    "bf-reasoning: inlet forced reasoning_content on tool-calling "
+                    "history (model=%s, tools=%s)",
+                    model.get("id", ""),
+                    has_tools,
+                )
+        elif self.valves.debug_log:
             logger.info(
                 "bf-reasoning: inlet cleanup only (model=%s, no tool-calling "
                 "scope)",
