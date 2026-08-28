@@ -37,6 +37,8 @@
  *
  *   rounds: number of probe iterations (default 6)
  *   mode:   'roundtrip' (default, tool-call continuation) | 'plain' | 'tools'
+ *           | 'sse' (streaming-only battery; payload shape = 4th arg,
+ *           default 'roundtrip')
  *
  * The API key is read from BIFROST_API_KEY (env) or, failing that, from the
  * pi agent models.json at /srv/pi/.pi/agent/models.json (key
@@ -71,6 +73,8 @@ if (!KEY) {
 
 const ROUNDS = Number(process.argv[2] || 6);
 const MODE = process.argv[3] || "roundtrip";
+// payload shape used by the SSE-only mode (roundtrip | plain | tools)
+const SHAPE = process.argv[4] || "roundtrip";
 
 const REQUEST_TIMEOUT_MS = 45000;
 
@@ -277,10 +281,59 @@ async function probe(mode) {
   return { sseMismatch, requestDrop, ns, s };
 }
 
+/**
+ * SSE-only probe: exercises ONLY the streaming path (what Open WebUI uses).
+ * No non-stream leg to compare against — a drop is flagged with the same
+ * signature the pipe's SUSPECT-DROP log uses: the stream ended having emitted
+ * at most the empty opening delta (reasoning_deltas <= 1, reasoningLen == 0)
+ * while content and/or tool calls ARE present.
+ */
+async function probeSSE(shape) {
+  const payload =
+    shape === "roundtrip"
+      ? await buildRoundtripPayload()
+      : buildSimplePayload(shape === "tools");
+  const stream = await call({ ...payload, stream: true });
+  const s = analyzeStream(stream.text);
+  const drop =
+    s.reasoningDeltas <= 1 &&
+    s.reasoningLen === 0 &&
+    (s.hasContent || s.hasToolCalls);
+  console.log(
+    `#sse-${shape.padEnd(9)} S(rd=${s.reasoningDeltas},len=${s.reasoningLen},content=${s.hasContent},` +
+      `tool=${s.hasToolCalls},fin=${s.finish})` +
+      (drop ? "  <-- SSE DROP (opening-only delta, content/tool present)" : "  ok"),
+  );
+  return { drop, s };
+}
+
 async function main() {
-  console.log(`Bifrost: ${BASE} | model: ${MODEL} | mode: ${MODE} | rounds: ${ROUNDS}\n`);
+  console.log(
+    `Bifrost: ${BASE} | model: ${MODEL} | mode: ${MODE}` +
+      (MODE === "sse" ? ` (shape=${SHAPE})` : "") +
+      ` | rounds: ${ROUNDS}\n`,
+  );
   let sseMismatches = 0;
   let requestDrops = 0;
+  let sseDrops = 0;
+  if (MODE === "sse") {
+    for (let i = 0; i < ROUNDS; i++) {
+      const r = await probeSSE(SHAPE);
+      if (r.drop) sseDrops++;
+    }
+    console.log(
+      `\nSSE drops (reasoning_deltas<=1, len=0, content/tool present): ${sseDrops}/${ROUNDS}`,
+    );
+    if (sseDrops > 0) {
+      console.log(
+        "Conclusion: Bifrost SSE emitted only the empty opening delta (cf. issue #6523) — " +
+          "reasoning lost inside Bifrost's SSE emission, before the wire.",
+      );
+      process.exit(1);
+    }
+    console.log("No SSE reasoning drop detected on this run.");
+    process.exit(0);
+  }
   for (let i = 0; i < ROUNDS; i++) {
     const r = await probe(MODE);
     if (r.sseMismatch) sseMismatches++;

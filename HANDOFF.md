@@ -146,6 +146,122 @@ Both are gated behind `REASONING_DEBUG_LOG` (the user has it ON):
   impossible — the pipe counts everything it receives; that case would mean a
   pipe counting bug, which does not exist.)
 
+## Simulating a tool call through Open WebUI's OpenAI-compatible API (session 8.5 — HOWTO)
+
+**Goal:** reproduce the tool-call continuation turns (the drop scenario) end-to-end
+through the REAL stack (Open WebUI → pipe `agent_loop_guard` → filter → Bifrost),
+without the UI. Verified working; the continuation turn below completed with
+`reasoning_deltas=53, len=250` (no drop that round — see battery notes).
+
+### Endpoint & auth (user-provided)
+
+- `POST http://open-webui.private/api/chat/completions` (also
+  `/api/v1/chat/completions`; NOT `/openai/chat/completions` — that is the direct
+  external passthrough and 404s on pipe model ids).
+- API key: user-provided, passed via `OWUI_API_KEY` env (do not commit).
+- Models: `GET /api/v1/models` → pipe models `deepseek-v4-flash` (base
+  `agent_loop_guard.deepseek/deepseek-v4-flash`), `deepseek-v4-assistant`, …
+  (6 pipe models + `open-webui-meta-agent` + `virtual-fashion-stylist`), plus
+  raw `deepseek/deepseek-v4-flash` / `deepseek/deepseek-v4-pro` passthrough.
+
+### Who exposes the tools (confirmed)
+
+The HARNESS does: the OWUI model config (`meta.toolIds`) attaches tools
+(`smart_fetch_url`, `youtube_search`, …) and OWUI injects their schemas into the
+request payload as `tools`; the pipe merely forwards `body["tools"]` to Bifrost.
+Proof: a request with NO `tools` field still made the model call `smart_fetch_url`.
+Tool schema exposed to the model: `GET /api/v1/tools/id/smart_fetch_url` → `specs`.
+
+**CRITICAL schema detail:** the real params are `urls` (array, required),
+`format` (enum skimmd|markdown|html|txt|json|raw), `max_chars`, `include_replies`.
+The model HALLUCINATED `url`/`prompt`/`max_char` in its emitted call — the test
+must use the real schema, never the model's emission.
+
+**Tool inventory for `deepseek-v4-flash` (verified via
+`GET /api/v1/models` → `info.meta.toolIds` + OWUI builtin categories):**
+- Custom attached: `smart_fetch_url` (fetch — USE THIS), `image_generator_pro`
+  (image gen — NOT relevant for the drop test).
+- Builtin `time` category → `get_current_timestamp` (no args; Unix ts + ISO UTC
+  + user local time) and `calculate_timestamp` (days/weeks/months/years_ago).
+  The date/time tool — cheap and deterministic, ideal for hammering the drop
+  signature without burning network fetches.
+- Builtin `web_search` category → `search_web(query, count)` and `fetch_url`,
+  gated by `web.search.enable` + model capability `web_search` (true here) +
+  user permission.
+- Per user instruction: the faithful battery must use ONLY `web_search` and
+  `smart_fetch_url` (plus `get_current_timestamp` for date/time) — NOT
+  `image_generator_pro` or other custom tools.
+
+### The 3-step recipe (exactly what was done)
+
+**Step 1 — discovery (stream, no `tools` in payload):**
+```json
+{"model": "deepseek-v4-flash", "stream": true,
+ "messages": [{"role": "user", "content": "Haz fetch de https://elpais.com y cuéntame qué contiene"}]}
+```
+The tool call comes back as **markdown inside `content`** (OWUI pipe convention),
+NOT structured `tool_calls` deltas:
+```
+Voy a hacer el fetch de El País para ti.
+
+<tool_calls>
+<invoke name="smart_fetch_url">
+<parameter name="url">https://elpais.com</parameter>
+<parameter name="prompt">Resume el contenido principal…</parameter>
+<parameter name="max_char">4096</parameter>
+</invoke>
+</tool_calls>
+```
+Without a frontend nothing executes it → the client must do step 2+3.
+
+**Step 2 — execute the real tool** (repo copy; deps curl_cffi/trafilatura/selectolax
+installed with `pip install --break-system-packages`, no venv available):
+```python
+sys.path.insert(0, "/srv/pi/open-webui-extensions/tools/smart_fetch_url")
+from smart_fetch_url import Tools
+async def main():
+    t = Tools()
+    try: print(await t.smart_fetch_url(urls=["https://elpais.com"], format="skimmd", max_chars=4096))
+    finally: await t._aclose()
+asyncio.run(main())
+```
+Result: HTTP 200 + extracted front page (4 KB). NOTE: my `web_fetch` got HTTP 403
+on elpais.com; the tool's curl_cffi fingerprinting succeeds where it fails.
+
+**Step 3 — the continuation (the faithful tool-call round-trip):** OpenAI-style
+structured `tool_calls` in the assistant message + `tool` role result. This is what
+triggers the pipe's `_history_has_tool_calls()` → ships `tools` to Bifrost and runs
+`_force_reasoning_content_on_tools` — the exact code path the drop lives on:
+```json
+{"model": "deepseek-v4-flash", "stream": true, "messages": [
+  {"role": "user", "content": "Haz fetch de https://elpais.com y cuéntame qué contiene"},
+  {"role": "assistant", "content": null, "reasoning_content": "",
+   "tool_calls": [{"id": "call_sim_001", "type": "function",
+     "function": {"name": "smart_fetch_url",
+       "arguments": "{\"urls\": [\"https://elpais.com\"], \"format\": \"skimmd\", \"max_chars\": 4096}"}}]},
+  {"role": "tool", "tool_call_id": "call_sim_001", "name": "smart_fetch_url",
+   "content": "<full tool output, 4.3 KB>"},
+  {"role": "user", "content": "Resume ahora lo que contiene la portada de El País según el resultado de la herramienta"}
+]}
+```
+Observed result: HTTP 200, 618 SSE events, `reasoning_deltas=53`, `reasoning_len=250`,
+`content_len=1869`, no tool_call events, `finish=stop`; model summarized the fetched
+front page correctly (Ceuta crisis, Marlaska vs PP-Vox, Villena museum heist, Nepal
+flood, Leavitt resignation). Harness quirks visible: OWUI injects the user's real
+name into the system prompt (responses address the user by first name).
+
+**Faithfulness checklist for a drop-repro battery:**
+- Use `deepseek-v4-flash` and the REAL tool schema (not the model's hallucinated
+  params) in the continuation.
+- Keep `reasoning_content: ""` in the assistant tool-call message (the empty
+  seed — ruled out as cause in H1, but matches real OWUI history).
+- The drop is intermittent; low rate with trivial system prompts (see §facts).
+  For a faithful rate, the system prompt matters — consider shipping a long real
+  OWUI-style system prompt and/or run many rounds (20+) and watch the pipe's
+  SUSPECT-DROP logs (`sudo docker-compose logs … | grep bf-rea`) as ground truth.
+- SSE-only: measure `reasoning_deltas <= 1 && content present` on the
+  continuation turn — same signature as the pipe's SUSPECT-DROP.
+
 ## Next steps (for the next agent)
 
 1. **The drop is CONFIRMED gateway-side (Bifrost).** No further local
@@ -172,7 +288,8 @@ Both are gated behind `REASONING_DEBUG_LOG` (the user has it ON):
 | `/srv/pi/bifrost-core` | Bifrost core v1.6.3 (buggy) |
 | `/srv/pi/bifrost-core-1710` / `-1711` | core v1.7.10 / v1.7.11 (fix #5887) |
 | `/srv/pi/bifrost-npx` | full monorepo clone, all `transports/*` + `core/*` tags (version map source) |
-| `pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs` | integration probe (in repo) |
+| `pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs` | integration probe, direct to Bifrost (in repo) |
+| `pipes/agent_loop_guard/tests/sim_tool_call_owui.mjs` | integration probe, full stack via OWUI OpenAI API — `single` / `interleaved` (3 real tool calls chained) |
 | `/tmp/repro_*.mjs` | ad-hoc probes from this investigation |
 
 ## Branch / git state
@@ -199,6 +316,11 @@ sudo docker-compose logs -f --tail 100 bifrost | grep -iE "deepseek|error|reason
 
 # probe (needs live Bifrost)
 node pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs 8 roundtrip
+
+# full-stack tool-call simulation (needs live Open WebUI + Bifrost)
+# interleaved = 3 real chained tool calls (get_current_timestamp → smart_fetch_url → search_web)
+OWUI_API_KEY=sk-... node pipes/agent_loop_guard/tests/sim_tool_call_owui.mjs 10 interleaved
+OWUI_API_KEY=sk-... node pipes/agent_loop_guard/tests/sim_tool_call_owui.mjs 5 single
 
 # version map
 cd /srv/pi/bifrost-npx && git show transports/v2.0.0:core/version
