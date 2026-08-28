@@ -1,0 +1,24 @@
+--- a/backend/open_webui/utils/middleware.py
++++ b/backend/open_webui/utils/middleware.py
+@@ -5787,21 +5787,10 @@
+                             if item.get('type') == 'function_call' and item.get('call_id') == call_id:
+                                 item['status'] = result_status_by_call_id.get(call_id, 'completed')
+                                 item['arguments'] = tc.get('function', {}).get('arguments', '{}')
+                                 break
+ 
+-                    # Append a new empty message item for the next response
+-                    output.append(
+-                        {
+-                            'type': 'message',
+-                            'id': output_id('msg'),
+-                            'status': 'in_progress',
+-                            'role': 'assistant',
+-                            'content': [{'type': 'output_text', 'text': ''}],
+-                        }
+-                    )
+-
+                     # Emit citation sources to the frontend for display
+                     if citations_enabled:
+                         for source in tool_call_sources:
+                             await event_emitter({'type': 'source', 'data': source})
+ 
