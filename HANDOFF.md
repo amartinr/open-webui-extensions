@@ -23,13 +23,13 @@
 - **TWO separate Bifrost bugs were involved. Both are upstream (Bifrost), not
   Open WebUI, not the extensions, not DeepSeek itself. BOTH ARE NOW RESOLVED
   on the deployed version.**
-  1. **Request-side (FIXED in core 1.7.10, #5887):** core v1.6.3 routed
+  1. **Request-side (FIXED in core 1.7.10, [#5887](https://github.com/maximhq/bifrost/issues/5887)):** core v1.6.3 routed
      DeepSeek through `stripReasoningDetails()`, nulling `reasoning_content`
      on EVERY assistant message including tool-call turns — violating
      DeepSeek's asymmetric contract. Fixed by
      `stripReasoningDetailsExceptToolCalls()` (preserves reasoning on
      tool-call turns).
-  2. **SSE-side (FIXED in core 1.8.0, #6523 family):** Bifrost's stream could
+  2. **SSE-side (FIXED in core 1.8.0, [#6523](https://github.com/maximhq/bifrost/issues/6523) family):** Bifrost's stream could
      drop the reasoning deltas — the SAME request returned full `reasoning`
      in non-streaming mode but only the empty opening delta
      (`{"reasoning":"","reasoning_details":[{"text":""}]}`) in streaming
@@ -76,13 +76,13 @@ point at the pipe sub-model (`agent_loop_guard.deepseek/deepseek-v4-flash`);
 
 | Issue | Date | Version | What | Status |
 |---|---|---|---|---|
-| #3139 | 2026-04-29 | core 1.6.3 | non-standard `reasoning`/`reasoning_details` dialect for deepseek v4 | closed 07-03 |
-| #3802 | 2026-05-27 | 1.5.4–1.5.5 | `reasoning_content` dropped on tool-call turns (`/anthropic`→Responses, Kimi); regression of #2093/#2284 | open |
-| #4861 | 2026-06 | core 1.6.3 | convert thinking to disabled when tool_choice is required (DeepSeek) — only fires on `tool_choice:"required"`, not our case | fixed |
-| #5325 | 2026-07-17 | — | reasoning exposed in Bifrost-specific fields (the "dialect") | open |
-| #5887 | 2026-08 | core 1.7.10 | **DeepSeek asymmetric reasoning contract — `stripReasoningDetailsExceptToolCalls`** (bug #1, FIXED) | released |
-| #6111 | 2026-08-13 | 1.6.10 | DeepSeek 400 "`reasoning_content` … must be passed back" (opencode path) | open |
-| #6523 | 2026-08-25 | — | **streaming drops opening role-only delta** (bug #2) — resolved by core 1.8.0 delta MarshalJSON, verified on 2.0.0 | fixed |
+| [#3139](https://github.com/maximhq/bifrost/issues/3139) | 2026-04-29 | core 1.6.3 | non-standard `reasoning`/`reasoning_details` dialect for deepseek v4 | closed 07-03 |
+| [#3802](https://github.com/maximhq/bifrost/issues/3802) | 2026-05-27 | 1.5.4–1.5.5 | `reasoning_content` dropped on tool-call turns (`/anthropic`→Responses, Kimi); regression of [#2093](https://github.com/maximhq/bifrost/issues/2093)/[#2284](https://github.com/maximhq/bifrost/issues/2284) | open |
+| [#4861](https://github.com/maximhq/bifrost/issues/4861) | 2026-06 | core 1.6.3 | convert thinking to disabled when tool_choice is required (DeepSeek) — only fires on `tool_choice:"required"`, not our case | fixed |
+| [#5325](https://github.com/maximhq/bifrost/issues/5325) | 2026-07-17 | — | reasoning exposed in Bifrost-specific fields (the "dialect") | open |
+| [#5887](https://github.com/maximhq/bifrost/issues/5887) | 2026-08 | core 1.7.10 | **DeepSeek asymmetric reasoning contract — `stripReasoningDetailsExceptToolCalls`** (bug #1, FIXED) | released |
+| [#6111](https://github.com/maximhq/bifrost/issues/6111) | 2026-08-13 | 1.6.10 | DeepSeek 400 "`reasoning_content` … must be passed back" (opencode path) | open |
+| [#6523](https://github.com/maximhq/bifrost/issues/6523) | 2026-08-25 | — | **streaming drops opening role-only delta** (bug #2) — resolved by core 1.8.0 delta MarshalJSON, verified on 2.0.0 | fixed |
 
 ## Transport ↔ core version mapping (from `core/version` in each tag — authoritative)
 
@@ -90,7 +90,7 @@ point at the pipe sub-model (`agent_loop_guard.deepseek/deepseek-v4-flash`);
 |---|---|---|---|
 | `transports/v1.5.10` | 2026-06-07 | 1.5.18 | June 2026 state |
 | `transports/v1.6.0` | 2026-06-25 | 1.6.0 | June 2026 state; DeepSeek not yet first-class |
-| `transports/v1.6.3` | 2026-07-06 | **1.6.3** | bug #1 introduced (DeepSeek first-class, #4852) |
+| `transports/v1.6.3` | 2026-07-06 | **1.6.3** | bug #1 introduced (DeepSeek first-class, [#4852](https://github.com/maximhq/bifrost/issues/4852)) |
 | `transports/v1.6.5` | 2026-07-21 | 1.7.3 | — |
 | `transports/v1.6.8` | 2026-08-05 | 1.7.6 | — |
 | `transports/v1.6.10` | 2026-08-12 | 1.7.9 | — |
@@ -183,11 +183,11 @@ unrelated to the current issue.
 - Reproduced the drop directly against Bifrost (tool-call continuation
   payloads) — disproving the earlier "doesn't reproduce via API" claim.
 - Cloned Bifrost core v1.6.3 / v1.7.10 / v1.7.11 + full monorepo tags. Found
-  bug #1 with line-level diff and its exact fix (#5887).
+  bug #1 with line-level diff and its exact fix ([#5887](https://github.com/maximhq/bifrost/issues/5887)).
 - Established the authoritative transport↔core map from `core/version` in
   each tag (1.6.11 → core 1.7.10; the npx v1.6.3 GitHub tag is stale).
 - Isolated bug #2: same-payload non-stream vs stream mismatch → Bifrost SSE
-  drops reasoning deltas under load (#6523 family).
+  drops reasoning deltas under load ([#6523](https://github.com/maximhq/bifrost/issues/6523) family).
 - Confirmed via the user's DB that OWUI reasoning storage is intact.
 - User re-deployed transport 1.6.11 (core 1.7.10) — bug #1 is gone, bug #2
   remains intermittent.
@@ -219,12 +219,12 @@ Verified in the `transports/v2.0.0` tag (embeds core 1.8.3) vs the
   comment: *"DeepSeek streams its thinking phase under `reasoning_content`,
   so a client written against that wire watched a Bifrost stream emit the
   entire reasoning phase under a key it never read."* This is exactly the
-  #6523-family mismatch observed in session 5.
+  [#6523](https://github.com/maximhq/bifrost/issues/6523)-family mismatch observed in session 5.
 - **Verified live on 2.0.0 (session 7): 34/34 clean** — 0 SSE mismatches, 0
   request-side drops (roundtrip ×22, plain ×6, tools ×6). The intermittent
   drop is gone.
-- Other relevant changes in 1.7.10→1.8.3: #5900 (omit `name` on streaming
-  continuation deltas), #6293 (finer reasoning-with-tools param handling in
+- Other relevant changes in 1.7.10→1.8.3: [#5900](https://github.com/maximhq/bifrost/issues/5900) (omit `name` on streaming
+  continuation deltas), [#6293](https://github.com/maximhq/bifrost/issues/6293) (finer reasoning-with-tools param handling in
   `dropUnsupportedParams`), several streaming telemetry/heartbeat fixes.
 - **Extensions unchanged:** 2.0.0 stream deltas STILL carry
   `reasoning_details` (verified live: `reasoning` + `reasoning_content` +
