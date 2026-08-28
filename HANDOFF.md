@@ -33,6 +33,15 @@
 - **The intermittent reasoning drop PERSISTS on 2.0.0.** The previous HANDOFF
   (v7) declared the investigation closed — that was WRONG. This session
   confirmed the drop still happens in the user's live Open WebUI.
+- **ROOT CAUSE CONFIRMED (session 8, via SUSPECT-DROP raw events): the
+  reasoning is lost INSIDE Bifrost's SSE emission, before the wire.** The raw
+  reasoning-carrying events received on a failing turn contain ONLY the empty
+  opening delta
+  (`{"delta":{"role":"assistant","reasoning":"","reasoning_details":[{"text":""}],"reasoning_content":""}}`)
+  and nothing else — Bifrost never emits the actual reasoning deltas. The
+  core 1.8.0 `MarshalJSON` fix (adding `reasoning_content` to deltas) did NOT
+  resolve this: the drop happens before serialization, so the alias never
+  helps.
 
 ## The problem (unchanged symptom)
 
@@ -88,14 +97,30 @@ delta) with content present.
 - ❌ Model decision theory (fails on `high` too; non-stream always reasons)
 - ❌ Duplication bug (fixed; not related to the drop)
 
-## Remaining hypothesis (strongest)
+## Root cause (CONFIRMED via SUSPECT-DROP raw events, session 8)
 
-**SSE-side reasoning-delta loss in Bifrost 2.0.0.** The core 1.8.0
-`ChatStreamResponseChoiceDelta.MarshalJSON` fix (emits `reasoning_content`
-alongside `reasoning`) did NOT fully resolve the drop. The suspected
-mechanism: under some condition (load, prompt length, upstream behavior),
-Bifrost emits only the empty opening delta and drops the subsequent reasoning
-deltas. The pipe's `reasoning_deltas=1` signature is exactly that.
+**The reasoning is lost inside Bifrost's SSE emission, before the wire.** The
+pipe's SUSPECT-DROP log captured the raw reasoning-carrying events on failing
+turns (multiple occurrences, always with tool-call history present):
+
+```
+SUSPECT DROP reasoning_deltas=1 content_deltas=32 — raw reasoning events:
+{"delta":{"role":"assistant","reasoning":"","reasoning_details":[{"text":""}],"reasoning_content":""}}
+```
+
+The raw events contain ONLY the empty opening delta (all three fields empty)
+and nothing else. Bifrost emits the opening ceremony and never emits the
+actual reasoning deltas. This is upstream #6523-family behavior, NOT resolved
+by the core 1.8.0 MarshalJSON fix (which only aliases `reasoning_content` on
+deltas that ARE emitted — the drop happens before emission).
+
+The core 1.8.0 fix DID resolve the delta-duplication issue (triple-field) and
+the earlier request-side wipe (#5887, core 1.7.10) — those are fixed. This
+remaining drop is a separate, still-open SSE-emission defect in Bifrost.
+
+Observed drop pattern in one real session (11 pipe turns): drops at tool-call
+continuations and final turns, 3/11 turns affected, each with the identical
+opening-only raw signature.
 
 ## Diagnostic instrumentation deployed (pipe v2.16.2)
 
@@ -112,30 +137,28 @@ Both are gated behind `REASONING_DEBUG_LOG` (the user has it ON):
    bf-reasoning: SUSPECT DROP reasoning_deltas=1 content_deltas=46 — raw reasoning events: <events or "<none emitted>">
    ```
 
-**Interpretation**:
+**Interpretation (already exercised)**:
 - `<none emitted>` → Bifrost sent no reasoning-carrying event at all →
   gateway-side loss BEFORE the pipe.
 - opening-only event then nothing → gateway emitted only the ceremony →
-  gateway-side.
+  gateway-side. ← **This is what was observed.**
 - (If raw events show real reasoning but `reasoning_deltas=1`, that is
   impossible — the pipe counts everything it receives; that case would mean a
   pipe counting bug, which does not exist.)
 
 ## Next steps (for the next agent)
 
-1. **Ask the user to re-paste pipe v2.16.2** (Admin → Functions →
-   `agent_loop_guard`, `REASONING_DEBUG_LOG` ON) and reproduce a failing turn.
-2. **Get the `SUSPECT DROP` line** — this decides gateway-vs-pipe with no
-   ambiguity.
-3. If gateway-side confirmed: open/reference a Bifrost issue with the
-   evidence (same-payload non-stream has reasoning, stream does not; issue
-   #6523 family). Consider whether the core 1.8.0 MarshalJSON fix is
-   incomplete (e.g. it only aliases the field on deltas that ARE emitted, but
-   the drop happens before emission).
-4. If a Bifrost-side retry is the only mitigation: the pipe could re-request
-   once when it detects `reasoning_deltas <= 1 && content > 0` — but that
-   burns tokens and is a last resort.
-5. Optional pending items (unrelated): fix the secondary chip-off bug
+1. **The drop is CONFIRMED gateway-side (Bifrost).** No further local
+   diagnosis is needed — the SUSPECT-DROP raw events already prove the
+   reasoning never reaches the wire. The options are:
+   a. **Report upstream to Maxim/Bifrost** with the SUSPECT-DROP evidence
+      (opening-only raw events on tool-call continuations, #6523 family).
+      This is the real fix path.
+   b. **Mitigation in the pipe (last resort):** re-request once when the
+      stream ends with `reasoning_deltas <= 1 && content > 0` AND
+      tool-call history is present. Burns tokens (double request); only if
+      the user accepts the cost.
+2. Optional pending items (unrelated): fix the secondary chip-off bug
    (`_normalize_thinking_for_gateway` strips `thinking:disabled` — re-enables
    reasoning against user intent when the chip is OFF); re-check the original
    1.6.11 downgrade reason on 2.0.0.
