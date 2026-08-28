@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.15.0
+version: 2.15.1
 licence: MIT
 """
 
@@ -194,23 +194,27 @@ def _clean_stream_delta(delta: dict) -> bool:
         return False
 
     modified = False
-    used = False
+
+    # Bifrost core >= 1.8.0 emits each reasoning fragment in THREE fields at
+    # once: delta.reasoning, delta.reasoning_content and
+    # delta.reasoning_details (all the same text). When reasoning_content is
+    # already populated by the gateway, appending would double the fragment
+    # (and across pipe + filter it quadruples). Only synthesize the field
+    # when the gateway did not provide it (Bifrost < 1.8.0), and always strip
+    # the redundant fields.
+    existing = delta.get("reasoning_content", "")
+    existing = existing if isinstance(existing, str) else ""
 
     if "reasoning" in delta:
         reasoning = delta.pop("reasoning")
         modified = True
-        if isinstance(reasoning, str) and reasoning:
-            used = True
-            existing = delta.get("reasoning_content", "")
-            existing = existing if isinstance(existing, str) else ""
-            delta["reasoning_content"] = existing + reasoning
+        if isinstance(reasoning, str) and reasoning and not existing:
+            delta["reasoning_content"] = reasoning
 
-    if not used:
+    if not existing and not delta.get("reasoning_content"):
         text = _extract_reasoning_text(delta.get("reasoning_details"))
         if text:
-            existing = delta.get("reasoning_content", "")
-            existing = existing if isinstance(existing, str) else ""
-            delta["reasoning_content"] = existing + text
+            delta["reasoning_content"] = text
             modified = True
 
     if "reasoning_details" in delta:

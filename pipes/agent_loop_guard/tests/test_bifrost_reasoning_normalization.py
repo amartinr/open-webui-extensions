@@ -169,3 +169,31 @@ def test_messages_summary_verbose_flag():
     assert "R0" not in compact
     assert "R" in compact
     assert "R0" in verbose and "R9" in verbose
+
+
+def test_clean_stream_delta_no_duplication_bifrost2():
+    """Bifrost core >= 1.8.0 emits each reasoning fragment in THREE fields at
+    once (reasoning, reasoning_content, reasoning_details — same text).
+    _clean_stream_delta must keep reasoning_content as-is and strip the
+    redundant fields, never re-append (which doubled the fragment and
+    quadrupled it across pipe + filter).
+    """
+    from agent_loop_guard import _clean_stream_delta
+
+    delta = {
+        "reasoning": "Let",
+        "reasoning_content": "Let",
+        "reasoning_details": [{"type": "reasoning.text", "text": "Let"}],
+    }
+    assert _clean_stream_delta(delta)
+    assert delta == {"reasoning_content": "Let"}
+
+    # Legacy (< 1.8.0): reasoning present, no reasoning_content -> synthesize.
+    delta = {"reasoning": "Legacy", "reasoning_details": [{"type": "reasoning.text", "text": "Legacy"}]}
+    assert _clean_stream_delta(delta)
+    assert delta == {"reasoning_content": "Legacy"}
+
+    # Empty opening delta must not gain text.
+    delta = {"reasoning": "", "reasoning_content": "", "reasoning_details": [{"type": "reasoning.text", "text": ""}]}
+    assert _clean_stream_delta(delta)
+    assert delta == {"reasoning_content": ""}

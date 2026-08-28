@@ -18,7 +18,7 @@ description: >
   conversion leaves reasoning_details in place so Open WebUI can store
   and replay the real reasoning text.
 required_open_webui_version: 0.11.0
-version: 3.5.0
+version: 3.5.1
 """
 
 import logging
@@ -163,26 +163,29 @@ def _fix_delta(delta: dict) -> dict:
     if not isinstance(delta, dict):
         return delta
 
-    used = False
+    # Bifrost core >= 1.8.0 emits each reasoning fragment in THREE fields at
+    # once: delta.reasoning, delta.reasoning_content and
+    # delta.reasoning_details (all the same text). When reasoning_content is
+    # already populated by the gateway, appending would double the fragment
+    # (and across pipe + filter it quadruples). Only synthesize the field
+    # when the gateway did not provide it (Bifrost < 1.8.0), and always strip
+    # the redundant fields.
+    existing = delta.get("reasoning_content", "")
+    existing = existing if isinstance(existing, str) else ""
 
     # Variant A: delta.reasoning (incremental plain text). Only consume it
     # as the source of truth when it carries text — an empty-string opening
     # event must still fall back to the details.
     if "reasoning" in delta:
         reasoning = delta.pop("reasoning")
-        if isinstance(reasoning, str) and reasoning:
-            used = True
-            existing = delta.get("reasoning_content", "")
-            existing = existing if isinstance(existing, str) else ""
-            delta["reasoning_content"] = existing + reasoning
+        if isinstance(reasoning, str) and reasoning and not existing:
+            delta["reasoning_content"] = reasoning
 
     # Variant B: delta.reasoning_details (list of blocks) -> fallback only.
-    if not used:
+    if not existing and not delta.get("reasoning_content"):
         text = _extract_reasoning_text(delta.get("reasoning_details"))
         if text:
-            existing = delta.get("reasoning_content", "")
-            existing = existing if isinstance(existing, str) else ""
-            delta["reasoning_content"] = existing + text
+            delta["reasoning_content"] = text
 
     # Never let Bifrost's non-standard fields reach Open WebUI: the handler
     # uses their presence to decide display events (see docstring).

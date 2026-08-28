@@ -187,3 +187,29 @@ def test_fix_delta_converts_and_strips_details():
     _fix_delta(delta)
     assert delta["reasoning_content"] == "solo texto"
     assert "reasoning" not in delta and "reasoning_details" not in delta
+
+
+def test_fix_delta_no_duplication_bifrost2():
+    """Bifrost core >= 1.8.0 emits each reasoning fragment in THREE fields at
+    once (reasoning, reasoning_content, reasoning_details — same text).
+    _fix_delta must keep reasoning_content as-is and strip the redundant
+    fields, never re-append (which doubled the fragment and quadrupled it
+    across pipe + filter).
+    """
+    from bifrost_reasoning_content_fix import _fix_delta
+
+    delta = {
+        "reasoning": "Let",
+        "reasoning_content": "Let",
+        "reasoning_details": [{"type": "reasoning.text", "text": "Let"}],
+    }
+    out = _fix_delta(dict(delta))
+    assert out == {"reasoning_content": "Let"}
+
+    delta = {"reasoning": "Legacy", "reasoning_details": [{"type": "reasoning.text", "text": "Legacy"}]}
+    out = _fix_delta(dict(delta))
+    assert out == {"reasoning_content": "Legacy"}
+
+    delta = {"reasoning": "", "reasoning_content": "", "reasoning_details": [{"type": "reasoning.text", "text": ""}]}
+    out = _fix_delta(dict(delta))
+    assert out == {"reasoning_content": ""}
