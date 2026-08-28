@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.14.0
+version: 2.15.0
 licence: MIT
 """
 
@@ -236,8 +236,11 @@ def _messages_summary(messages: list) -> str:
         flags = ""
         if isinstance(m.get("tool_calls"), list) and len(m["tool_calls"]) > 0:
             flags += "T"
-        if isinstance(m.get("reasoning_content"), str):
-            flags += "R"
+        rc = m.get("reasoning_content")
+        if isinstance(rc, str):
+            # R0 = present-but-empty (the dangerous case: DeepSeek sees empty
+            # reasoning and may stop reasoning); R<n> = present with text.
+            flags += "R0" if rc == "" else f"R{len(rc)}"
         if "reasoning" in m:
             flags += "r"
         if "reasoning_details" in m:
@@ -1270,6 +1273,29 @@ class Pipe:
                 _messages_summary(messages),
                 params,
             )
+            # Debug: what does the LAST assistant carry as reasoning_content?
+            # R0 (empty) replayed to DeepSeek can seed a reasoning drop that
+            # then cascades across tool-call continuations.
+            last_rc = None
+            for m in reversed(messages):
+                if isinstance(m, dict) and m.get("role") == "assistant":
+                    last_rc = m.get("reasoning_content")
+                    break
+            if isinstance(last_rc, str):
+                preview = last_rc[:80].replace("\n", "\\n")
+                log.info(
+                    "bf-reasoning: last assistant reasoning_content len=%d empty=%s preview=%r",
+                    len(last_rc),
+                    last_rc == "",
+                    preview,
+                )
+            elif last_rc is None:
+                log.info("bf-reasoning: last assistant has NO reasoning_content field")
+            else:
+                log.info(
+                    "bf-reasoning: last assistant reasoning_content is non-string (%s)",
+                    type(last_rc).__name__,
+                )
         except Exception as exc:
             log.warning("reasoning normalization failed (fail-open): %s", exc)
 
