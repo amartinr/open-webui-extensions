@@ -16,34 +16,41 @@
 > transport `transports/v1.6.11` embeds core **1.7.10** (NOT 1.6.11). The
 > reliable code reference is the `core/v*` tags.
 
-## TL;DR (final conclusion)
+## TL;DR (final conclusion — session 7: CLOSED, both bugs resolved upstream)
 
-- User runs **Bifrost transport v1.6.11** (embeds core **1.7.10**) —
-  re-deployed after this investigation. Confirmed live:
-  `GET http://bifrost.private/api/version` → `"v1.6.11"`.
+- User runs **Bifrost transport v2.0.0** (embeds core **1.8.3**) — verified
+  live: `GET http://bifrost.private/api/version` → `"v2.0.0"`.
 - **TWO separate Bifrost bugs were involved. Both are upstream (Bifrost), not
-  Open WebUI, not the extensions, not DeepSeek itself.**
+  Open WebUI, not the extensions, not DeepSeek itself. BOTH ARE NOW RESOLVED
+  on the deployed version.**
   1. **Request-side (FIXED in core 1.7.10, #5887):** core v1.6.3 routed
      DeepSeek through `stripReasoningDetails()`, nulling `reasoning_content`
      on EVERY assistant message including tool-call turns — violating
      DeepSeek's asymmetric contract. Fixed by
      `stripReasoningDetailsExceptToolCalls()` (preserves reasoning on
-     tool-call turns). **1.6.11 has this fix.**
-  2. **SSE-side (STILL OPEN, #6523 family):** Bifrost's stream can drop the
-     reasoning deltas under load. The SAME request returns full `reasoning`
+     tool-call turns).
+  2. **SSE-side (FIXED in core 1.8.0, #6523 family):** Bifrost's stream could
+     drop the reasoning deltas — the SAME request returned full `reasoning`
      in non-streaming mode but only the empty opening delta
-     (`{"reasoning":"","reasoning_details":[{"text":""}]}`) in streaming mode.
-     This is the residual drop still seen on 1.6.11.
+     (`{"reasoning":"","reasoning_details":[{"text":""}]}`) in streaming
+     mode. Fixed by a custom `ChatStreamResponseChoiceDelta.MarshalJSON` that
+     emits the reasoning phase under BOTH `reasoning` and `reasoning_content`
+     on outbound stream deltas.
+- **Verification on 2.0.0 (session 7): 34/34 probe rounds clean** — 0 SSE
+  mismatches and 0 request-side drops across roundtrip (tool-call
+  continuation, the previously failing case, 22 rounds), plain and tools
+  modes. The intermittent drop is gone.
 - **The model ALWAYS reasons.** Non-stream responses consistently contain
   `reasoning` (89–300+ chars) even on tool-call turns — DeepSeek low is not
-  "skipping reasoning". The reasoning disappears in Bifrost's SSE emission,
+  "skipping reasoning". The reasoning disappeared in Bifrost's SSE emission,
   not in the model.
-- **The extensions (filter v3.5.0 + pipe v2.15.0) are correct, still
-  necessary, and cannot fix either upstream bug.** They are a safety net for
-  the dialect normalization + replay; nothing to change in this repo.
-- **Nothing more can be done from this side** beyond reporting the SSE loss
-  upstream to Maxim/Bifrost with the reproducible evidence (see
-  `repro_bifrost_reasoning_loss.mjs`).
+- **The extensions (filter v3.5.0 + pipe v2.15.0) stay EXACTLY as they are.**
+  Even with 2.0.0's SSE fix, the stream deltas STILL carry `reasoning_details`
+  (verified live), which makes Open WebUI v0.11.1 suppress the frontend
+  reasoning event (`data=None` in middleware.py:5221-5223) — so the pipe's
+  `_clean_stream_delta` and the filter's `_fix_delta` remain necessary for
+  live reasoning display, and the monkey patch remains necessary for OWUI's
+  history reconstruction. Nothing to change in this repo.
 
 ## Repos / code involved
 
@@ -75,7 +82,7 @@ point at the pipe sub-model (`agent_loop_guard.deepseek/deepseek-v4-flash`);
 | #5325 | 2026-07-17 | — | reasoning exposed in Bifrost-specific fields (the "dialect") | open |
 | #5887 | 2026-08 | core 1.7.10 | **DeepSeek asymmetric reasoning contract — `stripReasoningDetailsExceptToolCalls`** (bug #1, FIXED) | released |
 | #6111 | 2026-08-13 | 1.6.10 | DeepSeek 400 "`reasoning_content` … must be passed back" (opencode path) | open |
-| #6523 | 2026-08-25 | — | **streaming drops opening role-only delta** (bug #2, the residual SSE loss — STILL OPEN) | open |
+| #6523 | 2026-08-25 | — | **streaming drops opening role-only delta** (bug #2) — resolved by core 1.8.0 delta MarshalJSON, verified on 2.0.0 | fixed |
 
 ## Transport ↔ core version mapping (from `core/version` in each tag — authoritative)
 
@@ -89,7 +96,7 @@ point at the pipe sub-model (`agent_loop_guard.deepseek/deepseek-v4-flash`);
 | `transports/v1.6.10` | 2026-08-12 | 1.7.9 | — |
 | `transports/v1.6.11` (current) | 2026-08-15 | **1.7.10** | bug #1 fixed; bug #2 (SSE) still present |
 | `transports/v2.0.0-prerelease3` | — | 1.7.11 | bug #1 fixed |
-| `transports/v2.0.0` | — | 1.8.3 | bug #1 fixed; untested for bug #2 |
+| `transports/v2.0.0` (current) | — | 1.8.3 | bugs #1 AND #2 fixed — the deployed version |
 
 How to read the mapping (no Docker needed, repo already cloned at
 `/srv/pi/bifrost-npx`):
@@ -191,25 +198,18 @@ unrelated to the current issue.
 
 ## Next steps
 
-1. **Report bug #2 upstream to Maxim/Bifrost** with the reproducible evidence:
-   same tool-call-continuation payload → non-stream has `reasoning` (128+
-   chars), stream emits only the empty opening delta. Reference #6523.
-   Include the probe script invocation and the observed mismatch sample.
-2. **Probe `transports/v2.0.0` (core 1.8.3) — now the primary candidate.**
-   Session 6 found that core 1.8.0+ added a `MarshalJSON` to
-   `ChatStreamResponseChoiceDelta` that emits the reasoning phase under BOTH
-   `reasoning` and `reasoning_content` in streaming deltas (see below). This
-   directly targets the SSE-side bug #2. User is testing 2.0.0 now — if the
-   intermittent drop disappears, bug #2 is fixed upstream and the
-   extension's `_clean_stream_delta` / monkey patch can be relaxed.
-3. **Optional:** fix the secondary chip-off bug (strip `thinking:disabled`
+1. **BUG #2 IS RESOLVED UPSTREAM (core 1.8.0) AND VERIFIED ON 2.0.0** — no
+   further action needed. The upstream report is optional now (the fix already
+   landed); keep `repro_bifrost_reasoning_loss.mjs` as the regression probe
+   for future Bifrost upgrades.
+2. **Optional:** fix the secondary chip-off bug (strip `thinking:disabled`
    only when opt-in).
-4. Re-check the original downgrade reason (1.6.11 harness integration issues)
-   now that 1.6.11 is re-deployed — separate concern from reasoning.
+3. Re-check the original downgrade reason (1.6.11 harness integration issues)
+   on 2.0.0 — separate concern from reasoning.
 
-## Session 6 finding: SSE fix landed in core 1.8.0 (relevant for bug #2)
+## Session 6 finding: SSE fix landed in core 1.8.0 (bug #2) — VERIFIED session 7
 
-Verified in the `transports/v2.0.0` tag (embeds core 1.8.3) vs the current
+Verified in the `transports/v2.0.0` tag (embeds core 1.8.3) vs the
 `transports/v1.6.11` (core 1.7.10):
 
 - **NEW in core 1.8.0** — `core/schemas/chatcompletions.go`,
@@ -219,15 +219,20 @@ Verified in the `transports/v2.0.0` tag (embeds core 1.8.3) vs the current
   comment: *"DeepSeek streams its thinking phase under `reasoning_content`,
   so a client written against that wire watched a Bifrost stream emit the
   entire reasoning phase under a key it never read."* This is exactly the
-  #6523-family mismatch observed in session 5 (non-stream has reasoning,
-  stream does not deliver it in a field clients read).
+  #6523-family mismatch observed in session 5.
+- **Verified live on 2.0.0 (session 7): 34/34 clean** — 0 SSE mismatches, 0
+  request-side drops (roundtrip ×22, plain ×6, tools ×6). The intermittent
+  drop is gone.
 - Other relevant changes in 1.7.10→1.8.3: #5900 (omit `name` on streaming
   continuation deltas), #6293 (finer reasoning-with-tools param handling in
   `dropUnsupportedParams`), several streaming telemetry/heartbeat fixes.
-- If 2.0.0 (core 1.8.3) resolves the intermittent drop, the extensions stay
-  as a safety net but the reasoning replay patch and delta normalization
-  become redundant for the stream side (still needed for the OWUI
-  history-reconstruction path, which is independent of Bifrost).
+- **Extensions unchanged:** 2.0.0 stream deltas STILL carry
+  `reasoning_details` (verified live: `reasoning` + `reasoning_content` +
+  `reasoning_details` all present), so OWUI v0.11.1 still suppresses the live
+  reasoning event unless the pipe/filter strip it (`data=None`,
+  middleware.py:5221-5223). The monkey patch also stays (OWUI history
+  reconstruction is independent of Bifrost). The extensions remain a
+  necessary safety net, not a workaround for the (now fixed) SSE bug.
 
 ## Lessons (all sessions)
 
