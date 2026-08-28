@@ -1321,6 +1321,19 @@ class Pipe:
 
         payload = {**body, "model": real_model, "messages": messages}
 
+        if getattr(self.valves, "REASONING_DEBUG_LOG", False):
+            try:
+                import json as _json
+
+                log.info(
+                    "bf-reasoning: OUTBOUND url=%s headers=%s payload=%s",
+                    url,
+                    _json.dumps(headers, default=str),
+                    _json.dumps(payload, default=str, ensure_ascii=False)[:4000],
+                )
+            except Exception as exc:
+                log.warning("bf-reasoning: could not log outbound request: %s", exc)
+
         try:
             if body.get("stream", False):
                 return self._stream(payload, headers, url)
