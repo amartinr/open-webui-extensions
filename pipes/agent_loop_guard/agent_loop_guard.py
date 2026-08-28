@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.16.1
+version: 2.16.2
 licence: MIT
 """
 
@@ -1076,6 +1076,13 @@ class Pipe:
     # ------------------------------------------------------------------
 
     async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
+        debug = getattr(self.valves, "REASONING_DEBUG_LOG", False)
+        if debug:
+            # Capture raw reasoning-carrying events for drop diagnosis: when
+            # reasoning_deltas ends at 1 (only the empty opening) we need to
+            # know whether the gateway emitted reasoning at all.
+            raw_reasoning: list[str] = []
+
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
@@ -1108,6 +1115,8 @@ class Pipe:
                         if isinstance(delta, dict):
                             if delta.get("reasoning") or delta.get("reasoning_details") or delta.get("reasoning_content"):
                                 stats["reasoning"] += 1
+                                if debug and len(raw_reasoning) < 12:
+                                    raw_reasoning.append(body[:400])
                             if delta.get("content"):
                                 stats["content"] += 1
                             if delta.get("tool_calls"):
@@ -1122,6 +1131,15 @@ class Pipe:
                     except Exception:
                         pass
                     yield line
+                if debug:
+                    if stats["reasoning"] <= 1 and stats["content"] > 0:
+                        log.warning(
+                            "bf-reasoning: SUSPECT DROP reasoning_deltas=%d content_deltas=%d — "
+                            "raw reasoning events: %s",
+                            stats["reasoning"],
+                            stats["content"],
+                            " || ".join(raw_reasoning) if raw_reasoning else "<none emitted>",
+                        )
                 log.info(
                     "bf-reasoning: response events=%d reasoning_deltas=%d content_deltas=%d tool_call_deltas=%d finish=%s",
                     stats["events"],
