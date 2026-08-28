@@ -137,17 +137,17 @@ the last user message, and the core's `add_file_context()` prepends one
 block per stored user message with files. Within a turn the same upload can
 be tagged twice (core + filter).
 
-The cleanup (`ATTACHED_FILES_CLEANUP`, since v2.2.0) collapses duplicates
-**within each user message** (one message = one turn) and keeps historical
-messages byte-stable between turns. Cache-safe: the history prefix stays
+The cleanup (`ATTACHED_FILES_CLEANUP`) collapses duplicates **within each
+user message** (one message = one turn) and keeps historical messages
+byte-stable between turns. Cache-safe: the history prefix stays
 byte-identical (deterministic, idempotent, fail-open).
 
 - Dedup is scoped **within a message**, never across messages: a file
   deliberately re-uploaded in a later turn gets a fresh block and stays
-  visible (v2.4.0).
-- Dedup key: **UUID match** plus a **content-hash backstop** (v2.3.0): two
-  different UUIDs sharing `meta["file_hash"]` also collapse, so a `+`
-  upload never shows twice.
+  visible.
+- Dedup key: **UUID match** plus a **content-hash backstop**: two different
+  UUIDs sharing `meta["file_hash"]` also collapse, so a `+` upload never
+  shows twice.
 - Every **image** tag is re-emitted in a canonical format (`id` + absolute
   `/api/v1/files/{id}/content` URL) so the same image renders identically
   regardless of source (raw bare-UUID form, core relative form, filter
@@ -164,7 +164,7 @@ See `DESIGN.md` §18 and `filters/image_filter/DESIGN.md` →
 "Attached-Files Accumulation" for details, and `EXAMPLE.md` for a
 before/after walkthrough.
 
-## Robust SSE forwarding (v2.6.0)
+## Robust SSE forwarding
 
 `_stream` proxies the gateway's raw SSE to Open WebUI, forwarding only
 well-formed OpenAI `data: { ... }` chunk events. Everything else is
@@ -198,7 +198,7 @@ data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}
 Validated against a live Bifrost stream (long reasoning): 1917 events, 0
 corruption.
 
-## Bifrost reasoning normalization (v2.7.0)
+## Bifrost reasoning normalization
 
 DeepSeek requires `reasoning_content` on **every** assistant message of a
 tool-calling history. When Open WebUI executes a tool call, it rebuilds the
@@ -226,10 +226,10 @@ endpoint (`deepseek/deepseek-v4-flash`):
 | `reasoning_content` (even `""`) | ✅ kept |
 | `reasoning_details` (Bifrost dialect) | ❌ lost |
 
-This complements `filters/bifrost_reasoning_content_fix` (v3.2.0), whose
-`inlet` applies the same normalization to fresh user turns.
+This complements `filters/bifrost_reasoning_content_fix`, whose `inlet`
+applies the same normalization to fresh user turns.
 
-### Monkey patch of Open WebUI internals (v2.12.0)
+### Monkey patch of Open WebUI internals
 
 To replay the reasoning above, the pipe **replaces a function inside Open
 WebUI at import time** (`_install_reasoning_replay_patch`): it swaps
@@ -299,9 +299,9 @@ Validated against Open WebUI **0.11.1** + Bifrost **2.0.0** (core 1.8.3) +
 DeepSeek **v4 flash/pro**:
 
 - Bifrost core ≥ 1.7.10 required for tool-call reasoning replay
-  ([maximhq/bifrost#5887](https://github.com/maximhq/bifrost/issues/5887)).
+  ([#5887](https://github.com/maximhq/bifrost/issues/5887)).
 - Bifrost core ≥ 1.8.0 required for `reasoning_content` in stream deltas
-  ([maximhq/bifrost#6523](https://github.com/maximhq/bifrost/issues/6523)).
+  ([#6523](https://github.com/maximhq/bifrost/issues/6523)).
 - On 2.0.0 the reasoning path is clean (0/34 SSE mismatches with
   `tests/repro_bifrost_reasoning_loss.mjs`). The pipe stays necessary:
   stream deltas still carry `reasoning_details`, which Open WebUI v0.11.1
