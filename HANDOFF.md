@@ -1,286 +1,190 @@
-# HANDOFF — Bifrost/DeepSeek reasoning loss (session 5: FINAL — root cause is Bifrost SSE, extensions are correct)
+# HANDOFF — Bifrost/DeepSeek reasoning loss (session 8: drop persists on Bifrost 2.0.0 — diagnostic instrumentation deployed)
 
 > For the next agent picking this up. Read this whole file before touching
 > anything. It supersedes all previous HANDOFFs.
 >
 > **Versioning warning (IMPORTANT):** Bifrost is a monorepo where the
-> **transport** (the deployable package, tag `transports/v*` — an old alias
-> `npx/bifrost/v*` exists but is stale, what `/api/version` reports) and the
-> **core** (the gateway engine, tag `core/v*`) are versioned independently. A
-> transport release embeds a specific core version, declared in the file
-> `core/version` inside that transport's tag (authoritative — do NOT infer it
-> from the changelog page, which lists several core versions per transport
-> page and is easy to misread). **Never assume the numbers match**: e.g. the
-> GitHub tag `npx/bifrost/v1.6.3` contains core v1.5.11 (outdated, no DeepSeek
-> provider) and is NOT representative of what runs in production; and the
-> transport `transports/v1.6.11` embeds core **1.7.10** (NOT 1.6.11). The
-> reliable code reference is the `core/v*` tags.
+> **transport** (the deployable package, tag `transports/v*` — what
+> `/api/version` reports) and the **core** (the gateway engine, tag `core/v*`)
+> are versioned independently. A transport embeds a specific core version,
+> declared in `core/version` inside that transport's tag (authoritative).
+> `transports/v1.6.11` embeds core **1.7.10** (NOT 1.6.11); `transports/v2.0.0`
+> embeds core **1.8.3**. Read `core/version` in the tag — never trust the
+> transport number alone. The GitHub tag `npx/bifrost/v1.6.3` is stale
+> (contains core v1.5.11) — do not use it as a code reference.
 
-## TL;DR (final conclusion — session 7: CLOSED, both bugs resolved upstream)
+## Current state (session 8)
 
-- User runs **Bifrost transport v2.0.0** (embeds core **1.8.3**) — verified
-  live: `GET http://bifrost.private/api/version` → `"v2.0.0"`.
-- **TWO separate Bifrost bugs were involved. Both are upstream (Bifrost), not
-  Open WebUI, not the extensions, not DeepSeek itself. BOTH ARE NOW RESOLVED
-  on the deployed version.**
-  1. **Request-side (FIXED in core 1.7.10, [#5887](https://github.com/maximhq/bifrost/issues/5887)):** core v1.6.3 routed
-     DeepSeek through `stripReasoningDetails()`, nulling `reasoning_content`
-     on EVERY assistant message including tool-call turns — violating
-     DeepSeek's asymmetric contract. Fixed by
-     `stripReasoningDetailsExceptToolCalls()` (preserves reasoning on
-     tool-call turns).
-  2. **SSE-side (FIXED in core 1.8.0, [#6523](https://github.com/maximhq/bifrost/issues/6523) family):** Bifrost's stream could
-     drop the reasoning deltas — the SAME request returned full `reasoning`
-     in non-streaming mode but only the empty opening delta
-     (`{"reasoning":"","reasoning_details":[{"text":""}]}`) in streaming
-     mode. Fixed by a custom `ChatStreamResponseChoiceDelta.MarshalJSON` that
-     emits the reasoning phase under BOTH `reasoning` and `reasoning_content`
-     on outbound stream deltas.
-- **Verification on 2.0.0 (session 7): 34/34 probe rounds clean** — 0 SSE
-  mismatches and 0 request-side drops across roundtrip (tool-call
-  continuation, the previously failing case, 22 rounds), plain and tools
-  modes. The intermittent drop is gone.
-- **The model ALWAYS reasons.** Non-stream responses consistently contain
-  `reasoning` (89–300+ chars) even on tool-call turns — DeepSeek low is not
-  "skipping reasoning". The reasoning disappeared in Bifrost's SSE emission,
-  not in the model.
-- **The extensions (filter v3.5.0 + pipe v2.15.0) stay EXACTLY as they are.**
-  Even with 2.0.0's SSE fix, the stream deltas STILL carry `reasoning_details`
-  (verified live), which makes Open WebUI v0.11.1 suppress the frontend
-  reasoning event (`data=None` in middleware.py:5221-5223) — so the pipe's
-  `_clean_stream_delta` and the filter's `_fix_delta` remain necessary for
-  live reasoning display, and the monkey patch remains necessary for OWUI's
-  history reconstruction. Nothing to change in this repo.
+- **Deployment**: Open WebUI **v0.11.1** → Bifrost **transport 2.0.0** (core
+  **1.8.3**, `http://bifrost.private/v1`) → DeepSeek **v4 flash/pro**.
+  Confirmed live: `GET http://bifrost.private/api/version` → `"v2.0.0"`.
+- **Pipe**: `agent_loop_guard` **v2.16.2** (this branch) — includes:
+  - reasoning replay monkey patch (`_install_reasoning_replay_patch`);
+  - outbound normalization + forcing (`_normalize_reasoning_for_gateway`);
+  - **Bifrost 2.0.0 delta-duplication fix** (v2.15.1+: reasoning_content
+    already present from the gateway must NOT be re-appended);
+  - all reasoning diagnostics gated behind `REASONING_DEBUG_LOG` valve
+    (default off);
+  - **NEW diagnostic**: logs the full OUTBOUND request (url/headers/payload)
+    and, on suspect drops, the raw reasoning SSE events received.
+- **Filter**: `bifrost_reasoning_content_fix` **v3.6.0** (this branch) —
+  includes the same delta-duplication fix (v3.5.1+) and a `debug_log` valve
+  (default off) gating the inlet logs.
+- **The intermittent reasoning drop PERSISTS on 2.0.0.** The previous HANDOFF
+  (v7) declared the investigation closed — that was WRONG. This session
+  confirmed the drop still happens in the user's live Open WebUI.
+
+## The problem (unchanged symptom)
+
+"With reasoning ON, sometimes — in some turns — the model does not reason,
+then recovers on its own." Occurs at both `low` and `high` effort. The pipe
+log signature on a failing turn: `reasoning_deltas=1` (only the empty opening
+delta) with content present.
+
+## Established facts (verified this session and before)
+
+1. **The model ALWAYS reasons.** Non-stream responses consistently contain
+   `reasoning` even on failing-looking turns — DeepSeek low is not "skipping
+   reasoning". (Earlier confusion came from a broken non-stream parser reading
+   only `message.reasoning`/`reasoning_content`; Bifrost returns the reasoning
+   in other keys. Do not re-litigate this — user demonstrated it fails on
+   `high` too, which rules out prompt/model decision theories.)
+2. **Direct A/B against Bifrost 2.0.0 with the user's REAL payload (system
+   prompt + "Hola" + the 4 tools) reproduces the drop**: 4/12 and 1/8 rounds
+   with `rd=1, len=0` (stream, status 200, content present). Same payload with
+   a trivial system prompt ("You are a helpful assistant.") → 0 drops. So the
+   **system prompt content influences the drop rate** but does not cause it —
+   the model still always reasons per fact #1.
+3. **Payload/headers are NOT the cause.** The pipe's OUTBOUND log (see
+   below) shows the exact request: `[system(user's long OWUI prompt), user
+   "Hola"]`, `reasoning_effort: low`, `thinking: {type: enabled}`,
+   `stream_options: {include_usage: true}`, 4 tools, headers
+   `x-bf-vk`, `x-bf-dim-host: open-webui`, `x-bf-dim-username: Abel`. Two
+   identical consecutive requests can differ (one reasons, one doesn't) —
+   byte-identical payloads, different outcomes → the drop is NOT payload
+   driven.
+4. **The pipe/filter are no-ops on the failing first turn** (`renamed=0
+   forced=0`), so they cannot cause it.
+5. **Bifrost's object-`user` quirk**: OWUI injects `payload['user']` as an
+   OBJECT for pipes; Bifrost 2.0.0 declares `user` as `*string` and returns
+   HTTP 400 "Invalid request payload" for it. NOT the current issue — the
+   failing turns return 200 with content (the pipe's params log shows no
+   `user` field reaching Bifrost, so OWUI/pipe strip it somewhere).
+6. **The delta-duplication bug (2.0.0-specific) IS fixed** in pipe 2.15.1+ /
+   filter 3.5.1+: Bifrost core ≥ 1.8.0 emits each reasoning fragment in THREE
+   fields (`reasoning`, `reasoning_content`, `reasoning_details` — identical
+   text). The old code appended `reasoning` to the existing
+   `reasoning_content`, doubling per layer and quadrupling across pipe +
+   filter (visible as "LetLetLetLet me me me me" in the reasoning panel).
+   Fixed: only synthesize when the gateway did not provide the field.
+
+## What was ruled out
+
+- ❌ Payload shape (identical requests differ)
+- ❌ Headers (identical in failing/succeeding turns)
+- ❌ The pipe/filter (no-ops on the failing turn)
+- ❌ Open WebUI history reconstruction (fails on turn 1 with empty history)
+- ❌ The empty-reasoning "seed" (H1 — turn 2 with replayed `""` reasons fine)
+- ❌ Model decision theory (fails on `high` too; non-stream always reasons)
+- ❌ Duplication bug (fixed; not related to the drop)
+
+## Remaining hypothesis (strongest)
+
+**SSE-side reasoning-delta loss in Bifrost 2.0.0.** The core 1.8.0
+`ChatStreamResponseChoiceDelta.MarshalJSON` fix (emits `reasoning_content`
+alongside `reasoning`) did NOT fully resolve the drop. The suspected
+mechanism: under some condition (load, prompt length, upstream behavior),
+Bifrost emits only the empty opening delta and drops the subsequent reasoning
+deltas. The pipe's `reasoning_deltas=1` signature is exactly that.
+
+## Diagnostic instrumentation deployed (pipe v2.16.2)
+
+Both are gated behind `REASONING_DEBUG_LOG` (the user has it ON):
+
+1. **OUTBOUND log** — before sending to the gateway:
+   ```
+   bf-reasoning: OUTBOUND url=... headers=... payload=...
+   ```
+2. **SUSPECT DROP log** — in `_stream`, when the response ends with
+   `reasoning_deltas <= 1` AND `content_deltas > 0`, it logs the raw
+   reasoning-carrying SSE events received (up to 12, truncated):
+   ```
+   bf-reasoning: SUSPECT DROP reasoning_deltas=1 content_deltas=46 — raw reasoning events: <events or "<none emitted>">
+   ```
+
+**Interpretation**:
+- `<none emitted>` → Bifrost sent no reasoning-carrying event at all →
+  gateway-side loss BEFORE the pipe.
+- opening-only event then nothing → gateway emitted only the ceremony →
+  gateway-side.
+- (If raw events show real reasoning but `reasoning_deltas=1`, that is
+  impossible — the pipe counts everything it receives; that case would mean a
+  pipe counting bug, which does not exist.)
+
+## Next steps (for the next agent)
+
+1. **Ask the user to re-paste pipe v2.16.2** (Admin → Functions →
+   `agent_loop_guard`, `REASONING_DEBUG_LOG` ON) and reproduce a failing turn.
+2. **Get the `SUSPECT DROP` line** — this decides gateway-vs-pipe with no
+   ambiguity.
+3. If gateway-side confirmed: open/reference a Bifrost issue with the
+   evidence (same-payload non-stream has reasoning, stream does not; issue
+   #6523 family). Consider whether the core 1.8.0 MarshalJSON fix is
+   incomplete (e.g. it only aliases the field on deltas that ARE emitted, but
+   the drop happens before emission).
+4. If a Bifrost-side retry is the only mitigation: the pipe could re-request
+   once when it detects `reasoning_deltas <= 1 && content > 0` — but that
+   burns tokens and is a last resort.
+5. Optional pending items (unrelated): fix the secondary chip-off bug
+   (`_normalize_thinking_for_gateway` strips `thinking:disabled` — re-enables
+   reasoning against user intent when the chip is OFF); re-check the original
+   1.6.11 downgrade reason on 2.0.0.
 
 ## Repos / code involved
 
 | Path | What |
 |---|---|
-| `../pi-bifrost-reasoning-fix` | pi extension (works), v0.2.2 |
-| `../open-webui-extensions` | this repo: filter + pipe |
-| `../open-webui` | Open WebUI source, tag **v0.11.1** (commit `d3e8bf3`) |
-| `../bifrost-core` | Bifrost **core v1.6.3** (bug #1 present) |
-| `../bifrost-core-1710` | Bifrost core v1.7.10 (fix #1 present; SSE bug still present) |
-| `../bifrost-core-1711` | Bifrost core v1.7.11 (fix #1 present) |
-| `../bifrost-npx` | full monorepo clone with all `transports/v*` + `core/v*` tags (source of truth for version map) |
-| `filters/bifrost_reasoning_content_fix` | filter v3.5.0 |
-| `pipes/agent_loop_guard` | pipe v2.15.0 (gateway proxy + loop guard + reasoning fix + R0/R{n} trace) |
-| `pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs` | **integration probe** (committed): detects SSE-vs-request-side reasoning loss against a live Bifrost |
+| `/srv/pi/open-webui-extensions` | this repo (branch `debug/reasoning-content-trace` = current work) |
+| `/srv/pi/open-webui` | Open WebUI source, tag v0.11.1 (commit `d3e8bf3`) |
+| `/srv/pi/bifrost-core` | Bifrost core v1.6.3 (buggy) |
+| `/srv/pi/bifrost-core-1710` / `-1711` | core v1.7.10 / v1.7.11 (fix #5887) |
+| `/srv/pi/bifrost-npx` | full monorepo clone, all `transports/*` + `core/*` tags (version map source) |
+| `pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs` | integration probe (in repo) |
+| `/tmp/repro_*.mjs` | ad-hoc probes from this investigation |
 
-Deployment: **Open WebUI v0.11.1** → **Bifrost transport 1.6.11** (core 1.7.10,
-`http://bifrost.private/v1`) → **DeepSeek v4 flash/pro**. Workspace models
-point at the pipe sub-model (`agent_loop_guard.deepseek/deepseek-v4-flash`);
-`base_model_id` on the workspace model is correct.
+## Branch / git state
 
-## Bifrost version / upstream issue map (final)
-
-| Issue | Date | Version | What | Status |
-|---|---|---|---|---|
-| [#3139](https://github.com/maximhq/bifrost/issues/3139) | 2026-04-29 | core 1.6.3 | non-standard `reasoning`/`reasoning_details` dialect for deepseek v4 | closed 07-03 |
-| [#3802](https://github.com/maximhq/bifrost/issues/3802) | 2026-05-27 | 1.5.4–1.5.5 | `reasoning_content` dropped on tool-call turns (`/anthropic`→Responses, Kimi); regression of [#2093](https://github.com/maximhq/bifrost/issues/2093)/[#2284](https://github.com/maximhq/bifrost/issues/2284) | open |
-| [#4861](https://github.com/maximhq/bifrost/issues/4861) | 2026-06 | core 1.6.3 | convert thinking to disabled when tool_choice is required (DeepSeek) — only fires on `tool_choice:"required"`, not our case | fixed |
-| [#5325](https://github.com/maximhq/bifrost/issues/5325) | 2026-07-17 | — | reasoning exposed in Bifrost-specific fields (the "dialect") | open |
-| [#5887](https://github.com/maximhq/bifrost/issues/5887) | 2026-08 | core 1.7.10 | **DeepSeek asymmetric reasoning contract — `stripReasoningDetailsExceptToolCalls`** (bug #1, FIXED) | released |
-| [#6111](https://github.com/maximhq/bifrost/issues/6111) | 2026-08-13 | 1.6.10 | DeepSeek 400 "`reasoning_content` … must be passed back" (opencode path) | open |
-| [#6523](https://github.com/maximhq/bifrost/issues/6523) | 2026-08-25 | — | **streaming drops opening role-only delta** (bug #2) — resolved by core 1.8.0 delta MarshalJSON, verified on 2.0.0 | fixed |
-
-## Transport ↔ core version mapping (from `core/version` in each tag — authoritative)
-
-| Transport tag (`/api/version` reports this) | Tag date | Embedded core (`core/version`) | Notes |
-|---|---|---|---|
-| `transports/v1.5.10` | 2026-06-07 | 1.5.18 | June 2026 state |
-| `transports/v1.6.0` | 2026-06-25 | 1.6.0 | June 2026 state; DeepSeek not yet first-class |
-| `transports/v1.6.3` | 2026-07-06 | **1.6.3** | bug #1 introduced (DeepSeek first-class, [#4852](https://github.com/maximhq/bifrost/issues/4852)) |
-| `transports/v1.6.5` | 2026-07-21 | 1.7.3 | — |
-| `transports/v1.6.8` | 2026-08-05 | 1.7.6 | — |
-| `transports/v1.6.10` | 2026-08-12 | 1.7.9 | — |
-| `transports/v1.6.11` (current) | 2026-08-15 | **1.7.10** | bug #1 fixed; bug #2 (SSE) still present |
-| `transports/v2.0.0-prerelease3` | — | 1.7.11 | bug #1 fixed |
-| `transports/v2.0.0` (current) | — | 1.8.3 | bugs #1 AND #2 fixed — the deployed version |
-
-How to read the mapping (no Docker needed, repo already cloned at
-`/srv/pi/bifrost-npx`):
-
-```bash
-cd /srv/pi/bifrost-npx
-for tag in transports/v1.6.3 transports/v1.6.11 transports/v2.0.0; do
-  echo "$tag -> $(git show $tag:core/version | head -1)"
-done
-```
-
-When picking an upgrade, check `core/version` in the transport's tag — do not
-trust the transport number alone.
-
-## Symptom (live Open WebUI)
-
-"With reasoning ON, sometimes — in some turns mid-conversation — the model
-does not reason, then recovers on its own." Reproduced at both `low` and
-`high` effort. Pi does not exhibit it (pi's OpenAI SDK parses
-`reasoning`/`reasoning_details` natively and does not depend on Open WebUI's
-SSE-delta reconstruction; also pi's traffic does not hammer the gateway in
-the same burst pattern as the OWUI tool loop).
-
-## Empirical evidence (final, sessions 3–5, direct A/B against bifrost.private/v1)
-
-The committed probe (`pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs`)
-runs both modes on the SAME payload and flags mismatches. Key results:
-
-- **plain** (no tools): reasoning always present (stream), 0 drops.
-- **toolsrequested** (tools present, no prior tool call): reasoning always present, 0 drops.
-- **toolhistory** (tool-call continuation): reasoning_deltas fluctuate wildly by
-  batch — 18/18 drops in a burst run (repro16), 0/8 in a relaxed run (repro22)
-  → strongly correlated with gateway load / request rate, not with payload shape.
-- **DECISIVE (repro18 #0):** the SAME tool-call-continuation payload returned
-  `reasoning` = 128 chars in **non-streaming** mode but `reasoning_len=0`
-  (only the empty opening delta) in **streaming** mode. The model reasoned;
-  Bifrost's SSE did not forward it. This is bug #2.
-- The `reasoning_deltas=1` signature seen in the user's pipe logs is exactly
-  that empty opening delta `{"reasoning":"","reasoning_details":[{"text":""}]}`.
-- The replay shape (reasoning_content with text / reasoning_details / empty /
-  absent) does NOT change the outcome — the drop is in Bifrost's stream
-  emission, before DeepSeek's behavior even matters.
-
-## DB evidence (user's live instance, chat "Hola")
-
-- `history.messages` is a keyed object; assistants have no flat
-  `reasoning_content` (v0.11.1 stores reasoning as `output` items of type
-  `reasoning`).
-- The two early assistants have `output: [message]` only — no reasoning item,
-  faithful (DeepSeek didn't reason on those turns).
-- The reasoning assistant (`3c00e72f…`) has 5 `reasoning` items totalling
-  **3236 chars** of real text — stored intact.
-- ⇒ Hypotheses H1 (empty reasoning seed) and H3 (broken OWUI reconstruction)
-  refuted; the R0s in pipe logs were faithful.
-
-## Why the extensions are correct and still necessary (with core 1.7.10)
-
-| Extension piece | Still needed on 1.6.11? | Why |
-|---|---|---|
-| Pipe `_clean_stream_delta` (reasoning/reasoning_details → reasoning_content + strip) | ✅ Yes | core 1.7.10 STILL emits the dialect in SSE deltas (`ChatStreamResponseChoiceDelta` carries `reasoning` + `reasoning_details`, verified in code). OWUI suppresses the frontend reasoning event when `reasoning_details` is present. |
-| Pipe `_normalize_reasoning_for_gateway` (rename residue → reasoning_content) | ✅ Yes | OWUI-reconstructed history can still carry the dialect. |
-| Pipe forcing `reasoning_content` on tool-call turns | ✅ Yes, and now effective | On 1.6.3 Bifrost wiped it regardless (forcing was futile); on 1.7.10 `stripReasoningDetailsExceptToolCalls` PRESERVES it, so the forcing now has real effect. |
-| Pipe monkey-patch `_install_reasoning_replay_patch` (`get_reasoning_format`) | ✅ Yes | OWUI v0.11.1 still returns None for pipe models → `convert_output_to_messages` would drop reasoning when rebuilding history. The patch is what puts the REAL text into `reasoning_content` (vs the empty-string fallback). Now that Bifrost preserves it, the patch's output actually reaches DeepSeek. |
-| Filter `_fix_delta` / `_fix_event` | ✅ Yes | Same dialect-on-SSE reason as the pipe. |
-| Filter inlet forcing | ✅ Yes | Same reason. |
-
-Nothing in this repo needs to change because of the 1.6.11 upgrade. The
-extensions fix the dialect round-trip; they cannot fix Bifrost's SSE emission
-bug (bug #2) — only upstream can.
-
-## Secondary bug found (still real, unrelated to the Bifrost issues)
-
-`_normalize_thinking_for_gateway` strips `thinking:{type:"disabled"}` on the
-assumption that Open WebUI injects it on tool-call continuations. Verified in
-v0.11.1 source: OWUI never emits `thinking` and does not drop
-`reasoning_effort`. The `thinking:disabled` the pipe sees is the user's own
-`deepseek_thinking_default_off` filter → with the reasoning chip OFF and a
-tool call, the pipe re-enables reasoning against the user's intent. Fix:
-remove the strip or gate behind an opt-in valve (default off). Not urgent,
-unrelated to the current issue.
-
-## What was done (sessions 3–5)
-
-- Reproduced the drop directly against Bifrost (tool-call continuation
-  payloads) — disproving the earlier "doesn't reproduce via API" claim.
-- Cloned Bifrost core v1.6.3 / v1.7.10 / v1.7.11 + full monorepo tags. Found
-  bug #1 with line-level diff and its exact fix ([#5887](https://github.com/maximhq/bifrost/issues/5887)).
-- Established the authoritative transport↔core map from `core/version` in
-  each tag (1.6.11 → core 1.7.10; the npx v1.6.3 GitHub tag is stale).
-- Isolated bug #2: same-payload non-stream vs stream mismatch → Bifrost SSE
-  drops reasoning deltas under load ([#6523](https://github.com/maximhq/bifrost/issues/6523) family).
-- Confirmed via the user's DB that OWUI reasoning storage is intact.
-- User re-deployed transport 1.6.11 (core 1.7.10) — bug #1 is gone, bug #2
-  remains intermittent.
-- Committed `patches/openwebui-29052-middleware.patch` and the integration
-  probe `pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs`.
-- Unit tests pass: filter 9/9; pipe 47/47 (via `python3 -m pytest`; the
-  in-repo `.venv` no longer exists).
-
-## Next steps
-
-1. **BUG #2 IS RESOLVED UPSTREAM (core 1.8.0) AND VERIFIED ON 2.0.0** — no
-   further action needed. The upstream report is optional now (the fix already
-   landed); keep `repro_bifrost_reasoning_loss.mjs` as the regression probe
-   for future Bifrost upgrades.
-2. **Optional:** fix the secondary chip-off bug (strip `thinking:disabled`
-   only when opt-in).
-3. Re-check the original downgrade reason (1.6.11 harness integration issues)
-   on 2.0.0 — separate concern from reasoning.
-
-## Session 6 finding: SSE fix landed in core 1.8.0 (bug #2) — VERIFIED session 7
-
-Verified in the `transports/v2.0.0` tag (embeds core 1.8.3) vs the
-`transports/v1.6.11` (core 1.7.10):
-
-- **NEW in core 1.8.0** — `core/schemas/chatcompletions.go`,
-  `ChatStreamResponseChoiceDelta` now has a custom `MarshalJSON` that emits
-  the reasoning phase under BOTH `reasoning` AND `reasoning_content` on
-  outbound stream deltas (absent in 1.7.10, present in 1.8.0/1.8.3). Code
-  comment: *"DeepSeek streams its thinking phase under `reasoning_content`,
-  so a client written against that wire watched a Bifrost stream emit the
-  entire reasoning phase under a key it never read."* This is exactly the
-  [#6523](https://github.com/maximhq/bifrost/issues/6523)-family mismatch observed in session 5.
-- **Verified live on 2.0.0 (session 7): 34/34 clean** — 0 SSE mismatches, 0
-  request-side drops (roundtrip ×22, plain ×6, tools ×6). The intermittent
-  drop is gone.
-- Other relevant changes in 1.7.10→1.8.3: [#5900](https://github.com/maximhq/bifrost/issues/5900) (omit `name` on streaming
-  continuation deltas), [#6293](https://github.com/maximhq/bifrost/issues/6293) (finer reasoning-with-tools param handling in
-  `dropUnsupportedParams`), several streaming telemetry/heartbeat fixes.
-- **Extensions unchanged:** 2.0.0 stream deltas STILL carry
-  `reasoning_details` (verified live: `reasoning` + `reasoning_content` +
-  `reasoning_details` all present), so OWUI v0.11.1 still suppresses the live
-  reasoning event unless the pipe/filter strip it (`data=None`,
-  middleware.py:5221-5223). The monkey patch also stays (OWUI history
-  reconstruction is independent of Bifrost). The extensions remain a
-  necessary safety net, not a workaround for the (now fixed) SSE bug.
-
-## Lessons (all sessions)
-
-1. **Do not leave `reasoning_details` in stream deltas.** OWUI suppresses the
-   frontend `response.reasoning_text.delta` event when a delta carries
-   `reasoning_details` (data=None, DB-only). Filter v3.5.0 / pipe
-   `_clean_stream_delta` strip them.
-2. **Never override the user's `reasoning_effort`.** Hard requirement.
-3. **Open WebUI executes function code from its DB (Admin → Functions), not
-   this repo.** Deploy = re-paste + restart if `stream()` changed.
-4. **Do not commit the Bifrost API key** (lives in `models.json` /
-   `BIFROST_*` / pi extension config).
-5. **Bifrost transport and core versions are independent** — read `core/version`
-   inside the transport's tag, never assume equal numbers; the changelog page
-   and the stale `npx/bifrost/v*` tags are both misleading.
-6. **Distinguish request-side from SSE-side reasoning loss:** run the same
-   payload non-streaming and streaming. Non-stream reasoning present + stream
-   empty = Bifrost SSE bug; both empty = request-side (replay/refusal).
+- **`master`**: pipe v2.15.0 + filter v3.5.0 + READMEs (no duplication fix,
+  no valves). Production baseline.
+- **`debug/reasoning-content-trace`** (current, pushed): pipe v2.16.2 + filter
+  v3.6.0 — duplication fix + valve-gated logs + OUTBOUND/SUSPECT-DROP
+  diagnostics. HANDOFF lives here.
+- **`fix/bifrost-2-reasoning-duplication`** (pushed): the duplication fix
+  alone (pipe 2.15.1 / filter 3.5.1) — superseded by debug branch content.
+- Remote: `git@github.com:amartinr/open-webui-extensions.git` (SSH).
+- Commit hook appends `Co-Authored-By: Pi <noreply@pi.dev>`.
+- **Do not commit the Bifrost API key** (lives in
+  `/srv/pi/.pi/agent/models.json` → `providers.bifrost.apiKey`; probes read it
+  from there or `BIFROST_API_KEY`).
 
 ## Useful commands
 
 ```bash
-# Bifrost version (transport)
-curl -s http://bifrost.private/api/version
+curl -s http://bifrost.private/api/version                      # transport version
+sudo docker-compose logs -f --tail 100 open-webui | grep bf-rea # pipe/filter logs
+sudo docker-compose logs -f --tail 100 bifrost | grep -iE "deepseek|error|reasoning"  # gateway side
 
-# integration probe (needs live Bifrost; reads key from env or models.json)
-cd /srv/pi/open-webui-extensions
+# probe (needs live Bifrost)
 node pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs 8 roundtrip
-#   exit 0 = no loss; 1 = SSE loss (bug #2); 2 = request-side drop
-node pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs 6 plain
-node pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs 6 tools
 
-# key Bifrost code
-# bug #1:  /srv/pi/bifrost-core/core/providers/openai/chat.go:70-73 (case Cerebras,DeepSeek; stripReasoningDetails)
-# fix #1:  /srv/pi/bifrost-core-1711/core/providers/openai/chat.go:78-84 + 232-244 (stripReasoningDetailsExceptToolCalls)
-# dialect still emitted in 1.7.10 SSE: core/schemas/chatcompletions.go (ChatStreamResponseChoiceDelta: reasoning + reasoning_details)
+# version map
+cd /srv/pi/bifrost-npx && git show transports/v2.0.0:core/version
 
-# version map (authoritative)
-cd /srv/pi/bifrost-npx && git show transports/v1.6.11:core/version
-
-# unit tests
-cd /srv/pi/open-webui-extensions
-python3 -m pytest filters/ pipes/agent_loop_guard/tests/ -q
+# tests
+cd /srv/pi/open-webui-extensions && python3 -m pytest filters/ pipes/agent_loop_guard/tests/ -q
 ```
 
-## Git / hook notes
+## Deployment note
 
-- Hook: `.git/hooks/commit-msg` appends `Co-Authored-By: Pi <noreply@pi.dev>`
-  unless already present (dedup via `grep -qF`).
-- SSH key `~/.ssh/id_ed25519` authenticates as `amartinr` (host key in
-  `known_hosts`). Remote is SSH, not HTTPS.
+Open WebUI executes function code from its DB (Admin → Functions), not from
+this repo. Deploy = re-paste + save; restart only if `stream()` changed.
