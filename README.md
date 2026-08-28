@@ -47,7 +47,7 @@ validated against this stack:
 | Layer | Version | Notes |
 |---|---|---|
 | Open WebUI | 0.11.1 | `get_reasoning_format()` returns `None` for pipe models → history replay needs the monkey patch |
-| Bifrost | 2.0.0 (core 1.8.3) | Requires core ≥ 1.8.0 for SSE `reasoning_content` in stream deltas (#6523); core ≥ 1.7.10 for tool-call reasoning replay (#5887) |
+| Bifrost | 2.0.0 (core 1.8.3) | Requires core ≥ 1.8.0 for SSE `reasoning_content` in stream deltas ([#6523](https://github.com/maximhq/bifrost/issues/6523)); core ≥ 1.7.10 for tool-call reasoning replay ([#5887](https://github.com/maximhq/bifrost/issues/5887)) |
 | DeepSeek | v4 flash/pro | Requires `reasoning_content` replayed on tool-call continuations |
 
 On Bifrost 2.0.0 the reasoning path is verified clean (0/34 SSE mismatches

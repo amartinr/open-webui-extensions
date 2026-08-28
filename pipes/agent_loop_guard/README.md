@@ -298,9 +298,10 @@ to the gateway via `httpx.AsyncClient`:
 Validated against Open WebUI **0.11.1** + Bifrost **2.0.0** (core 1.8.3) +
 DeepSeek **v4 flash/pro**:
 
-- Bifrost core ≥ 1.7.10 required for tool-call reasoning replay (#5887).
+- Bifrost core ≥ 1.7.10 required for tool-call reasoning replay
+  ([maximhq/bifrost#5887](https://github.com/maximhq/bifrost/issues/5887)).
 - Bifrost core ≥ 1.8.0 required for `reasoning_content` in stream deltas
-  (#6523).
+  ([maximhq/bifrost#6523](https://github.com/maximhq/bifrost/issues/6523)).
 - On 2.0.0 the reasoning path is clean (0/34 SSE mismatches with
   `tests/repro_bifrost_reasoning_loss.mjs`). The pipe stays necessary:
   stream deltas still carry `reasoning_details`, which Open WebUI v0.11.1
