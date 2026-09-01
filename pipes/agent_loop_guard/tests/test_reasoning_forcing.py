@@ -21,7 +21,10 @@ from agent_loop_guard import (
     _force_reasoning_on_gateway_payload,
     _history_has_tool_calls,
     _messages_summary,
+    Pipe,
 )
+
+import httpx  # noqa: E402
 
 
 def _assistant(**extra) -> dict:
@@ -141,6 +144,20 @@ def test_payload_forcing_deterministic():
 
 
 # --- _messages_summary -------------------------------------------------------
+
+
+# --- shared connection pool -------------------------------------------------
+
+
+def test_shared_client_pool_configured():
+    pipe = Pipe()
+    assert isinstance(pipe._client, httpx.AsyncClient)
+    # non-stream default budget is 300s, shared across the pool
+    assert pipe._client.timeout.connect == 300.0
+    assert pipe._client.timeout.read == 300.0
+    # pool is per-instance: two pipes do not share one client
+    other = Pipe()
+    assert other._client is not pipe._client
 
 
 def test_messages_summary_verbose_flags():

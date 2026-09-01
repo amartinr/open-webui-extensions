@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.3
+version: 2.17.4
 licence: MIT
 """
 
@@ -805,6 +805,14 @@ class Pipe:
         self.valves = self.Valves()
         self._admin_valves = self.Valves()
         self._models_cache: list[dict] = []
+        # Shared connection pool: reused across requests and tool-call
+        # iterations (no fresh DNS+TLS handshake per call). httpx reuses
+        # keep-alive connections and detects stale ones. Timeouts are set per
+        # request; the client default is the non-stream budget.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
 
     # ------------------------------------------------------------------
     # Model discovery (manifold)
@@ -818,10 +826,9 @@ class Pipe:
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/models"
 
         try:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(url, headers=headers, timeout=10)
-                r.raise_for_status()
-                data = r.json()
+            r = await self._client.get(url, headers=headers, timeout=10)
+            r.raise_for_status()
+            data = r.json()
         except Exception as e:
             log.warning("Gateway unreachable during model discovery: %s", e)
             return self._models_cache or [
@@ -1016,63 +1023,68 @@ class Pipe:
     # ------------------------------------------------------------------
 
     async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as r:
-                r.raise_for_status()
-                stats = {"events": 0, "reasoning": 0, "content": 0, "tool_calls": 0, "done": False}
-                async for line in r.aiter_lines():
-                    # Only forward well-formed OpenAI SSE data events. The rest is
-                    # discarded so it can never reach the OpenAI-compatible
-                    # consumer (Open WebUI's pipe handler turns any non-"data:"
-                    # line into chat CONTENT, and it emits its own closing
-                    # [DONE]/finish chunk). Concretely we keep:
-                    #   - "data: {...}" chunk events
-                    # and skip:
-                    #   - blank lines
-                    #   - SSE comments / keep-alives (": ..."), which a proxy or
-                    #     long-thinking gateway may inject; passing them through
-                    #     would corrupt the reasoning delta stream
-                    #   - "data: [DONE]" and any other noise
-                    if not isinstance(line, str):
-                        continue
-                    stripped = line.strip()
-                    if not stripped.startswith("data:") or stripped == "data: [DONE]":
-                        continue
-                    body = stripped.removeprefix("data:").strip()
-                    if not body.startswith("{"):
-                        continue
-                    stats["events"] += 1
-                    try:
-                        ev = json.loads(body)
-                        delta = ((ev.get("choices") or [{}])[0].get("delta") or {})
-                        if isinstance(delta, dict):
-                            if delta.get("reasoning_content"):
-                                stats["reasoning"] += 1
-                            if delta.get("content"):
-                                stats["content"] += 1
-                            if delta.get("tool_calls"):
-                                stats["tool_calls"] += 1
-                        fr = ((ev.get("choices") or [{}])[0].get("finish_reason"))
-                        if fr:
-                            stats["done"] = True
-                    except Exception:
-                        pass
-                    yield line
-                if getattr(self.valves, "DEBUG_LOG", False):
-                    log.info(
-                        "agent-loop-guard: response events=%d reasoning_deltas=%d content_deltas=%d tool_call_deltas=%d finish=%s",
-                        stats["events"],
-                        stats["reasoning"],
-                        stats["content"],
-                        stats["tool_calls"],
-                        "yes" if stats["done"] else "no",
-                    )
+        # Red safety net: no data for 5 minutes ends the stream instead of
+        # hanging forever (a stuck gateway would otherwise hold the request
+        # open indefinitely). Long legitimate streams (thousands of events)
+        # take seconds, so read=300 does not clip them.
+        stream_timeout = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+        async with self._client.stream(
+            "POST", url, json=payload, headers=headers, timeout=stream_timeout
+        ) as r:
+            r.raise_for_status()
+            stats = {"events": 0, "reasoning": 0, "content": 0, "tool_calls": 0, "done": False}
+            async for line in r.aiter_lines():
+                # Only forward well-formed OpenAI SSE data events. The rest is
+                # discarded so it can never reach the OpenAI-compatible
+                # consumer (Open WebUI's pipe handler turns any non-"data:"
+                # line into chat CONTENT, and it emits its own closing
+                # [DONE]/finish chunk). Concretely we keep:
+                #   - "data: {...}" chunk events
+                # and skip:
+                #   - blank lines
+                #   - SSE comments / keep-alives (": ..."), which a proxy or
+                #     long-thinking gateway may inject; passing them through
+                #     would corrupt the reasoning delta stream
+                #   - "data: [DONE]" and any other noise
+                if not isinstance(line, str):
+                    continue
+                stripped = line.strip()
+                if not stripped.startswith("data:") or stripped == "data: [DONE]":
+                    continue
+                body = stripped.removeprefix("data:").strip()
+                if not body.startswith("{"):
+                    continue
+                stats["events"] += 1
+                try:
+                    ev = json.loads(body)
+                    delta = ((ev.get("choices") or [{}])[0].get("delta") or {})
+                    if isinstance(delta, dict):
+                        if delta.get("reasoning_content"):
+                            stats["reasoning"] += 1
+                        if delta.get("content"):
+                            stats["content"] += 1
+                        if delta.get("tool_calls"):
+                            stats["tool_calls"] += 1
+                    fr = ((ev.get("choices") or [{}])[0].get("finish_reason"))
+                    if fr:
+                        stats["done"] = True
+                except Exception:
+                    pass
+                yield line
+            if getattr(self.valves, "DEBUG_LOG", False):
+                log.info(
+                    "agent-loop-guard: response events=%d reasoning_deltas=%d content_deltas=%d tool_call_deltas=%d finish=%s",
+                    stats["events"],
+                    stats["reasoning"],
+                    stats["content"],
+                    stats["tool_calls"],
+                    "yes" if stats["done"] else "no",
+                )
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
-        async with httpx.AsyncClient(timeout=300) as client:
-            r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
-            return r.json()
+        r = await self._client.post(url, json=payload, headers=headers)  # client default 300s
+        r.raise_for_status()
+        return r.json()
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -1310,7 +1322,17 @@ class Pipe:
             else:
                 return await self._call(payload, headers, url)
         except httpx.HTTPStatusError as e:
-            log.error("Gateway returned HTTP %d: %s", e.response.status_code, e)
+            body_preview = ""
+            try:
+                body_preview = (e.response.text or "")[:2000]
+            except Exception:
+                pass
+            log.error(
+                "Gateway returned HTTP %d: %s | body: %s",
+                e.response.status_code,
+                e,
+                body_preview,
+            )
             return f"Gateway error: HTTP {e.response.status_code}."
         except httpx.RequestError as e:
             log.error("Gateway unreachable: %s", e)
