@@ -59,14 +59,14 @@ function isDrop(msg) {
 
 async function oneRound() {
   const first = await chat([
-    { role: "user", content: "¿Qué tiempo hace en Madrid? Usa la herramienta." },
+    { role: "user", content: "What is the weather in Madrid? Use the tool." },
   ]);
   const m = first.choices[0].message;
   const tc = m.tool_calls?.[0];
   if (!tc) throw new Error("model did not call the tool");
 
   const base = [
-    { role: "user", content: "¿Qué tiempo hace en Madrid? Usa la herramienta." },
+    { role: "user", content: "What is the weather in Madrid? Use the tool." },
     {
       role: "assistant",
       content: m.content || "",
