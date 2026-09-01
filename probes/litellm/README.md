@@ -122,6 +122,6 @@ re-deriving tersely. Correlates with the unit tests
 (tests/test_reasoning_replay_ab.py) running the REAL
 convert_output_to_messages from the cloned open-webui with
 reasoning_format=None vs 'reasoning_content'. Decision: the pipe got an
-opt-in REPLAY_REASONING_TEXT valve (default off) that reinstalls the
+REPLAY_REASONING_TEXT valve (now default on) that reinstalls the
 get_reasoning_format monkey patch for pipe models; fails open to
 placeholder forcing.

@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.4
+version: 2.17.5
 licence: MIT
 """
 
@@ -767,13 +767,14 @@ class Pipe:
             "Off by default — verbose, only needed when debugging reasoning behavior.",
         )
         REPLAY_REASONING_TEXT: bool = Field(
-            default=False,
+            default=True,
             description="Replay the REAL reasoning text on tool-call continuations by monkey-patching "
             "Open WebUI's get_reasoning_format for pipe models. Without it, Open WebUI "
             "discards the reasoning when rebuilding assistant history and the pipe can "
             "only force a single-space placeholder. A/B probe: continuation reasoning is "
             "~19% richer with the real text. Fragile: depends on Open WebUI internals; "
-            "fails open (falls back to placeholder forcing).",
+            "fails open (falls back to placeholder forcing). On by default; disable only "
+            "if you prefer placeholder forcing over the patch.",
         )
 
         @model_validator(mode="after")

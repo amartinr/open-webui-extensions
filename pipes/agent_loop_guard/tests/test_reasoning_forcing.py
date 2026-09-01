@@ -149,6 +149,12 @@ def test_payload_forcing_deterministic():
 # --- shared connection pool -------------------------------------------------
 
 
+def test_replay_reasoning_text_default_on():
+    # The reasoning replay is on by default (A/B-verified richer continuations);
+    # disabling it is the opt-out, not the opt-in.
+    assert Pipe.Valves().REPLAY_REASONING_TEXT is True
+
+
 def test_shared_client_pool_configured():
     pipe = Pipe()
     assert isinstance(pipe._client, httpx.AsyncClient)
