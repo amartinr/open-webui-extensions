@@ -244,12 +244,18 @@ warning).
 Validated with the LiteLLM probes in `probes/litellm/` (see `01_toolcall_ab.js`
 and its verdict in `probes/litellm/README.md`).
 
-### `thinking:disabled` strip
+### `thinking` passthrough
 
-Open WebUI sends `thinking: {"type": "disabled"}` (and drops `reasoning_effort`)
-on server-side tool-call continuations. For DeepSeek that can disable reasoning
-entirely. The pipe strips the disabled marker so the user's own `thinking`
-configuration applies; if the gateway ignores the field, the strip is a no-op.
+`thinking` is a native DeepSeek request parameter and a **user control**: the
+user chooses `{"thinking": {"type": "enabled" | "disabled"}}` and the request
+propagates that choice as-is. The pipe must not touch it.
+
+Earlier versions stripped `thinking: {"type": "disabled"}` from the outbound
+payload, based on the assumption that Open WebUI injects that field on
+server-side tool-call continuations. That assumption is **false** — the field
+is the user's explicit choice — and the strip silently annulled the user's
+option to run the model without reasoning. The strip was removed; the pipe now
+forwards `thinking` unchanged.
 
 ## Architecture
 

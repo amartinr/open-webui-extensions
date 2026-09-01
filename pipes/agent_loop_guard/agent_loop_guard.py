@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.5
+version: 2.17.6
 licence: MIT
 """
 
@@ -256,26 +256,6 @@ def _force_reasoning_on_gateway_payload(body: dict) -> int:
     if not (has_tools or _history_has_tool_calls(messages)):
         return 0
     return _force_reasoning_content_on_assistant(messages)
-
-
-def _normalize_thinking_for_gateway(body: dict) -> bool:
-    """Strip Open WebUI's thinking:disabled on tool-call continuations.
-
-    Open WebUI sends thinking={'type': 'disabled'} (and drops reasoning_effort)
-    on server-side tool-call continuations. For DeepSeek that is a hard
-    kill-switch: it disables reasoning entirely (0 reasoning deltas), and a
-    demanding system prompt cannot override it. The user's own turns never
-    send 'disabled' — they send 'enabled' or omit the field — so removing the
-    disabled marker restores DeepSeek's default thinking and reasoning resumes
-    (verified: no thinking field + no effort still reasons).
-
-    Returns True when the field was removed.
-    """
-    thinking = body.get("thinking")
-    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
-        body.pop("thinking", None)
-        return True
-    return False
 
 
 # --------------------------------------------------------------------------
@@ -1231,7 +1211,6 @@ class Pipe:
         # transformation.py) and Bifrost.
         try:
             forced = _force_reasoning_on_gateway_payload(body)
-            thinking_stripped = _normalize_thinking_for_gateway(body)
             has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
             # All diagnostics are gated behind DEBUG_LOG (default off): with
             # the valve disabled no per-request line is emitted.
@@ -1242,11 +1221,10 @@ class Pipe:
                     if k not in ("messages", "tools", "model", "metadata", "files")
                 }
                 log.info(
-                    "agent-loop-guard: forced=%d thinking_stripped=%s "
+                    "agent-loop-guard: forced=%d "
                     "(model=%s, tools=%s, history_has_tool_calls=%s) "
                     "| messages: %s | params: %s",
                     forced,
-                    "yes" if thinking_stripped else "no",
                     real_model,
                     has_tools,
                     _history_has_tool_calls(messages),

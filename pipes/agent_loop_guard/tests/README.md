@@ -35,6 +35,5 @@ See `probes/litellm/README.md` for the LiteLLM A/B probes:
   `reasoning_content` (the latter is how Open WebUI reconstructs it); verdict
   backed by LiteLLM's own warning (`transformation.py`) that a missing field
   injects a blank reasoning chain.
-- `02_thinking_disabled.js` — whether `thinking: {"type": "disabled"}` (sent by
-  Open WebUI on server-side tool-call continuations) kills reasoning through
-  LiteLLM.
+- `02_thinking_disabled.js` — whether `thinking: {"type": "disabled"}` kills
+  reasoning through LiteLLM.

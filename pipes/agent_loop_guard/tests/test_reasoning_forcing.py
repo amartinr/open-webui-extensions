@@ -143,6 +143,18 @@ def test_payload_forcing_deterministic():
     assert first == second
 
 
+def test_payload_forcing_preserves_thinking_control():
+    # `thinking` is a user control (native DeepSeek request parameter) and
+    # must be forwarded unchanged — the pipe must never strip it.
+    body = _payload(
+        [{"role": "user", "content": "hi"}, _assistant()],
+        tools=[{"type": "function", "function": {"name": "get_weather"}}],
+    )
+    body["thinking"] = {"type": "disabled"}
+    _force_reasoning_on_gateway_payload(body)
+    assert body["thinking"] == {"type": "disabled"}
+
+
 # --- _messages_summary -------------------------------------------------------
 
 
