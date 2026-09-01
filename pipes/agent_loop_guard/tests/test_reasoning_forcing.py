@@ -64,7 +64,7 @@ def test_forcing_adds_empty_field_to_bare_assistant():
     del msgs[0]["reasoning_content"]
     forced = _force_reasoning_content_on_assistant(msgs)
     assert forced == 1
-    assert msgs[0]["reasoning_content"] == ""
+    assert msgs[0]["reasoning_content"] == " "
 
 
 def test_forcing_preserves_existing_field():
@@ -108,7 +108,7 @@ def test_payload_forcing_with_tools_in_request():
     del body["messages"][1]["reasoning_content"]
     forced = _force_reasoning_on_gateway_payload(body)
     assert forced == 1
-    assert body["messages"][1]["reasoning_content"] == ""
+    assert body["messages"][1]["reasoning_content"] == " "
 
 
 def test_payload_forcing_with_tool_call_history():
@@ -127,7 +127,7 @@ def test_payload_forcing_with_tool_call_history():
     assert forced == 2
     for m in body["messages"]:
         if m["role"] == "assistant":
-            assert m["reasoning_content"] == ""
+            assert m["reasoning_content"] == " "
 
 
 def test_payload_forcing_deterministic():

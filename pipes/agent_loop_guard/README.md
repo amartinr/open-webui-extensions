@@ -218,8 +218,9 @@ warns about it (`transformation.py`, "DeepSeek thinking mode"):
 The pipe forces the field on every outbound payload once tool-calling is in
 scope (request `tools` or tool-call history):
 
-- `reasoning_content` is set to `""` when missing — empty string is enough
-  for DeepSeek to keep reasoning on the next turn.
+- `reasoning_content` is set to `" "` (single space) when missing or empty —
+  enough for DeepSeek to keep reasoning, and exactly the placeholder LiteLLM
+  would inject anyway (its check treats `""` as absent and warns about it).
 - Never touches user/system/tool messages and is deterministic, so the
   provider prefix cache is preserved.
 

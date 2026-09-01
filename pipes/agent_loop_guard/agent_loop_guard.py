@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.0
+version: 2.17.1
 licence: MIT
 """
 
@@ -72,7 +72,8 @@ def _build_guard_message(
 # LiteLLM and Bifrost), omits `reasoning_content` on tool-call continuations.
 # Filter inlets do not run on tool-call continuations, so this pipe — the
 # single choke point for every outbound request to the gateway — forces the
-# field (empty string is enough for DeepSeek to keep reasoning).
+# field (a single space is enough for DeepSeek to keep reasoning — and it
+# matches the placeholder LiteLLM would inject anyway).
 
 
 def _messages_summary(messages: list, verbose: bool = False) -> str:
@@ -125,22 +126,24 @@ def _history_has_tool_calls(messages: list) -> bool:
 
 
 def _force_reasoning_content_on_assistant(messages: list) -> int:
-    """Guarantee every assistant message carries `reasoning_content`.
+    """Guarantee every assistant message carries a non-empty `reasoning_content`.
 
     DeepSeek silently degrades multi-turn reasoning when a tool-calling
-    history replays an assistant message without `reasoning_content`
-    (empty string is enough — LiteLLM injects a blank placeholder and
-    warns otherwise, cf. transformation.py). Open WebUI rebuilds assistant
-    messages without the field on tool-call continuations.
+    history replays an assistant message without `reasoning_content`.
+    Open WebUI rebuilds assistant messages without the field on tool-call
+    continuations, and LiteLLM treats a MISSING or EMPTY ("") value as
+    absent: it injects a single-space placeholder and warns about it
+    (transformation.py, "DeepSeek thinking mode"). Forcing a single space
+    is exactly what LiteLLM would inject anyway, so the placeholder is
+    explicit and the warning is silenced.
 
-    Returns the number of assistant messages that were given an empty
-    `reasoning_content` (for diagnostics).
+    Returns the number of assistant messages that were forced (diagnostics).
     """
     forced = 0
     for msg in messages:
         if isinstance(msg, dict) and msg.get("role") == "assistant":
-            if not isinstance(msg.get("reasoning_content"), str):
-                msg["reasoning_content"] = ""
+            if not isinstance(msg.get("reasoning_content"), str) or not msg["reasoning_content"]:
+                msg["reasoning_content"] = " "
                 forced += 1
     return forced
 

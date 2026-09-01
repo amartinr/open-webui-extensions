@@ -40,6 +40,15 @@ correlates: with `high` effort the WITH-`reasoning_content` leg reasoned 2/4
 rounds, the WITHOUT leg 0/4 (with `low` effort on a trivial task the model
 simply often chooses not to reason at all, so the difference is washed out).
 
+### Follow-up (live deployment trace, v2.17.0)
+
+With the pipe forcing `reasoning_content: ""`, LiteLLM STILL emitted this
+warning on every assistant of every request: its check treats an EMPTY
+string as absent (`if not reasoning_content`), injects `" "` itself, and
+warns. Fix: the pipe now forces `" "` (single space) — truthy for LiteLLM,
+and byte-identical to the placeholder it would inject anyway. The warning
+is silenced and DeepSeek receives exactly what it received before.
+
 ### What this means for `agent_loop_guard` on the revert branch
 
 Keep:
