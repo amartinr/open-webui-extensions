@@ -372,7 +372,7 @@ counter so the user knows how many tool calls remain.
 | Valve | Default | Description |
 |-------|---------|-------------|
 | `GATEWAY_BASE_URL` | `""` | Base URL for the OpenAI-compatible gateway |
-| `GATEWAY_AUTH_HEADER` | `"x-bf-vk"` | HTTP header name for the API key |
+| `GATEWAY_AUTH_HEADER` | `"Authorization"` | HTTP header name for the API key |
 | `GATEWAY_AUTH_VALUE` | `""` | Credential value (password field) |
 | `GATEWAY_CUSTOM_HEADERS` | `""` | JSON object of extra headers with template variable support |
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before runaway guard fires. `0` = disabled |
@@ -406,7 +406,7 @@ are resolved at runtime:
 
 ```json
 {
-  "x-bf-dim-host": "myhost",
+  "x-tenant-id": "myhost",
   "x-authenticated-user": "{{USER_NAME}}",
   "x-user-id": "{{USER_ID}}",
   "x-user-email": "{{USER_EMAIL}}",

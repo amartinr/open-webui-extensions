@@ -8,13 +8,12 @@ Collection of filters, pipes, tools, and adapters for [Open WebUI](https://docs.
 
 | Component | Version | Purpose |
 |---|---|---|
-| [Agent Loop Guard](pipes/agent_loop_guard/) | 2.15.0 | Intercepts tool-calling loops; proxies requests to the gateway; normalizes Bifrost/DeepSeek reasoning on tool-call continuations. |
+| [Agent Loop Guard](pipes/agent_loop_guard/) | 2.17.5 | Intercepts tool-calling loops; proxies requests to the gateway; forces `reasoning_content` on tool-call continuations (DeepSeek contract) and optionally replays the real reasoning text. |
 
 ### Filters
 
 | Component | Version | Purpose |
 |---|---|---|
-| [Bifrost reasoning_content fix](filters/bifrost_reasoning_content_fix/) | 3.5.0 | Converts Bifrost's non-standard `reasoning`/`reasoning_details` fields to `reasoning_content` in stream and history. |
 | [DeepSeek Reasoning Effort Selector](filters/deepseek_reasoning/) | 1.3.2 | Per-model `reasoning_effort` control for DeepSeek models. |
 | [Image to File Storage](filters/image_filter/) | 2.12.3 | Persists pasted images as files and injects `<attached_files>` blocks. |
 | [RAG mode selector](filters/rag_mode_selector/) | 1.0.0 | Toggles RAG context injection per request (`rag_default_off` / `rag_enable`). |
@@ -40,21 +39,20 @@ the service if `stream()` changed.
 
 ## Compatibility
 
-The reasoning components ([Agent Loop Guard](pipes/agent_loop_guard/),
-[Bifrost reasoning_content fix](filters/bifrost_reasoning_content_fix/)) are
+The reasoning handling in [Agent Loop Guard](pipes/agent_loop_guard/) is
 validated against this stack:
 
 | Layer | Version | Notes |
 |---|---|---|
-| Open WebUI | 0.11.1 | `get_reasoning_format()` returns `None` for pipe models → history replay needs the monkey patch |
-| Bifrost | 2.0.0 (core 1.8.3) | Requires core ≥ 1.8.0 for SSE `reasoning_content` in stream deltas ([#6523](https://github.com/maximhq/bifrost/issues/6523)); core ≥ 1.7.10 for tool-call reasoning replay ([#5887](https://github.com/maximhq/bifrost/issues/5887)) |
-| DeepSeek | v4 flash/pro | Requires `reasoning_content` replayed on tool-call continuations |
+| Open WebUI | 0.11.1 | `get_reasoning_format()` returns `None` for pipe models → history replay needs the monkey patch (`REPLAY_REASONING_TEXT` valve) |
+| LiteLLM | current | OpenAI-compatible responses: native `reasoning_content` in stream and history; warns when the field is missing on tool-call continuations |
+| DeepSeek | v4 flash/pro | Requires `reasoning_content` replayed on tool-call continuations (HTTP 400 if missing) |
 
-On Bifrost 2.0.0 the reasoning path is verified clean (0/34 SSE mismatches
-with `pipes/agent_loop_guard/tests/repro_bifrost_reasoning_loss.mjs`). The
-pipe and filter remain necessary: stream deltas still carry
-`reasoning_details`, which Open WebUI v0.11.1 suppresses from the live
-reasoning event unless stripped.
+The DeepSeek `reasoning_content` forcing is the provider contract, not a
+gateway quirk — LiteLLM emits its own warning ("DeepSeek thinking mode")
+when a tool-call continuation replays an assistant without it. A/B probes
+live in `probes/litellm/` (placeholder vs real reasoning replay, thinking
+`disabled` behavior, and the reasoning-replay verdict).
 
 ## Development
 
