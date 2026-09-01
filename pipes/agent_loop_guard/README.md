@@ -222,6 +222,8 @@ scope (request `tools` or tool-call history):
 - `reasoning_content` is set to `" "` (single space) when missing or empty —
   enough for DeepSeek to keep reasoning, and exactly the placeholder LiteLLM
   would inject anyway (its check treats `""` as absent and warns about it).
+- Never touches user/system/tool messages and is deterministic, so the
+  provider prefix cache is preserved.
 
 ### Replaying the real reasoning text (default on)
 
@@ -238,8 +240,6 @@ re-deriving from scratch. Trade-off: depends on Open WebUI private internals
 (`middleware.get_reasoning_format`); a future Open WebUI release can break or
 supersede it — the pipe then degrades to placeholder forcing (rate-limited
 warning).
-- Never touches user/system/tool messages and is deterministic, so the
-  provider prefix cache is preserved.
 
 Validated with the LiteLLM probes in `probes/litellm/` (see `01_toolcall_ab.js`
 and its verdict in `probes/litellm/README.md`).
@@ -251,11 +251,7 @@ on server-side tool-call continuations. For DeepSeek that can disable reasoning
 entirely. The pipe strips the disabled marker so the user's own `thinking`
 configuration applies; if the gateway ignores the field, the strip is a no-op.
 
-## SSE forwarding
-
-`_stream` proxies the gateway's raw SSE to Open WebUI, forwarding only
-well-formed OpenAI `data: { ... }` chunk events. Everything else is
-dropped:
+## Architecture
 
 ### Why a Pipe instead of a Filter?
 
@@ -282,13 +278,17 @@ to the gateway via `httpx.AsyncClient`:
 
 - ✅ Full control over headers, auth, and body modifications
 - ✅ Gateway-agnostic (LiteLLM, OpenAI-compatible proxies)
+- ✅ Shared connection pool across requests/tool-call iterations (no
+  per-request handshake), stream read timeout (5 min safety net), and
+  gateway error bodies logged (v2.17.4+)
 - ❌ `ENABLE_FORWARD_USER_INFO_HEADERS` has no effect (solved via
   `GATEWAY_CUSTOM_HEADERS` templates)
 
 ## Compatibility
 
 Validated against Open WebUI **0.11.1** + LiteLLM (`http://litellm.private`)
-+ DeepSeek **v4 flash/pro** and Claude **Haiku 4.5**:
++ DeepSeek **v4 flash/pro** (Claude Haiku 4.5 is exposed by the gateway but
+not validated with this pipe):
 
 - LiteLLM emits standard OpenAI-compatible responses: `reasoning_content` in
   both non-stream messages and stream deltas — no field normalization
@@ -306,7 +306,7 @@ pipes/agent_loop_guard/
 ├── DESIGN.md              # Full design document (reference)
 ├── EXAMPLE.md             # Before/after walkthrough
 ├── agent_loop_guard.py    # Single-file pipe
-└── tests/                 # Unit tests (attached-files cleanup, reasoning forcing)
+└── tests/                 # Unit tests (attached-files cleanup, reasoning forcing, replay patch)
 ```
 
 The pipe is a single Python file because Open WebUI Functions are stored
