@@ -70,3 +70,36 @@ same DeepSeek contract the pipe handles for Open WebUI. Revisit separately:
 whether pi still needs it (its `models.json` routes deepseek-v4-flash/pro
 through LiteLLM), and whether to rename it (the "bifrost" name is
 misleading — it is transport-independent).
+
+### External verification (docs + OWUI source)
+
+Why a single space is the right value for `reasoning_content` on tool-call
+continuations (multi-tool-call turns included), verified against:
+
+1. **DeepSeek official docs** (api-docs.deepseek.com/guides/thinking_mode):
+   requests carrying `tools` must pass `reasoning_content` back on EVERY
+   assistant message of the history — missing field = HTTP 400. The
+   validation is presence-only; no documented error for empty/whitespace
+   content. The official multi-tool-call example replays the real text so
+   the model can "continue its previous reasoning" — a quality goal, not a
+   validation requirement.
+2. **Community integrations** (spring-ai #5027, openai/codex #24500,
+   openai-agents-js #791, openai-agents-python #2155, Roo-Code #10175,
+   n8n, LangChain forum): all hit the same 400 "Missing reasoning_content
+   field"; none report a 400 for empty/space content.
+3. **Open WebUI source (master clone)**: `get_reasoning_format()` returns
+   `'thinking'` only for ollama and `'reasoning_content'` only for
+   llama.cpp — `None` for every OpenAI-compatible model (LiteLLM, Bifrost).
+   With `None`, `convert_output_to_messages()` (called with `raw=True` on
+   tool-call continuations, middleware.py ~5939) DISCARDS the real reasoning
+   text; only native providers get `pending_reasoning`. So Open WebUI itself
+   strips the real text before the pipe ever sees the payload — the pipe
+   cannot replay it and a placeholder is the only option.
+4. **Open WebUI docs**: no coverage of this detail (only the llama.cpp
+   DeepSeek-R1 tutorial, which does not apply).
+
+Consequence: forcing `" "` is byte-identical to what LiteLLM already sent
+DeepSeek when the field was missing (its own injected placeholder), so it
+satisfies DeepSeek's presence validation, silences LiteLLM's warning, and
+costs nothing extra — the reasoning-text loss is Open WebUI's own behavior
+for OpenAI-compatible providers regardless of the pipe.
