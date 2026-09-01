@@ -51,3 +51,13 @@ Drop:
 - residue renaming (`_has_bifrost_residue`, `_normalize_reasoning_message`, `_extract_reasoning_text` on messages) — LiteLLM never emits `reasoning`/`reasoning_details`.
 - `_clean_stream_delta` — stream deltas are already standard; nothing to normalize.
 - the whole `bifrost_reasoning_content_fix` filter and the Bifrost integration tests.
+
+## Open item (next session)
+
+`pi-bifrost-reasoning-fix` (pi extension, `~/.pi/agent/extensions/`) was
+DISABLED by the user after this session. It forces `reasoning_content` on
+pi's own DeepSeek tool-call histories through the same LiteLLM endpoint —
+same DeepSeek contract the pipe handles for Open WebUI. Revisit separately:
+whether pi still needs it (its `models.json` routes deepseek-v4-flash/pro
+through LiteLLM), and whether to rename it (the "bifrost" name is
+misleading — it is transport-independent).
