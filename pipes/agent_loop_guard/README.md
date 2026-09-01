@@ -19,7 +19,7 @@ stopping. The Agent Loop Guard stops earlier, on a more specific signal
 
 ## Solution
 
-The pipe sits between the UI and the LLM gateway (Bifrost, LiteLLM, any
+The pipe sits between the UI and the LLM gateway (LiteLLM or any
 OpenAI-compatible proxy). It:
 
 1. analyses each request for consecutive identical tool calls;
@@ -87,15 +87,15 @@ User message → Open WebUI → Agent Loop Guard pipe()
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `GATEWAY_BASE_URL` | `""` | Base URL for the OpenAI-compatible gateway (e.g. Bifrost) |
-| `GATEWAY_AUTH_HEADER` | `"x-bf-vk"` | HTTP header name for the API key |
+| `GATEWAY_BASE_URL` | `""` | Base URL for the OpenAI-compatible gateway (e.g. LiteLLM) |
+| `GATEWAY_AUTH_HEADER` | `"Authorization"` | HTTP header name for the API key |
 | `GATEWAY_AUTH_VALUE` | `""` | API key/credential (password field) |
 | `GATEWAY_CUSTOM_HEADERS` | `""` | JSON object of extra headers. Supports `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` |
 | `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before runaway guard fires. `0` = disabled |
 | `MAX_CONSECUTIVE_TOOL_CALLS` | `4` | Consecutive identical calls before loop guard fires (min 3) |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to remove from the agent's tool list. Example: `"delete_file, terminal_execute"` |
 | `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks within each user message (see [Attached-Files Cleanup](#attached-files-cleanup)). `False` = forward payloads unchanged |
-| `REASONING_DEBUG_LOG` | `False` | Trace reasoning_content on the outbound payload: `R0`/`R{n}` flags in the messages summary plus the last assistant's reasoning_content. For debugging reasoning drops only |
+| `DEBUG_LOG` | `False` | Per-request diagnostics: `R0`/`R{n}` flags in the messages summary, last assistant's reasoning_content, and the full outbound request. For debugging reasoning behavior only |
 
 > **Validation**: `MAX_TOOL_CALLS_PER_TURN` must be **greater than**
 > `MAX_CONSECUTIVE_TOOL_CALLS` when both are enabled. Open WebUI rejects
@@ -118,7 +118,7 @@ detection).
 
 ```json
 {
-  "x-bf-dim-host": "myhost",
+  "x-tenant-id": "myhost",
   "x-authenticated-user": "{{USER_NAME}}",
   "x-user-id": "{{USER_ID}}",
   "x-user-email": "{{USER_EMAIL}}"
@@ -195,75 +195,49 @@ data: {"id":"1","choices":[{"delta":{"reasoning_content":"let me"}}]}
 data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}
 ```
 
-Validated against a live Bifrost stream (long reasoning): 1917 events, 0
-corruption.
+Validated against a live long-reasoning stream (1917 events, 0
+corruption).
 
-## Bifrost reasoning normalization
+## DeepSeek reasoning forcing
 
 DeepSeek requires `reasoning_content` on **every** assistant message of a
 tool-calling history. When Open WebUI executes a tool call, it rebuilds the
 assistant `tool_calls` message from stored output items and omits
-`reasoning_content` (OpenAI-compatible providers replay reasoning as
-`reasoning_details`, or nothing at all), and the request goes straight back
-to the pipe — filter inlets do **not** run on tool-call continuations.
+`reasoning_content` (OpenAI-compatible providers — LiteLLM included — replay
+the reasoning without that field), and the request goes straight back to the
+pipe — filter inlets do **not** run on tool-call continuations.
 
-The pipe normalizes every outbound payload before forwarding (mirroring
-`pi-bifrost-reasoning-fix`):
+This is the **DeepSeek API contract**, not a gateway quirk: LiteLLM itself
+warns about it (`transformation.py`, "DeepSeek thinking mode"):
 
-1. Renames assistant `reasoning` / `reasoning_details` into
-   `reasoning_content` (content-driven).
-2. Once tool-calling is in scope (request `tools` or tool-call history),
-   forces `reasoning_content` (empty if none yet) on every assistant
-   message.
+> assistant message is missing `reasoning_content` … A single-space placeholder
+> is being injected to satisfy API validation, but the model will receive a
+> blank reasoning chain for this turn, which may silently degrade multi-turn
+> response quality.
 
-The rewrite is deterministic and never touches user/system/tool messages,
-so the provider prefix cache is preserved. Validated against a live Bifrost
-endpoint (`deepseek/deepseek-v4-flash`):
+The pipe forces the field on every outbound payload once tool-calling is in
+scope (request `tools` or tool-call history):
 
-| Continuation history (assistant with `tool_calls`) | Reasoning on next turn |
-|---|---|
-| no `reasoning_content` | ❌ lost |
-| `reasoning_content` (even `""`) | ✅ kept |
-| `reasoning_details` (Bifrost dialect) | ❌ lost |
+- `reasoning_content` is set to `""` when missing — empty string is enough
+  for DeepSeek to keep reasoning on the next turn.
+- Never touches user/system/tool messages and is deterministic, so the
+  provider prefix cache is preserved.
 
-This complements `filters/bifrost_reasoning_content_fix`, whose `inlet`
-applies the same normalization to fresh user turns.
+Validated with the LiteLLM probes in `probes/litellm/` (see `01_toolcall_ab.js`
+and its verdict in `probes/litellm/README.md`).
 
-### Monkey patch of Open WebUI internals
+### `thinking:disabled` strip
 
-To replay the reasoning above, the pipe **replaces a function inside Open
-WebUI at import time** (`_install_reasoning_replay_patch`): it swaps
-`open_webui.utils.middleware.get_reasoning_format` for a wrapped version.
+Open WebUI sends `thinking: {"type": "disabled"}` (and drops `reasoning_effort`)
+on server-side tool-call continuations. For DeepSeek that can disable reasoning
+entirely. The pipe strips the disabled marker so the user's own `thinking`
+configuration applies; if the gateway ignores the field, the strip is a no-op.
 
-**Purpose.** Open WebUI asks `get_reasoning_format(model)` how to replay
-stored reasoning when rebuilding assistant history for a tool-call
-continuation. In v0.11.x the function returns a format only for Ollama
-(`'thinking'`) and llama.cpp (`'reasoning_content'`) models, and **`None`
-for every OpenAI-compatible model — including pipe models**. With `None`,
-`convert_output_to_messages` **discards the reasoning entirely** — the
-replayed assistant reaches Bifrost without `reasoning_content` and DeepSeek
-stops reasoning on the next turn. Payload normalization downstream cannot
-recover text already dropped here.
+## SSE forwarding
 
-**Scope.** For models with `owned_by == "openai"` **and** a `pipe` key (the
-pipe's own models), the patch makes `get_reasoning_format` return
-`'reasoning_content'`, so Open WebUI rebuilds the assistant with the real
-reasoning text in that field. Direct OpenAI connections and
-Ollama/llama.cpp models keep their original behavior.
-
-**Fail-open and idempotent.** The patch is applied once at import and
-short-circuits on a marker attribute (`_bf_reasoning_patched`) if already
-installed. If Open WebUI changes these internals, the patch raises and the
-pipe falls back to the empty-string forcing — no crash, no total reasoning
-loss.
-
-**Trade-off.** The patch depends on Open WebUI private implementation
-details (`middleware.get_reasoning_format` and the
-`convert_output_to_messages` contract). A future Open WebUI release can
-break or supersede it (e.g. returning `'reasoning_content'` natively for
-pipe models, which would make the patch a no-op).
-
-## Architecture
+`_stream` proxies the gateway's raw SSE to Open WebUI, forwarding only
+well-formed OpenAI `data: { ... }` chunk events. Everything else is
+dropped:
 
 ### Why a Pipe instead of a Filter?
 
@@ -289,23 +263,22 @@ The pipe is a **custom router** — it does not pass through Open WebUI's
 to the gateway via `httpx.AsyncClient`:
 
 - ✅ Full control over headers, auth, and body modifications
-- ✅ Gateway-agnostic (Bifrost, LiteLLM, OpenAI-compatible proxies)
+- ✅ Gateway-agnostic (LiteLLM, OpenAI-compatible proxies)
 - ❌ `ENABLE_FORWARD_USER_INFO_HEADERS` has no effect (solved via
   `GATEWAY_CUSTOM_HEADERS` templates)
 
 ## Compatibility
 
-Validated against Open WebUI **0.11.1** + Bifrost **2.0.0** (core 1.8.3) +
-DeepSeek **v4 flash/pro**:
+Validated against Open WebUI **0.11.1** + LiteLLM (`http://litellm.private`)
++ DeepSeek **v4 flash/pro** and Claude **Haiku 4.5**:
 
-- Bifrost core ≥ 1.7.10 required for tool-call reasoning replay
-  ([#5887](https://github.com/maximhq/bifrost/issues/5887)).
-- Bifrost core ≥ 1.8.0 required for `reasoning_content` in stream deltas
-  ([#6523](https://github.com/maximhq/bifrost/issues/6523)).
-- On 2.0.0 the reasoning path is clean (0/34 SSE mismatches with
-  `tests/repro_bifrost_reasoning_loss.mjs`). The pipe stays necessary:
-  stream deltas still carry `reasoning_details`, which Open WebUI v0.11.1
-  suppresses from the live reasoning event unless stripped.
+- LiteLLM emits standard OpenAI-compatible responses: `reasoning_content` in
+  both non-stream messages and stream deltas — no field normalization
+  needed (the Bifrost-specific `reasoning`/`reasoning_details` handling was
+  removed in v2.17.0).
+- LiteLLM warns when a tool-call continuation replays an assistant without
+  `reasoning_content` (blank reasoning chain) — the pipe's forcing step
+  exists for exactly that.
 
 ## File Layout
 
@@ -315,7 +288,7 @@ pipes/agent_loop_guard/
 ├── DESIGN.md              # Full design document (reference)
 ├── EXAMPLE.md             # Before/after walkthrough
 ├── agent_loop_guard.py    # Single-file pipe
-└── tests/                 # Unit tests + Bifrost integration probe
+└── tests/                 # Unit tests (attached-files cleanup, reasoning forcing)
 ```
 
 The pipe is a single Python file because Open WebUI Functions are stored

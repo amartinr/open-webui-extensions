@@ -4,10 +4,10 @@ id: agent_loop_guard
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. Streaming now filters non-OpenAI SSE lines (keep-alives/comments) so reasoning deltas stay aligned.
+description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.16.2
+version: 2.17.0
 licence: MIT
 """
 
@@ -22,61 +22,6 @@ log = logging.getLogger(__name__)
 
 
 GUARD_MARKER = "[Tool call budget exhausted]"
-
-
-# --------------------------------------------------------------------------
-# Open WebUI reasoning-replay patch (DeepSeek/Bifrost tool-calling)
-# --------------------------------------------------------------------------
-#
-# Open WebUI's get_reasoning_format() returns None for every OpenAI-compatible
-# model (owned_by='openai'), including pipe models. convert_output_to_messages()
-# therefore DROPS the stored reasoning when it rebuilds assistant history for a
-# tool-call continuation, so the replayed assistant reaches Bifrost without
-# reasoning_content and DeepSeek silently stops reasoning on the next turn.
-#
-# This monkey-patches get_reasoning_format so OUR pipe model replays reasoning
-# as 'reasoning_content'. Open WebUI then reconstructs the assistant with the
-# REAL reasoning text and this pipe forwards it unchanged. It is scoped to pipe
-# models only (owned_by='openai' AND a 'pipe' key), so direct OpenAI connections
-# and Ollama/llama.cpp models keep their original behavior. It fails open: if
-# Open WebUI ever changes these internals, the pipe still falls back to the
-# empty-string forcing below (no crash, no complete reasoning loss).
-def _install_reasoning_replay_patch() -> None:
-    try:
-        from open_webui.utils import middleware as _mw
-
-        current = _mw.get_reasoning_format
-        if getattr(current, "_bf_reasoning_patched", False):
-            return
-
-        original = current
-
-        def _patched(model):
-            result = original(model)
-            if result is not None:
-                return result
-            if (
-                isinstance(model, dict)
-                and model.get("owned_by") == "openai"
-                and model.get("pipe")
-            ):
-                return "reasoning_content"
-            return result
-
-        _patched._bf_reasoning_patched = True
-        _mw.get_reasoning_format = _patched
-        log.info(
-            "bf-reasoning: patched get_reasoning_format for pipe-model reasoning replay"
-        )
-    except Exception as exc:
-        log.warning(
-            "bf-reasoning: could not patch get_reasoning_format "
-            "(falling back to empty-string forcing): %s",
-            exc,
-        )
-
-
-_install_reasoning_replay_patch()
 
 
 # --------------------------------------------------------------------------
@@ -114,126 +59,31 @@ def _build_guard_message(
 
 
 # --------------------------------------------------------------------------
-# Bifrost reasoning normalization (DeepSeek tool-calling)
+# DeepSeek reasoning forcing (transport-independent)
 # --------------------------------------------------------------------------
 #
 # DeepSeek requires `reasoning_content` on every assistant message of a
-# tool-calling history; a missing field makes it silently drop reasoning on
-# the next turn (validated against a live Bifrost endpoint). Open WebUI
-# rebuilds assistant messages from stored output items and, for
-# OpenAI-compatible providers, omits `reasoning_content` (it only keeps
-# reasoning_details or nothing at all). Filter inlets do not run on
-# tool-call continuations, so this pipe — the single choke point for every
-# outbound request to the gateway — applies the same normalization as
-# pi-bifrost-reasoning-fix's before_provider_request hook.
-
-
-def _extract_reasoning_text(details) -> str:
-    """reasoning_details is a list of blocks {type: 'reasoning.text', text: ...}."""
-    if not isinstance(details, list):
-        return ""
-    return "".join(
-        item.get("text", "")
-        for item in details
-        if isinstance(item, dict) and item.get("type") == "reasoning.text"
-    )
-
-
-def _has_bifrost_residue(msg: dict) -> bool:
-    """Non-standard Bifrost fields on an assistant message.
-
-    Mirrors pi-bifrost-reasoning-fix: a `reasoning` field counts even when
-    empty, and `reasoning_details` counts whenever it is a list.
-    """
-    return "reasoning" in msg and isinstance(msg["reasoning"], str) or isinstance(
-        msg.get("reasoning_details"), list
-    )
-
-
-def _normalize_reasoning_message(msg: dict) -> dict:
-    """Convert Bifrost residue to reasoning_content (pi-bifrost-reasoning-fix).
-
-    Plain-text `reasoning` wins; `reasoning_details` is the fallback when no
-    text landed in reasoning_content. Both non-standard fields are removed.
-    """
-    msg = dict(msg)
-    reasoning = msg.pop("reasoning", None)
-    if isinstance(reasoning, str) and "reasoning_content" not in msg:
-        msg["reasoning_content"] = reasoning
-    details = msg.pop("reasoning_details", None)
-    if details and (
-        not isinstance(msg.get("reasoning_content"), str)
-        or msg["reasoning_content"] == ""
-    ):
-        text = _extract_reasoning_text(details)
-        if text:
-            msg["reasoning_content"] = text
-    return msg
-
-
-def _clean_stream_delta(delta: dict) -> bool:
-    """Normalize a Bifrost stream delta for Open WebUI's streaming handler.
-
-    Bifrost sends each reasoning fragment in BOTH delta.reasoning (plain text)
-    and delta.reasoning_details (list of blocks). Open WebUI's handler reads
-    delta.reasoning natively as reasoning_content, but it SUPPRESSES the live
-    `response.reasoning_text.delta` event whenever a delta carries
-    reasoning_details (it sets data=None and only saves to DB). Left unstripped,
-    the reasoning never streams live: it pops in only at the end, expanded, and
-    briefly interleaves with the content (the reported "glitch").
-
-    This mirrors the bifrost_reasoning_content_fix filter's stream handling:
-    reasoning -> reasoning_content, and both non-standard fields are removed.
-    The pipe is the single choke point for every gateway response, so doing it
-    here works even when that filter is not attached to the pipe model.
-
-    Returns True when the delta was modified (caller must re-serialize the
-    enclosing event).
-    """
-    if not isinstance(delta, dict):
-        return False
-
-    modified = False
-
-    # Bifrost core >= 1.8.0 emits each reasoning fragment in THREE fields at
-    # once: delta.reasoning, delta.reasoning_content and
-    # delta.reasoning_details (all the same text). When reasoning_content is
-    # already populated by the gateway, appending would double the fragment
-    # (and across pipe + filter it quadruples). Only synthesize the field
-    # when the gateway did not provide it (Bifrost < 1.8.0), and always strip
-    # the redundant fields.
-    existing = delta.get("reasoning_content", "")
-    existing = existing if isinstance(existing, str) else ""
-
-    if "reasoning" in delta:
-        reasoning = delta.pop("reasoning")
-        modified = True
-        if isinstance(reasoning, str) and reasoning and not existing:
-            delta["reasoning_content"] = reasoning
-
-    if not existing and not delta.get("reasoning_content"):
-        text = _extract_reasoning_text(delta.get("reasoning_details"))
-        if text:
-            delta["reasoning_content"] = text
-            modified = True
-
-    if "reasoning_details" in delta:
-        delta.pop("reasoning_details", None)
-        modified = True
-
-    return modified
+# tool-calling history; a missing field silently degrades multi-turn reasoning.
+# This is the DeepSeek API contract — it applies through ANY OpenAI-compatible
+# gateway. LiteLLM itself warns about it (transformation.py): when the field is
+# missing it injects a blank placeholder and the model receives an empty
+# reasoning chain. Open WebUI rebuilds assistant messages from stored output
+# items and, for OpenAI-compatible providers (owned_by='openai', which includes
+# LiteLLM and Bifrost), omits `reasoning_content` on tool-call continuations.
+# Filter inlets do not run on tool-call continuations, so this pipe — the
+# single choke point for every outbound request to the gateway — forces the
+# field (empty string is enough for DeepSeek to keep reasoning).
 
 
 def _messages_summary(messages: list, verbose: bool = False) -> str:
     """Compact per-message shape summary for diagnostics.
 
     One token per message: role + flags — T (has tool_calls), R (has
-    reasoning_content), r (has non-standard reasoning), D (has
-    reasoning_details), c (content is a list).
+    reasoning_content), c (content is a list).
 
     With `verbose=True` the reasoning flag distinguishes R0 (present-but-
-    empty — the dangerous case: DeepSeek sees empty reasoning and may stop
-    reasoning) from R<n> (present with text of length n).
+    empty — the dangerous case for DeepSeek: an empty reasoning chain is
+    replayed to the model) from R<n> (present with text of length n).
     """
     parts = []
     for m in messages if isinstance(messages, list) else []:
@@ -250,10 +100,6 @@ def _messages_summary(messages: list, verbose: bool = False) -> str:
                 flags += "R0" if rc == "" else f"R{len(rc)}"
             else:
                 flags += "R"
-        if "reasoning" in m:
-            flags += "r"
-        if "reasoning_details" in m:
-            flags += "D"
         if isinstance(m.get("content"), list):
             flags += "c"
         parts.append(f"{role}{flags or '-'}")
@@ -278,12 +124,14 @@ def _history_has_tool_calls(messages: list) -> bool:
     )
 
 
-def _force_reasoning_content_on_tools(messages: list) -> int:
+def _force_reasoning_content_on_assistant(messages: list) -> int:
     """Guarantee every assistant message carries `reasoning_content`.
 
-    DeepSeek silently drops reasoning when a tool-calling history replays an
-    assistant message without `reasoning_content` (empty string is enough).
-    Same forcing step as pi-bifrost-reasoning-fix's normalizePayload().
+    DeepSeek silently degrades multi-turn reasoning when a tool-calling
+    history replays an assistant message without `reasoning_content`
+    (empty string is enough — LiteLLM injects a blank placeholder and
+    warns otherwise, cf. transformation.py). Open WebUI rebuilds assistant
+    messages without the field on tool-call continuations.
 
     Returns the number of assistant messages that were given an empty
     `reasoning_content` (for diagnostics).
@@ -297,34 +145,23 @@ def _force_reasoning_content_on_tools(messages: list) -> int:
     return forced
 
 
-def _normalize_reasoning_for_gateway(body: dict) -> tuple[int, int]:
-    """Normalize the outbound payload in place (Bifrost → DeepSeek fix).
-
-    1. Rename assistant `reasoning` / `reasoning_details` into
-       `reasoning_content` (content-driven).
-    2. Once tool-calling is in scope (request `tools` or tool-call history),
-       force `reasoning_content` (even empty) on every assistant message —
-       DeepSeek drops reasoning on the next turn otherwise.
+def _force_reasoning_on_gateway_payload(body: dict) -> int:
+    """Force `reasoning_content` on assistant messages once tool-calling is in
+    scope (request `tools` or tool-call history). DeepSeek contract fix,
+    transport-independent (validated against LiteLLM + Bifrost).
 
     Never touches user/system/tool messages and is deterministic, so the
     provider prefix cache is not invalidated by the rewrite.
 
-    Returns (renamed, forced) counts for diagnostics.
+    Returns the number of assistant messages that were forced (diagnostics).
     """
     messages = body.get("messages")
     if not isinstance(messages, list):
-        return 0, 0
-    renamed = 0
-    for i, msg in enumerate(messages):
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            if _has_bifrost_residue(msg):
-                messages[i] = _normalize_reasoning_message(msg)
-                renamed += 1
+        return 0
     has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
-    if has_tools or _history_has_tool_calls(messages):
-        forced = _force_reasoning_content_on_tools(messages)
-        return renamed, forced
-    return renamed, 0
+    if not (has_tools or _history_has_tool_calls(messages)):
+        return 0
+    return _force_reasoning_content_on_assistant(messages)
 
 
 def _normalize_thinking_for_gateway(body: dict) -> bool:
@@ -788,21 +625,21 @@ class Pipe:
     class Valves(BaseModel):
         GATEWAY_BASE_URL: str = Field(
             default="",
-            description="Base URL for the OpenAI-compatible gateway (e.g. Bifrost).",
+            description="Base URL for the OpenAI-compatible gateway (e.g. LiteLLM).",
         )
         GATEWAY_AUTH_HEADER: str = Field(
-            default="x-bf-vk",
-            description="HTTP header name for the API key (e.g. 'Authorization', 'x-bf-vk', 'x-api-key').",
+            default="Authorization",
+            description="HTTP header name for the API key (e.g. 'Authorization', 'x-api-key').",
         )
         GATEWAY_AUTH_VALUE: str = Field(
             default="",
-            description="Credential value sent in the configured auth header (e.g. 'Bearer sk-...', 'bf-vk-...').",
+            description="Credential value sent in the configured auth header (e.g. 'Bearer sk-...').",
             json_schema_extra={"input": {"type": "password"}},
         )
         GATEWAY_CUSTOM_HEADERS: str = Field(
             default="",
             description="JSON object of extra HTTP headers to send with every gateway request. "
-            'Example: {"x-bf-dim-host": "myhost", "x-trace-id": "abc"}. '
+            'Example: {"x-tenant-id": "myhost", "x-trace-id": "abc"}. '
             "Leave empty if not needed.",
         )
         MAX_TOOL_CALLS_PER_TURN: int = Field(
@@ -828,12 +665,12 @@ class Pipe:
             "messages stay byte-stable between turns, so the prefix cache is preserved. "
             "Set to False to forward payloads unchanged.",
         )
-        REASONING_DEBUG_LOG: bool = Field(
+        DEBUG_LOG: bool = Field(
             default=False,
-            description="Trace reasoning_content on the outbound payload: messages summary with "
-            "R0 (present-but-empty) vs R<n> (text length) flags, plus a log line with the "
-            "last assistant's reasoning_content length/empty/prefix. Off by default — "
-            "verbose per-request logging, only needed when debugging reasoning drops.",
+            description="Per-request diagnostics: messages summary with R0 (present-but-empty) vs "
+            "R<n> (text length) reasoning flags, last assistant reasoning_content "
+            "length/empty/prefix, and the full outbound request (url/headers/payload). "
+            "Off by default — verbose, only needed when debugging reasoning behavior.",
         )
 
         @model_validator(mode="after")
@@ -1076,13 +913,6 @@ class Pipe:
     # ------------------------------------------------------------------
 
     async def _stream(self, payload: dict, headers: dict, url: str) -> AsyncGenerator[str, None]:
-        debug = getattr(self.valves, "REASONING_DEBUG_LOG", False)
-        if debug:
-            # Capture raw reasoning-carrying events for drop diagnosis: when
-            # reasoning_deltas ends at 1 (only the empty opening) we need to
-            # know whether the gateway emitted reasoning at all.
-            raw_reasoning: list[str] = []
-
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("POST", url, json=payload, headers=headers) as r:
                 r.raise_for_status()
@@ -1097,7 +927,7 @@ class Pipe:
                     # and skip:
                     #   - blank lines
                     #   - SSE comments / keep-alives (": ..."), which a proxy or
-                    #     long-thinking Bifrost may inject; passing them through
+                    #     long-thinking gateway may inject; passing them through
                     #     would corrupt the reasoning delta stream
                     #   - "data: [DONE]" and any other noise
                     if not isinstance(line, str):
@@ -1113,41 +943,27 @@ class Pipe:
                         ev = json.loads(body)
                         delta = ((ev.get("choices") or [{}])[0].get("delta") or {})
                         if isinstance(delta, dict):
-                            if delta.get("reasoning") or delta.get("reasoning_details") or delta.get("reasoning_content"):
+                            if delta.get("reasoning_content"):
                                 stats["reasoning"] += 1
-                                if debug and len(raw_reasoning) < 12:
-                                    raw_reasoning.append(body[:400])
                             if delta.get("content"):
                                 stats["content"] += 1
                             if delta.get("tool_calls"):
                                 stats["tool_calls"] += 1
-                            # Normalize Bifrost's non-standard reasoning fields so
-                            # Open WebUI streams reasoning live (see _clean_stream_delta).
-                            if _clean_stream_delta(delta):
-                                line = "data: " + json.dumps(ev, ensure_ascii=False)
                         fr = ((ev.get("choices") or [{}])[0].get("finish_reason"))
                         if fr:
                             stats["done"] = True
                     except Exception:
                         pass
                     yield line
-                if debug:
-                    if stats["reasoning"] <= 1 and stats["content"] > 0:
-                        log.warning(
-                            "bf-reasoning: SUSPECT DROP reasoning_deltas=%d content_deltas=%d — "
-                            "raw reasoning events: %s",
-                            stats["reasoning"],
-                            stats["content"],
-                            " || ".join(raw_reasoning) if raw_reasoning else "<none emitted>",
-                        )
-                log.info(
-                    "bf-reasoning: response events=%d reasoning_deltas=%d content_deltas=%d tool_call_deltas=%d finish=%s",
-                    stats["events"],
-                    stats["reasoning"],
-                    stats["content"],
-                    stats["tool_calls"],
-                    "yes" if stats["done"] else "no",
-                )
+                if getattr(self.valves, "DEBUG_LOG", False):
+                    log.info(
+                        "agent-loop-guard: response events=%d reasoning_deltas=%d content_deltas=%d tool_call_deltas=%d finish=%s",
+                        stats["events"],
+                        stats["reasoning"],
+                        stats["content"],
+                        stats["tool_calls"],
+                        "yes" if stats["done"] else "no",
+                    )
 
     async def _call(self, payload: dict, headers: dict, url: str) -> dict:
         async with httpx.AsyncClient(timeout=300) as client:
@@ -1280,29 +1096,28 @@ class Pipe:
             except Exception as exc:
                 log.warning("attached_files cleanup failed (fail-open): %s", exc)
 
-        # --- Bifrost reasoning normalization (DeepSeek tool-calling) --------
-        # Converts Bifrost residue and forces reasoning_content on every
-        # assistant once tool-calling is in scope. Must run here — Open WebUI
-        # tool-call continuations bypass filter inlets, so this pipe is the
-        # only hop that sees every outbound request to the gateway.
+        # --- DeepSeek reasoning forcing (transport-independent) -------------
+        # Forces reasoning_content on every assistant once tool-calling is in
+        # scope. Must run here — Open WebUI tool-call continuations bypass
+        # filter inlets, so this pipe is the only hop that sees every outbound
+        # request to the gateway. Validated against LiteLLM (its own warning,
+        # transformation.py) and Bifrost.
         try:
-            renamed, forced = _normalize_reasoning_for_gateway(body)
+            forced = _force_reasoning_on_gateway_payload(body)
             thinking_stripped = _normalize_thinking_for_gateway(body)
             has_tools = isinstance(body.get("tools"), list) and len(body["tools"]) > 0
-            # All reasoning diagnostics are gated behind REASONING_DEBUG_LOG
-            # (default off): with the valve disabled no bf-reasoning line is
-            # emitted per request.
-            if getattr(self.valves, "REASONING_DEBUG_LOG", False):
+            # All diagnostics are gated behind DEBUG_LOG (default off): with
+            # the valve disabled no per-request line is emitted.
+            if getattr(self.valves, "DEBUG_LOG", False):
                 params = {
                     k: v
                     for k, v in body.items()
                     if k not in ("messages", "tools", "model", "metadata", "files")
                 }
                 log.info(
-                    "bf-reasoning: renamed=%d forced=%d thinking_stripped=%s "
+                    "agent-loop-guard: forced=%d thinking_stripped=%s "
                     "(model=%s, tools=%s, history_has_tool_calls=%s) "
                     "| messages: %s | params: %s",
-                    renamed,
                     forced,
                     "yes" if thinking_stripped else "no",
                     real_model,
@@ -1312,8 +1127,9 @@ class Pipe:
                     params,
                 )
                 # What does the LAST assistant carry as reasoning_content?
-                # R0 (empty) replayed to DeepSeek can seed a reasoning drop
-                # that then cascades across tool-call continuations.
+                # R0 (empty) replayed to DeepSeek means the model gets a blank
+                # reasoning chain for this turn (LiteLLM warns about exactly
+                # this).
                 last_rc = None
                 for m in reversed(messages):
                     if isinstance(m, dict) and m.get("role") == "assistant":
@@ -1322,35 +1138,35 @@ class Pipe:
                 if isinstance(last_rc, str):
                     preview = last_rc[:80].replace("\n", "\\n")
                     log.info(
-                        "bf-reasoning: last assistant reasoning_content len=%d empty=%s preview=%r",
+                        "agent-loop-guard: last assistant reasoning_content len=%d empty=%s preview=%r",
                         len(last_rc),
                         last_rc == "",
                         preview,
                     )
                 elif last_rc is None:
-                    log.info("bf-reasoning: last assistant has NO reasoning_content field")
+                    log.info("agent-loop-guard: last assistant has NO reasoning_content field")
                 else:
                     log.info(
-                        "bf-reasoning: last assistant reasoning_content is non-string (%s)",
+                        "agent-loop-guard: last assistant reasoning_content is non-string (%s)",
                         type(last_rc).__name__,
                     )
         except Exception as exc:
-            log.warning("reasoning normalization failed (fail-open): %s", exc)
+            log.warning("reasoning forcing failed (fail-open): %s", exc)
 
         payload = {**body, "model": real_model, "messages": messages}
 
-        if getattr(self.valves, "REASONING_DEBUG_LOG", False):
+        if getattr(self.valves, "DEBUG_LOG", False):
             try:
                 import json as _json
 
                 log.info(
-                    "bf-reasoning: OUTBOUND url=%s headers=%s payload=%s",
+                    "agent-loop-guard: OUTBOUND url=%s headers=%s payload=%s",
                     url,
                     _json.dumps(headers, default=str),
                     _json.dumps(payload, default=str, ensure_ascii=False)[:4000],
                 )
             except Exception as exc:
-                log.warning("bf-reasoning: could not log outbound request: %s", exc)
+                log.warning("agent-loop-guard: could not log outbound request: %s", exc)
 
         try:
             if body.get("stream", False):
