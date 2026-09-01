@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.1
+version: 2.17.2
 licence: MIT
 """
 
@@ -22,6 +22,78 @@ log = logging.getLogger(__name__)
 
 
 GUARD_MARKER = "[Tool call budget exhausted]"
+
+
+_REASONING_REPLAY_PATCHED = False
+
+
+def _install_reasoning_replay_patch() -> bool:
+    """Monkey-patch Open WebUI's get_reasoning_format so pipe models replay the
+    REAL reasoning text as `reasoning_content` on tool-call continuations.
+
+    Open WebUI's get_reasoning_format() returns None for every OpenAI-compatible
+    model (owned_by='openai'), so convert_output_to_messages() DISCARDS the
+    stored reasoning when it rebuilds assistant history for a tool-call
+    continuation (verified against the open-webui source: with
+    reasoning_format=None the reasoning block is skipped). The replayed
+    assistant then reaches the gateway without reasoning_content and the pipe
+    can only force a single-space placeholder. Patching get_reasoning_format to
+    return 'reasoning_content' for pipe models makes Open WebUI rebuild the
+    assistant with the real text (reasoning_format='reasoning_content' ->
+    pending_reasoning -> message['reasoning_content']).
+
+    A/B probe against LiteLLM (probes/litellm/03_replay_ab.py): both variants
+    reason on every continuation (8/8), but with the real text the continuation
+    reasoning is ~19% richer (avg 91 vs 76 chars) and continues the previous
+    chain instead of re-deriving from scratch.
+
+    Scoped to pipe models only (owned_by='openai' AND a 'pipe' key), so direct
+    OpenAI connections and Ollama/llama.cpp models keep their original
+    behavior. Fails open: if Open WebUI changes these internals the patch
+    raises and the pipe falls back to placeholder forcing (no crash).
+    Idempotent via a module marker.
+
+    Returns True when the patch is (or was) active.
+    """
+    global _REASONING_REPLAY_PATCHED
+    if _REASONING_REPLAY_PATCHED:
+        return True
+    try:
+        from open_webui.utils import middleware as _mw
+
+        current = _mw.get_reasoning_format
+        if getattr(current, "_alg_reasoning_patched", False):
+            _REASONING_REPLAY_PATCHED = True
+            return True
+
+        original = current
+
+        def _patched(model):
+            result = original(model)
+            if result is not None:
+                return result
+            if (
+                isinstance(model, dict)
+                and model.get("owned_by") == "openai"
+                and model.get("pipe")
+            ):
+                return "reasoning_content"
+            return result
+
+        _patched._alg_reasoning_patched = True
+        _mw.get_reasoning_format = _patched
+        _REASONING_REPLAY_PATCHED = True
+        log.info(
+            "agent-loop-guard: reasoning replay patch installed "
+            "(REPLAY_REASONING_TEXT valve on)"
+        )
+    except Exception as exc:
+        log.warning(
+            "agent-loop-guard: could not install reasoning replay patch "
+            "(falling back to placeholder forcing): %s",
+            exc,
+        )
+    return _REASONING_REPLAY_PATCHED
 
 
 # --------------------------------------------------------------------------
@@ -675,6 +747,15 @@ class Pipe:
             "length/empty/prefix, and the full outbound request (url/headers/payload). "
             "Off by default — verbose, only needed when debugging reasoning behavior.",
         )
+        REPLAY_REASONING_TEXT: bool = Field(
+            default=False,
+            description="Replay the REAL reasoning text on tool-call continuations by monkey-patching "
+            "Open WebUI's get_reasoning_format for pipe models. Without it, Open WebUI "
+            "discards the reasoning when rebuilding assistant history and the pipe can "
+            "only force a single-space placeholder. A/B probe: continuation reasoning is "
+            "~19% richer with the real text. Fragile: depends on Open WebUI internals; "
+            "fails open (falls back to placeholder forcing).",
+        )
 
         @model_validator(mode="after")
         def _check_runaway_gt_loop(self):
@@ -989,6 +1070,17 @@ class Pipe:
         messages = body.get("messages", [])
         if not messages:
             return ""
+
+        # --- Reasoning replay (opt-in) -------------------------------------
+        # Open WebUI discards the real reasoning text when rebuilding assistant
+        # history for OpenAI-compatible models (get_reasoning_format -> None).
+        # With REPLAY_REASONING_TEXT on, patch get_reasoning_format so the real
+        # text is replayed as reasoning_content on tool-call continuations;
+        # otherwise the forcing step below can only inject a single-space
+        # placeholder. Installed lazily here (first call installs it before any
+        # continuation is rebuilt) and idempotent.
+        if getattr(self.valves, "REPLAY_REASONING_TEXT", False):
+            _install_reasoning_replay_patch()
 
         # NOTE: we intentionally do NOT rewrite the "model" field in the
         # upstream response. Open WebUI's frontend persists the assistant

@@ -96,6 +96,7 @@ User message → Open WebUI → Agent Loop Guard pipe()
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to remove from the agent's tool list. Example: `"delete_file, terminal_execute"` |
 | `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks within each user message (see [Attached-Files Cleanup](#attached-files-cleanup)). `False` = forward payloads unchanged |
 | `DEBUG_LOG` | `False` | Per-request diagnostics: `R0`/`R{n}` flags in the messages summary, last assistant's reasoning_content, and the full outbound request. For debugging reasoning behavior only |
+| `REPLAY_REASONING_TEXT` | `False` | Replay the REAL reasoning text on tool-call continuations by monkey-patching Open WebUI's `get_reasoning_format` for pipe models. Off = placeholder forcing only (safe); on = richer continuation reasoning (~19% more per A/B probe) but depends on Open WebUI internals (fails open) |
 
 > **Validation**: `MAX_TOOL_CALLS_PER_TURN` must be **greater than**
 > `MAX_CONSECUTIVE_TOOL_CALLS` when both are enabled. Open WebUI rejects
@@ -221,6 +222,21 @@ scope (request `tools` or tool-call history):
 - `reasoning_content` is set to `" "` (single space) when missing or empty —
   enough for DeepSeek to keep reasoning, and exactly the placeholder LiteLLM
   would inject anyway (its check treats `""` as absent and warns about it).
+
+### Replaying the real reasoning text (opt-in)
+
+The forcing above can only inject a placeholder: Open WebUI discards the real
+reasoning text when rebuilding assistant history for OpenAI-compatible
+models (`get_reasoning_format` returns `None` — verified in the open-webui
+source). With the `REPLAY_REASONING_TEXT` valve on, the pipe monkey-patches
+`get_reasoning_format` so pipe models replay the REAL text as
+`reasoning_content` (scoped to pipe models, fails open, idempotent). A/B
+probe against LiteLLM (`probes/litellm/03_replay_ab.py`): both modes reason
+on every continuation (8/8), but with the real text the continuation
+reasoning is ~19% richer and continues the previous chain instead of
+re-deriving from scratch. Trade-off: depends on Open WebUI private internals
+(`middleware.get_reasoning_format`); a future Open WebUI release can break or
+supersede it — the pipe then degrades to placeholder forcing.
 - Never touches user/system/tool messages and is deterministic, so the
   provider prefix cache is preserved.
 

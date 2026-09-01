@@ -103,3 +103,25 @@ DeepSeek when the field was missing (its own injected placeholder), so it
 satisfies DeepSeek's presence validation, silences LiteLLM's warning, and
 costs nothing extra — the reasoning-text loss is Open WebUI's own behavior
 for OpenAI-compatible providers regardless of the pipe.
+
+### A/B probe: placeholder vs real reasoning replay (03_replay_ab.py)
+
+8 rounds, deepseek-v4-flash, effort=high, 2-step tool task (get_date ->
+get_weather). Continuation assistant replayed WITH real reasoning (what the
+opt-in monkey patch does) vs single-space placeholder:
+
+| leg | reasoned on continuation | avg reasoning len |
+|---|---|---|
+| A (placeholder " ") | 8/8 | 76.4 |
+| B (real reasoning) | 8/8 | 91.0 |
+
+Both always reason (placeholder does not block reasoning); with the real
+text the continuation reasoning is ~19% richer and continues the previous
+chain ("Today is 2026-09-01, so tomorrow is 2026-09-02...") instead of
+re-deriving tersely. Correlates with the unit tests
+(tests/test_reasoning_replay_ab.py) running the REAL
+convert_output_to_messages from the cloned open-webui with
+reasoning_format=None vs 'reasoning_content'. Decision: the pipe got an
+opt-in REPLAY_REASONING_TEXT valve (default off) that reinstalls the
+get_reasoning_format monkey patch for pipe models; fails open to
+placeholder forcing.
