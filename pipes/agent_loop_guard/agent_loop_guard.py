@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.2
+version: 2.17.3
 licence: MIT
 """
 
@@ -17,6 +17,7 @@ import httpx
 import json
 import logging
 import re
+import time
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +26,21 @@ GUARD_MARKER = "[Tool call budget exhausted]"
 
 
 _REASONING_REPLAY_PATCHED = False
+_LAST_PATCH_WARN = 0.0
+
+
+def _rate_limited_warning(level: str, msg: str, exc: str = "") -> bool:
+    """Emit a log line at most once per 5 minutes (module-wide).
+
+    Returns True when the line was actually emitted.
+    """
+    global _LAST_PATCH_WARN
+    now = time.monotonic()
+    if now - _LAST_PATCH_WARN < 300.0:
+        return False
+    _LAST_PATCH_WARN = now
+    (log.warning if level == "warning" else log.info)(msg, exc)
+    return True
 
 
 def _install_reasoning_replay_patch() -> bool:
@@ -88,10 +104,13 @@ def _install_reasoning_replay_patch() -> bool:
             "(REPLAY_REASONING_TEXT valve on)"
         )
     except Exception as exc:
-        log.warning(
+        # Rate-limited: with the valve on and the failure persistent, this
+        # would otherwise fire on every request.
+        _rate_limited_warning(
+            "warning",
             "agent-loop-guard: could not install reasoning replay patch "
             "(falling back to placeholder forcing): %s",
-            exc,
+            str(exc),
         )
     return _REASONING_REPLAY_PATCHED
 
@@ -1247,6 +1266,28 @@ class Pipe:
                     )
         except Exception as exc:
             log.warning("reasoning forcing failed (fail-open): %s", exc)
+
+        # --- Replay-effectiveness watchdog (silent-degradation case) ---------
+        # With REPLAY_REASONING_TEXT on, Open WebUI should replay the real
+        # reasoning text and `forced` should stay 0 on tool-call continuations.
+        # If we still force placeholders on a tool-call history, the patch is
+        # installed but ineffective (Open WebUI internals changed in a way the
+        # patch does not cover) — the degradation is otherwise silent. Rate-
+        # limited so it does not spam on every request.
+        if (
+            getattr(self.valves, "REPLAY_REASONING_TEXT", False)
+            and forced > 0
+            and _history_has_tool_calls(messages)
+        ):
+            _rate_limited_warning(
+                "warning",
+                "agent-loop-guard: REPLAY_REASONING_TEXT is on but assistant "
+                "messages still carry placeholder reasoning (forced=%d on a "
+                "tool-call history) — the get_reasoning_format patch appears "
+                "ineffective (Open WebUI internals may have changed); enable "
+                "DEBUG_LOG to inspect. Degrading to placeholder forcing: %s",
+                f"forced={forced}",
+            )
 
         payload = {**body, "model": real_model, "messages": messages}
 
