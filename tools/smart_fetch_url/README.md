@@ -13,7 +13,8 @@ A Python port of [pi-smart-fetch](https://pi.dev/packages/pi-smart-fetch) by [Th
 - **Alternate content fallback** - follows `<link rel="alternate">` when extraction yields thin content
 - **Single + batch** — one interface: pass a list with one URL or many; batch uses bounded concurrency
 - **Multiple output formats** - markdown, html, text, json, raw, skimmd
-- **UserValves** - per-user overrides for all config settings (max_chars, timeout, browser, concurrency) from the chat session
+- **Fetch cache** - repeated fetches of the same URL are served from an ephemeral on-disk cache (see README "Fetch Cache" and CACHE.md)
+- **UserValves** - per-user overrides for all config settings (max_chars, timeout, browser, concurrency) from the chat session, plus the `cache_enabled` fetch-cache toggle
 
 ## Requirements
 
@@ -41,8 +42,9 @@ smart_fetch_url(urls, format="skimmd", max_chars=None, include_replies=False)
   valve when omitted.
 - ``include_replies`` — include comments/replies when the extractor
   supports them.
-- ``__event_emitter__`` / ``__user__`` — injected by the Open WebUI
-  harness for progress events and per-user valve overrides.
+- ``__event_emitter__`` / ``__user__`` / ``__id__`` — injected by the
+  Open WebUI harness for progress events, per-user valve overrides and the
+  tool id (used to resolve the per-tool cache directory).
 
 Transport settings (``browser``, ``timeout_ms``, ``proxy``,
 ``concurrency``, …) are **not method arguments** — they are configured
@@ -54,6 +56,35 @@ settings that have no method argument resolve as
 Pass a single-element list for a single fetch, or multiple URLs for
 concurrent batch fetching — batches are truncated at 10 URLs (with a
 warning note), fetched with at most ``batch_concurrency`` in flight.
+
+## Fetch Cache
+
+Repeated fetches of the **same URL within a short window** are served from
+an ephemeral on-disk cache instead of hitting the network again — the
+agent's immediate retries (another format, a larger ``max_chars``) stop
+hammering the upstream site.
+
+- **What is cached:** the fetched text body (`raw_html`), at the raw level —
+  every format, metadata and re-truncation are regenerated from it per
+  request. Binary responses (PDF/DOCX/images/…) and errors (non-2xx) are
+  never cached.
+- **Location:** auto-calculated from Open WebUI's own paths —
+  `<DATA_DIR>/cache/tools/<tool_id>/fetch_cache` (nothing hardcoded, no env
+  override).
+- **Freshness:** cached content is trusted for `cache_freshness_seconds`
+  (default 300; `0` or less = disabled) before refetching.
+- **Retention:** entries unused for `cache_retention_seconds` (default
+  3600) are deleted by a periodic sweep, which also caps the directory at
+  `cache_max_entries` (default 100) via LRU.
+- **Per-user on/off:** the `cache_enabled` user valve turns the cache off
+  for your own requests; the admin `cache_enabled` master switch turns it
+  off for everyone.
+- **Logging:** silent below warning by default; the admin `debug_logging`
+  valve logs one line per cache decision (hit / stale-refetch / miss /
+  write-skip, URL-safe).
+
+Full design and implementation plan: [CACHE.md](./CACHE.md). Known issues:
+[ISSUES.md](./ISSUES.md).
 
 ## Output Formats
 
@@ -89,6 +120,7 @@ galleries, or any page where trafilatura's article extraction is too aggressive.
 | `batch_concurrency` | `int` | Concurrency for batch fetches |
 | `blocked_domains` | `str` | Extra domains to block (added to the admin list) |
 | `verbose` | `bool` | Emit detailed status events |
+| `cache_enabled` | `bool` | Use the fetch cache for my requests (default `true`; the admin master switch still applies) |
 
 ## Resource Lifecycle
 

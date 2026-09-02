@@ -3,15 +3,16 @@ title: Smart Fetch URL
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata.
+description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Repeated fetches of the same URL are served from an ephemeral on-disk cache.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.10.0
+version: 0.11.0
 licence: MIT
 """
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ import time
 import weakref
 from pathlib import Path
 from typing import Any, Literal, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunsplit
 
 from typing import NamedTuple
 
@@ -41,6 +42,13 @@ DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
 DEFAULT_BATCH_REQUESTS_PER_SEC = 10
 
+# ── Fetch cache (ephemeral on-disk; design in CACHE.md) ────────
+DEFAULT_CACHE_ENABLED = True
+DEFAULT_CACHE_FRESHNESS_SEC = 300
+DEFAULT_CACHE_RETENTION_SEC = 3600
+DEFAULT_CACHE_MAX_ENTRIES = 100
+DEFAULT_DEBUG_LOGGING = False
+
 # ── Valve descriptions (defined once for consistency) ─────────────────
 _DESC_BROWSER = "Browser fingerprint profile"
 _DESC_PROXY = "Proxy URL (http://user:pass@host:port or socks5://host:port)."
@@ -51,6 +59,12 @@ _DESC_REQS_PER_SEC = f"Max requests per second in batch fetches (default: {DEFAU
 _DESC_BLOCKED_DOMAINS = "Domains to block, comma or newline separated. Blocks the domain and all its subdomains."
 _DESC_BLOCKED_DOMAINS_USER = "Additional domains to block, comma or newline separated (added to admin list)."
 _DESC_VERBOSE = "Emit detailed status events during fetch"
+_DESC_CACHE_ENABLED = "Master switch: serve repeated fetches of the same URL from the on-disk cache."
+_DESC_CACHE_ENABLED_USER = "Use the fetch cache for my requests (system default unless the admin disabled it)."
+_DESC_CACHE_FRESHNESS = f"How long cached content is trusted before refetching, in seconds (default: {DEFAULT_CACHE_FRESHNESS_SEC}). 0 or less = cache disabled."
+_DESC_CACHE_RETENTION = f"Delete cache entries unused for this many seconds (default: {DEFAULT_CACHE_RETENTION_SEC})."
+_DESC_CACHE_MAX_ENTRIES = f"Maximum cache entries on disk; least-recently-used entries are evicted beyond this (default: {DEFAULT_CACHE_MAX_ENTRIES})."
+_DESC_DEBUG_LOGGING = "Log detailed fetch-cache decisions (hit / stale / miss) at info level."
 MAX_BATCH_CHARS = 65_535
 _DESC_BATCH_CHARS = f"Maximum total characters for the entire batch output (default: {MAX_BATCH_CHARS})"
 MAX_BATCH_LENGTH = 10
@@ -64,6 +78,11 @@ THREAD_TIMEOUT_SEC = 5
 MAX_CACHED_SESSIONS = 8
 MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK = 30
 GLOBAL_OPERATION_TIMEOUT_SEC = 30
+# On-disk fetch cache bounds (see CACHE.md)
+CACHE_MAX_RAW_HTML_BYTES = 2_000_000
+CACHE_TOUCH_INTERVAL_SEC = 60
+SWEEP_INTERVAL_SEC = 300
+SWEEP_ORPHAN_AGE_SEC = 60
 DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 DEFAULT_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 DEFAULT_RAW_ACCEPT = "text/html,application/xhtml+xml,application/json,application/xml;q=0.9,text/markdown;q=0.8,text/plain;q=0.8,*/*;q=0.7"
@@ -83,6 +102,21 @@ class FetchResult(NamedTuple):
     content_type: str
     resp_headers: dict
     raw_bytes: Optional[bytes]
+
+
+class _CacheConfig(NamedTuple):
+    """Per-request fetch-cache settings (resolved in ``smart_fetch_url``).
+
+    ``None`` — not a ``_CacheConfig`` — means the cache is off for this
+    request: either the direct-call path (no config passed down) or the
+    resolution layer disabled it (admin master switch off, user toggle off,
+    or ``cache_freshness_seconds <= 0``; CACHE.md §6).
+    """
+    freshness_seconds: float
+    root: Path
+    # Gates the per-decision info logs (admin valve debug_logging): off by
+    # default — the cache itself only logs at warning and above (CACHE.md §7).
+    debug: bool = False
 
 
 class _RateLimiter:
@@ -168,6 +202,29 @@ class Tools:
             True,
             description=_DESC_VERBOSE,
         )
+        cache_enabled: bool = Field(
+            DEFAULT_CACHE_ENABLED,
+            description=_DESC_CACHE_ENABLED,
+        )
+        cache_freshness_seconds: int = Field(
+            DEFAULT_CACHE_FRESHNESS_SEC,
+            description=_DESC_CACHE_FRESHNESS,
+            ge=0,
+        )
+        cache_retention_seconds: int = Field(
+            DEFAULT_CACHE_RETENTION_SEC,
+            description=_DESC_CACHE_RETENTION,
+            ge=1,
+        )
+        cache_max_entries: int = Field(
+            DEFAULT_CACHE_MAX_ENTRIES,
+            description=_DESC_CACHE_MAX_ENTRIES,
+            ge=1,
+        )
+        debug_logging: bool = Field(
+            DEFAULT_DEBUG_LOGGING,
+            description=_DESC_DEBUG_LOGGING,
+        )
 
     class UserValves(BaseModel):
         """Per-user overrides for fetch settings. Configured from the chat session."""
@@ -207,6 +264,10 @@ class Tools:
         verbose: bool = Field(
             True,
             description=_DESC_VERBOSE,
+        )
+        cache_enabled: bool = Field(
+            DEFAULT_CACHE_ENABLED,
+            description=_DESC_CACHE_ENABLED_USER,
         )
 
     def __init__(self):
@@ -362,6 +423,7 @@ class Tools:
         include_replies: bool = False,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
+        __id__: Optional[Any] = None,
     ) -> str:
         """
         Fetch one or more URLs with browser-grade TLS fingerprinting and clean content extraction.
@@ -376,10 +438,35 @@ class Tools:
         :param include_replies: Include replies/comments from feed/forum sites
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
+        :param __id__: Internal — the Open WebUI tool id (injected when
+            declared), used to resolve the per-tool cache directory
         :returns: Extracted content with metadata header (single URL) or labeled results separated by --- lines (batch)
         """
 
         uv = self._get_user_valves(__user__)
+
+        # ── Fetch cache resolution (CACHE.md §6): user > admin > default,   ──
+        #    admin master switch wins; freshness <= 0 means "don't trust the  ──
+        #    cache" ⇒ disabled (no reads, no writes).                       ──
+        cache_cfg = None
+        if (
+            self.valves.cache_enabled
+            and (uv is None or uv.cache_enabled)
+            and self.valves.cache_freshness_seconds > 0
+        ):
+            cache_cfg = _CacheConfig(
+                freshness_seconds=float(self.valves.cache_freshness_seconds),
+                root=_cache_root(__id__),
+                debug=bool(self.valves.debug_logging),
+            )
+        # The periodic sweep runs regardless of the enabled state so leftovers
+        # from a previously-enabled configuration are reaped (CACHE.md §D8).
+        _cache_sweep_start(
+            _cache_root(__id__),
+            retention_seconds=self.valves.cache_retention_seconds,
+            max_entries=self.valves.cache_max_entries,
+        )
+
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
         timeout_ms = (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         uv_browser = uv.default_browser if uv else "inherit"
@@ -457,8 +544,7 @@ class Tools:
                     hostname = urlparse(single_url).hostname or ""
                     if self._is_domain_blocked(hostname, blocked_patterns):
                         await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] 🚫 {single_url} (blocked)", done=False)
-                        err_result = self._format_output(
-                            url=single_url, final_url=single_url, title="", author="",
+                        err_result = self._format_output(                            url=single_url, final_url=single_url, title="", author="",
                             site="", language="", published="", content="",
                             format=format, status_code=0,
                             error={"error_type": "forbidden", "message": f"Domain blocked by policy: {hostname}"},
@@ -480,6 +566,7 @@ class Tools:
                                 verbose=verbose,
                                 __event_emitter__=None,  # suppress per-item events
                                 _start_time=_start,
+                                cache_cfg=cache_cfg,
                             ),
                             timeout=GLOBAL_OPERATION_TIMEOUT_SEC,
                         )
@@ -582,6 +669,7 @@ class Tools:
                     verbose=verbose,
                     __event_emitter__=__event_emitter__,
                     _start_time=_start_time,
+                    cache_cfg=cache_cfg,
                 ),
                 timeout=GLOBAL_OPERATION_TIMEOUT_SEC,
             )
@@ -631,6 +719,7 @@ class Tools:
         verbose: bool,
         __event_emitter__: Optional[Any],
         _start_time: float,
+        cache_cfg: Optional[_CacheConfig] = None,
     ) -> str:
         """Execute the full fetch, extract, and format pipeline.
 
@@ -645,6 +734,7 @@ class Tools:
                 timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
                 format=format,
+                cache_cfg=cache_cfg,
             ),
             timeout=_defense_timeout,
         )
@@ -796,6 +886,7 @@ class Tools:
                 timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
                 format=format,
+                cache_cfg=cache_cfg,
             )
             alternate_urls = alternates_used or []
 
@@ -842,6 +933,7 @@ class Tools:
         timeout_ms: int,
         proxy: Optional[str] = None,
         format: str = "markdown",
+        cache_cfg: Optional[_CacheConfig] = None,
     ) -> FetchResult:
         """
         Perform the actual HTTP request with TLS fingerprinting.
@@ -874,9 +966,32 @@ class Tools:
         # curl_cffi sets its own User-Agent matching the impersonate profile.
         # Only override if the caller explicitly provided one.
 
+        # ── Fetch cache: a fresh hit is served without touching the network ──
+        if cache_cfg is not None:
+            key = _cache_key(url, resolved_browser, format)
+            entry, existed = await _cache_lookup(
+                key, cache_cfg.root, cache_cfg.freshness_seconds
+            )
+            if entry is not None:
+                await _cache_touch(key, cache_cfg.root)
+                _cache_log(cache_cfg, "hit %s", _cache_safe_url(url))
+                return FetchResult(
+                    raw_html=entry.get("raw_html", ""),
+                    final_url=entry.get("final_url", url),
+                    status_code=int(entry.get("status_code", 0) or 0),
+                    content_type=entry.get("content_type", "") or "",
+                    resp_headers=dict(entry.get("resp_headers") or {}),
+                    raw_bytes=None,
+                )
+            _cache_log(
+                cache_cfg,
+                "stale-refetch %s" if existed else "miss %s",
+                _cache_safe_url(url),
+            )
+
         # Try curl_cffi first (async), fall back to httpx
         try:
-            return await self._fetch_with_curl_cffi(
+            result = await self._fetch_with_curl_cffi(
                 url=url,
                 browser=resolved_browser,
                 headers=request_headers,
@@ -888,12 +1003,18 @@ class Tools:
                 "curl_cffi not installed — falling back to httpx (no TLS fingerprinting)"
             )
             self._fallback_note = "⚠️ Fetched via httpx fallback (curl_cffi not installed, no TLS fingerprinting)"
-            return await self._fetch_with_httpx(
+            result = await self._fetch_with_httpx(
                 url=url,
                 headers=request_headers,
                 timeout_ms=timeout_ms,
                 proxy=proxy,
             )
+
+        # ── Fetch cache: persist the fresh result in the background when the
+        #    write rule passes (2xx, text body, size cap — CACHE.md §D6).   ──
+        if cache_cfg is not None:
+            _cache_store_result(cache_cfg, url, resolved_browser, format, result)
+        return result
 
     async def _fetch_with_curl_cffi(
         self,
@@ -1395,6 +1516,7 @@ class Tools:
         timeout_ms: int,
         proxy: Optional[str],
         format: str,
+        cache_cfg: Optional[_CacheConfig] = None,
     ) -> tuple[dict, list[str]]:
         """
         When the extracted content is too thin, look for <link rel="alternate">
@@ -1448,6 +1570,7 @@ class Tools:
                         timeout_ms=timeout_ms,
                         proxy=proxy,
                         format=format,
+                        cache_cfg=cache_cfg,
                     )
                     alt_extracted = await self._extract_content(
                         raw_html=alt_result.raw_html,
@@ -2472,3 +2595,460 @@ def _skimmd_parse(html: str, base_url: str | None = None, *, strip_external: boo
     parser = _SkimmdParser(base_url=base_url, strip_external=strip_external)
     parser.feed(html)
     return parser.get_result()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fetch cache — pure key derivation (design in CACHE.md, §D4)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The cache key is a SHA-256 hash of whatever shapes the upstream request:
+# accept group (format family), browser fingerprint profile, and the
+# normalized URL. The proxy is deliberately NOT in the key (admin-only valve,
+# effectively constant; see CACHE.md §D4). Formatting/truncation knobs
+# (format family aside), max_chars, include_replies and the fetcher identity
+# are also out — see CACHE.md §D4.
+
+
+def _accept_group(format: str) -> str:
+    """Map an output format to its upstream Accept-header group.
+
+    ``json`` and ``raw`` send distinct Accept headers; everything else
+    (``skimmd``, ``markdown``, ``html``, ``txt``) shares one — so those
+    formats share cache entries.
+    """
+    if format == "json":
+        return "json"
+    if format == "raw":
+        return "raw"
+    return "html"
+
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for cache-key purposes.
+
+    - scheme and host lowercased;
+    - default port (80 for http, 443 for https) dropped;
+    - fragment removed (never sent upstream);
+    - query string preserved as-is;
+    - userinfo preserved if present (it may affect the response).
+    """
+    p = urlparse(url)
+    scheme = (p.scheme or "http").lower()
+    host = (p.hostname or "").lower()
+    if not host:
+        return url  # not a parseable URL — leave untouched
+    try:
+        port = p.port
+    except ValueError:
+        port = None
+    if port is not None and (
+        (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    ):
+        port = None
+    netloc = host
+    if p.username:
+        user = p.username
+        if p.password:
+            user = f"{user}:{p.password}"
+        netloc = f"{user}@{host}"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit((scheme, netloc, p.path or "/", p.query, ""))
+
+
+def _cache_key(url: str, browser: str, format: str = "markdown") -> str:
+    """Derive the on-disk cache filename (sha256 hex) for a fetch.
+
+    Proxy is deliberately not part of the key: it is an admin-only valve
+    that is effectively constant, and a runtime change of it is assumed not
+    to change the content within the freshness window (see CACHE.md §D4).
+    """
+    material = "\n".join(
+        (_accept_group(format), browser, _normalize_url(url))
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fetch cache — directory resolution, file primitives, async wrappers
+#  (design in CACHE.md §D2–D7). Not wired to the fetch path yet.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_CACHE_ENTRY_SUFFIX = ".json"
+
+
+def _cache_now() -> float:
+    """Wall-clock seconds — the single clock for freshness/retention."""
+    return time.time()
+
+
+def _cache_root(tool_id: Optional[str] = None) -> Path:
+    """Resolve the cache directory for this tool instance.
+
+    Auto-calculated from Open WebUI's own per-tool cache directory — never
+    hardcoded, no tool-specific env override. In-process this imports the
+    same ``CACHE_DIR`` Open WebUI computes (``DATA_DIR / 'cache'``,
+    config.py:181) and appends the per-tool layout Open WebUI already
+    creates on save (``cache/tools/<tool_id>``, routers/tools.py:402):
+
+        <DATA_DIR>/cache/tools/<tool_id>/fetch_cache
+
+    ``fetch_cache`` is a dedicated subdirectory so we never collide with
+    anything else Open WebUI may put in the per-tool dir.
+
+    Standalone execution (tests, scripts) cannot import ``open_webui``; the
+    fallback below is only reached there — the path-based primitives let
+    tests inject their own directory anyway.
+    """
+    tid = tool_id or "smart_fetch_url"
+    try:
+        from open_webui.config import CACHE_DIR
+    except ImportError:
+        base = Path(os.environ.get("TMPDIR", "/tmp"))
+        return base / "smart_fetch_url_cache" / tid
+    return CACHE_DIR / "tools" / tid / "fetch_cache"
+
+
+def _entry_path(root: Path, key: str) -> Path:
+    """Path of the entry file for a cache key."""
+    return root / (key + _CACHE_ENTRY_SUFFIX)
+
+
+def _read_entry(path: Path) -> Optional[dict]:
+    """Load an entry file.
+
+    Corrupt JSON is deleted (so it is not re-parsed on every request) and
+    reported as a miss. I/O errors return None and leave the file alone.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except ValueError as exc:  # JSONDecodeError / UnicodeDecodeError
+        logger.warning("fetch_cache: corrupt entry %s (%s) — deleting", path.name, exc)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    except OSError:
+        return None
+
+
+def _write_entry(path: Path, entry: dict) -> None:
+    """Write an entry atomically (unique tmp file + ``os.replace``).
+
+    The tmp name carries the pid so concurrent writers of the same key from
+    different processes never share a tmp file; ``os.replace`` is atomic, so
+    readers never see a half-written entry and the last writer wins.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    data = json.dumps(entry, ensure_ascii=False).encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _touch_entry(path: Path) -> None:
+    """Refresh ``lastAccessed`` (the file mtime) when it is old enough.
+
+    Throttled to one update per entry per ``CACHE_TOUCH_INTERVAL_SEC`` — a
+    hit is a read, not a rewrite.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return
+    if _cache_now() - st.st_mtime >= CACHE_TOUCH_INTERVAL_SEC:
+        try:
+            os.utime(path, None)
+        except OSError:
+            pass
+
+
+def _delete_entry(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _list_entries(root: Path) -> list:
+    """Entry files (not tmp files) in the cache directory."""
+    try:
+        return [
+            p for p in root.iterdir()
+            if p.is_file() and p.suffix == _CACHE_ENTRY_SUFFIX
+        ]
+    except OSError:
+        return []
+
+
+def _entry_is_fresh(entry: dict, freshness: float, now: float) -> bool:
+    """True when the entry is within the freshness window.
+
+    An entry without ``createdAt`` is treated as stale (it will be
+    refetched and rewritten).
+    """
+    created = entry.get("createdAt")
+    return isinstance(created, (int, float)) and (now - created) <= freshness
+
+
+async def _cache_store(key: str, root: Path, entry: dict) -> None:
+    """Persist an entry (awaited form; I/O off the event loop)."""
+    await asyncio.to_thread(_write_entry, _entry_path(root, key), entry)
+
+
+def _cache_safe_url(url: str) -> str:
+    """Host + path only for log lines — never query strings or credentials."""
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return ""
+    host = p.hostname or ""
+    return f"{host}{p.path}" if host else ""
+
+
+def _cache_log(cfg: Optional[_CacheConfig], msg: str, *args) -> None:
+    """Per-decision log line, emitted only when ``debug_logging`` is on.
+
+    Off by default: the cache only logs at warning and above unless the
+    admin valve is enabled (CACHE.md §7 — deployment runs
+    ``GLOBAL_LOG_LEVEL=INFO``, so these go through ``logger.info`` gated by
+    the valve, not ``logger.debug`` which the root level would filter).
+    """
+    if cfg is not None and cfg.debug:
+        logger.info("fetch_cache: " + msg, *args)
+
+
+async def _cache_lookup(
+    key: str, root: Path, freshness: float
+) -> tuple:
+    """Read an entry and classify it.
+
+    Returns ``(entry, existed)``:
+    - fresh entry → ``(entry, True)``;
+    - stale entry → ``(None, True)`` (caller refetches and overwrites);
+    - missing or corrupt → ``(None, False)``.
+    """
+    path = _entry_path(root, key)
+    entry = await asyncio.to_thread(_read_entry, path)
+    if entry is None:
+        return None, False
+    if not _entry_is_fresh(entry, freshness, _cache_now()):
+        return None, True
+    return entry, True
+
+
+async def _cache_touch(key: str, root: Path) -> None:
+    """Refresh ``lastAccessed`` of an entry that was just served."""
+    await asyncio.to_thread(_touch_entry, _entry_path(root, key))
+
+
+def _cache_store_result(
+    cache_cfg: _CacheConfig,
+    url: str,
+    browser: str,
+    format: str,
+    result: FetchResult,
+) -> None:
+    """Fire-and-forget persist when the write rule passes (CACHE.md §D6).
+
+    Only successful text responses are stored: status 200–299 (curl_cffi
+    does not raise on 4xx/5xx), a decoded text body (``raw_html`` non-empty
+    — binary/document responses never reach here with text), and within the
+    per-entry size cap.
+    """
+    safe = _cache_safe_url(url)
+    if not (200 <= result.status_code <= 299):
+        _cache_log(
+            cache_cfg, "write-skip reason=http_%s %s", result.status_code, safe
+        )
+        return
+    raw = result.raw_html
+    if not raw:
+        _cache_log(cache_cfg, "write-skip reason=empty-body %s", safe)
+        return
+    if len(raw) > CACHE_MAX_RAW_HTML_BYTES:
+        _cache_log(cache_cfg, "write-skip reason=oversize %s", safe)
+        return
+    entry = {
+        "createdAt": _cache_now(),
+        "raw_html": raw,
+        "final_url": result.final_url,
+        "status_code": result.status_code,
+        "content_type": result.content_type,
+        "resp_headers": dict(result.resp_headers),
+    }
+    _spawn_cache_write(_cache_key(url, browser, format), cache_cfg.root, entry)
+
+
+# Fire-and-forget writes: kept referenced so the GC does not reap the task
+# mid-write; dropped on completion. A lost write at process exit is
+# acceptable for a best-effort cache (CACHE.md §D7).
+_PENDING_WRITES: set = set()
+
+
+async def _drain_pending_writes() -> None:
+    """Wait for all fire-and-forget writes (tests / teardown)."""
+    while _PENDING_WRITES:
+        await asyncio.gather(*list(_PENDING_WRITES), return_exceptions=True)
+
+
+def _spawn_cache_write(key: str, root: Path, entry: dict) -> None:
+    """Persist in the background; the caller returns its result immediately."""
+    async def _bg():
+        try:
+            await _cache_store(key, root, entry)
+        except Exception:
+            logger.warning(
+                "fetch_cache: background write failed for key %s…", key[:12],
+                exc_info=True,
+            )
+    task = asyncio.get_running_loop().create_task(_bg())
+    _PENDING_WRITES.add(task)
+    task.add_done_callback(_PENDING_WRITES.discard)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fetch cache — periodic sweep (design in CACHE.md §D8)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The sweep enforces retention only: entries unused (lastAccessed = mtime)
+# for longer than cache_retention_seconds are deleted, and when the entry
+# count exceeds cache_max_entries the least-recently-used entries are
+# evicted. Freshness is NOT the sweep's job — a stale-but-accessed entry is
+# kept (it is refetched on demand). Stat-only: never reads payloads.
+
+_SWEEP_STATE: dict = {
+    "root": None,
+    "retention_seconds": DEFAULT_CACHE_RETENTION_SEC,
+    "max_entries": DEFAULT_CACHE_MAX_ENTRIES,
+    "interval_sec": SWEEP_INTERVAL_SEC,
+}
+_SWEEP_TASK = None  # module-level singleton (asyncio.Task or None)
+
+
+def _sweep_once(
+    root: Path,
+    retention_seconds: float,
+    max_entries: int,
+    now: float,
+) -> tuple:
+    """One retention + LRU + orphan-cleanup pass. Stat-only; never raises.
+
+    Returns ``(removed_orphans, removed_expired, evicted)``.
+    """
+    removed_orphans = removed_expired = evicted = 0
+    try:
+        entries: list = []  # (path, mtime) survivors
+        for p in root.iterdir():
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if p.name.endswith(".tmp"):
+                # Orphaned tmp from an interrupted atomic write. Never delete
+                # a fresh one: a concurrent writer may be mid-write.
+                if now - st.st_mtime > SWEEP_ORPHAN_AGE_SEC:
+                    try:
+                        p.unlink()
+                        removed_orphans += 1
+                    except OSError:
+                        pass
+            elif p.suffix == _CACHE_ENTRY_SUFFIX:
+                if now - st.st_mtime > retention_seconds:
+                    try:
+                        p.unlink()
+                        removed_expired += 1
+                    except OSError:
+                        pass
+                else:
+                    entries.append((p, st.st_mtime))
+        if max_entries > 0 and len(entries) > max_entries:
+            entries.sort(key=lambda t: t[1])  # oldest lastAccessed first
+            for p, _ in entries[: len(entries) - max_entries]:
+                try:
+                    p.unlink()
+                    evicted += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass  # missing / unreadable directory → nothing to do
+    except Exception as exc:
+        logger.warning("fetch_cache: sweep pass failed: %s", exc)
+    return removed_orphans, removed_expired, evicted
+
+
+async def _cache_sweep_once_async() -> tuple:
+    """Run one sweep pass off the event loop (chunk boundary: two yields)."""
+    root = _SWEEP_STATE.get("root")
+    if root is None:
+        return 0, 0, 0
+    retention = float(_SWEEP_STATE.get("retention_seconds", DEFAULT_CACHE_RETENTION_SEC))
+    max_entries = int(_SWEEP_STATE.get("max_entries", DEFAULT_CACHE_MAX_ENTRIES))
+    await asyncio.sleep(0)
+    result = await asyncio.to_thread(
+        _sweep_once, root, retention, max_entries, _cache_now()
+    )
+    await asyncio.sleep(0)
+    return result
+
+
+async def _cache_sweep_loop() -> None:
+    """Periodic sweep singleton body. Runs even when the cache is disabled so
+    leftovers from a previously-enabled configuration are reaped."""
+    while True:
+        await asyncio.sleep(float(_SWEEP_STATE.get("interval_sec", SWEEP_INTERVAL_SEC)))
+        try:
+            await _cache_sweep_once_async()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("fetch_cache: sweep iteration failed", exc_info=True)
+
+
+def _cache_sweep_start(
+    root: Path,
+    *,
+    retention_seconds: Optional[float] = None,
+    max_entries: Optional[int] = None,
+    interval_sec: Optional[float] = None,
+) -> None:
+    """Register the singleton sweep loop (idempotent, lazy).
+
+    Must be called from a running event loop (e.g. the first cache
+    operation). Content edits replace the module, which resets the
+    singleton — an old task may overlap briefly; the pass is idempotent,
+    so this is benign (CACHE.md §D8).
+    """
+    global _SWEEP_TASK
+    _SWEEP_STATE["root"] = root
+    if retention_seconds is not None:
+        _SWEEP_STATE["retention_seconds"] = retention_seconds
+    if max_entries is not None:
+        _SWEEP_STATE["max_entries"] = max_entries
+    if interval_sec is not None:
+        _SWEEP_STATE["interval_sec"] = interval_sec
+    if _SWEEP_TASK is None or _SWEEP_TASK.done():
+        _SWEEP_TASK = asyncio.get_running_loop().create_task(_cache_sweep_loop())
+
+
+async def _cache_sweep_stop() -> None:
+    """Cancel the singleton sweep (tests / teardown)."""
+    global _SWEEP_TASK
+    task, _SWEEP_TASK = _SWEEP_TASK, None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
