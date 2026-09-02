@@ -95,22 +95,30 @@ scenarios: a different format re-extracts the same `raw_html`, and a larger
 
 ### D2. On disk, in Open WebUI's per-tool cache directory
 
-Cache root resolution, evaluated lazily on first cache use (never at import
-time, so standalone execution keeps working):
+The cache directory is **auto-calculated at runtime from Open WebUI's own
+paths** — nothing is hardcoded and there is no tool-specific env override.
+In-process, the tool lazily imports the same `CACHE_DIR` Open WebUI computes
+(`config.py:181`, `DATA_DIR / 'cache'`) and appends the per-tool layout Open
+WebUI already creates on save (`routers/tools.py:402`):
 
-1. `SMART_FETCH_CACHE_DIR` env var — explicit override (tests, unusual
-   deployments).
-2. `from open_webui.config import CACHE_DIR` when importable (in-process
-   execution) → `CACHE_DIR / 'tools' / <tool_id> / 'fetch_cache'`.
-3. Fallback (standalone/tests): `<tempdir>/smart_fetch_url_cache/<tool_id>`.
+```
+<CACHE_DIR>/tools/<tool_id>/fetch_cache
+```
 
 `<tool_id>` comes from the `__id__` kwarg that Open WebUI injects when the
-method declares it (see §7). `fetch_cache` is a dedicated subdirectory so we
-never collide with anything else Open WebUI may put in the per-tool dir.
+method declares it (see §7); it is `None`-safe (fallback
+`"smart_fetch_url"`). `fetch_cache` is a dedicated subdirectory so we never
+collide with anything else Open WebUI may put in the per-tool dir.
+
+Standalone execution (tests, scripts) cannot import `open_webui`; the
+resolution falls back to `<TMPDIR>/smart_fetch_url_cache/<tool_id>` there,
+and the path-based primitives let tests inject their own directory anyway
+(`tmp_path` per test).
 
 In the current deployment this resolves to
-`/app/backend/data/cache/tools/<tool_id>/fetch_cache` — real disk, RAM-free,
-persistent.
+`/app/backend/data/cache/tools/smart_fetch_url/fetch_cache` — real disk,
+RAM-free, persistent (verified: the per-tool dir already exists at
+`/app/backend/data/cache/tools/smart_fetch_url`).
 
 ### D3. Two clocks: freshness (refetch) vs retention (delete)
 
@@ -345,8 +353,9 @@ Module constants:
 | `SWEEP_INTERVAL_SEC` | `300` | Sweep cadence (D8) |
 | `SWEEP_ORPHAN_AGE_SEC` | `60` | `.tmp` orphan age (D8) |
 
-Env override: `SMART_FETCH_CACHE_DIR` (D2). No new dependencies — stdlib only
-(`hashlib`, `json`, `os`, `time`, `pathlib`, `urllib.parse`, `tempfile`).
+No env override: the cache directory is auto-calculated from Open WebUI's
+own per-tool cache dir (§D2). No new dependencies — stdlib only
+(`hashlib`, `json`, `os`, `time`, `pathlib`, `urllib.parse`).
 
 ## 7. Implementation plan (ordered steps)
 
@@ -356,9 +365,9 @@ Env override: `SMART_FETCH_CACHE_DIR` (D2). No new dependencies — stdlib only
    (`smart_fetch_url.py:121, 172`).
 2. **Key derivation.** `_normalize_url()`, `_accept_group(format)`,
    `_cache_key(...)` → sha256 hex. Unit-testable pure functions.
-3. **Directory resolution.** Lazy `_cache_root()` implementing D2's priority
-   order; `_ensure_dir()` on first use. Guard the `open_webui.config` import
-   in try/except.
+3. **Directory resolution.** Lazy `_cache_root()` auto-calculating from
+   `open_webui.config.CACHE_DIR` + `/tools/<tool_id>/fetch_cache` (§D2);
+   guarded import with a standalone-only fallback; `mkdir` on first write.
 4. **File primitives (sync, run via `asyncio.to_thread`).** `_read_entry`,
    `_write_entry` (atomic: write `path.tmp` with mode `0o600`, `os.replace`),
    `_touch(path)` (`os.utime`), `_delete`, `_list_entries`, `_now()` (one
@@ -402,8 +411,8 @@ Env override: `SMART_FETCH_CACHE_DIR` (D2). No new dependencies — stdlib only
 ## 8. Testing plan
 
 New file `test/test_cache.py` (+ small additions to `test/helpers.py`),
-offline, using the existing fakes (`FakeAsyncSession`) and pointing
-`SMART_FETCH_CACHE_DIR` at a `tmp_path` per test:
+offline, using the existing fakes (`FakeAsyncSession`) and passing a
+`tmp_path` per test to the path-based cache primitives:
 
 - **Key derivation:** normalization (case, default port, fragment, query
   preservation), accept-group sharing (`skimmd/markdown/html/txt` same key;
@@ -430,8 +439,8 @@ offline, using the existing fakes (`FakeAsyncSession`) and pointing
   discipline as `probe_unbounded.py` for the pool).
 
 Existing suites keep passing unchanged: they call `_fetch_with_curl_cffi`
-directly (below the cache) or `_fetch_with_fingerprint` with
-`SMART_FETCH_CACHE_DIR` isolated (`test_real_urls.py`).
+directly (below the cache) or `_fetch_with_fingerprint` with an isolated
+`tmp_path` cache directory (`test_real_urls.py`).
 
 ## 9. Acceptance criteria
 
@@ -483,6 +492,7 @@ directly (below the cache) or `_fetch_with_fingerprint` with
 | 7 | Implicit single/multi-worker neutrality | Single worker confirmed for the target deployment; multi-worker noted as safe but out of scope (§2) |
 | 8 | Disable only via `cache_freshness_seconds = 0` (admin-only) | Requirement review: per-user on/off. Admin `cache_enabled` master switch (`bool`) + plain per-user toggle `cache_enabled: bool` (default `true` = follow the system) — freshness is now a pure duration (§6) |
 | 9 | Proxy in the key material | Review: proxy dropped from the key — admin-only and effectively constant per deployment; a runtime valve change is assumed not to alter content within the freshness window. Browser stays (also a UserValve) (D4) |
+| 10 | Location via `$TMPDIR` default + env override | Cache dir auto-calculated from Open WebUI's per-tool dir (`CACHE_DIR/tools/<tool_id>/fetch_cache`); no tool-specific env override — tests inject their directory through the path-based primitives (D2) |
 
 ## References
 

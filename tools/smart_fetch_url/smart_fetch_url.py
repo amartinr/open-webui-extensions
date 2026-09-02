@@ -2590,3 +2590,188 @@ def _cache_key(url: str, browser: str, format: str = "markdown") -> str:
         (_accept_group(format), browser, _normalize_url(url))
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fetch cache — directory resolution, file primitives, async wrappers
+#  (design in CACHE.md §D2–D7). Not wired to the fetch path yet.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_CACHE_ENTRY_SUFFIX = ".json"
+
+
+def _cache_now() -> float:
+    """Wall-clock seconds — the single clock for freshness/retention."""
+    return time.time()
+
+
+def _cache_root(tool_id: Optional[str] = None) -> Path:
+    """Resolve the cache directory for this tool instance.
+
+    Auto-calculated from Open WebUI's own per-tool cache directory — never
+    hardcoded, no tool-specific env override. In-process this imports the
+    same ``CACHE_DIR`` Open WebUI computes (``DATA_DIR / 'cache'``,
+    config.py:181) and appends the per-tool layout Open WebUI already
+    creates on save (``cache/tools/<tool_id>``, routers/tools.py:402):
+
+        <DATA_DIR>/cache/tools/<tool_id>/fetch_cache
+
+    ``fetch_cache`` is a dedicated subdirectory so we never collide with
+    anything else Open WebUI may put in the per-tool dir.
+
+    Standalone execution (tests, scripts) cannot import ``open_webui``; the
+    fallback below is only reached there — the path-based primitives let
+    tests inject their own directory anyway.
+    """
+    tid = tool_id or "smart_fetch_url"
+    try:
+        from open_webui.config import CACHE_DIR
+    except ImportError:
+        base = Path(os.environ.get("TMPDIR", "/tmp"))
+        return base / "smart_fetch_url_cache" / tid
+    return CACHE_DIR / "tools" / tid / "fetch_cache"
+
+
+def _entry_path(root: Path, key: str) -> Path:
+    """Path of the entry file for a cache key."""
+    return root / (key + _CACHE_ENTRY_SUFFIX)
+
+
+def _read_entry(path: Path) -> Optional[dict]:
+    """Load an entry file.
+
+    Corrupt JSON is deleted (so it is not re-parsed on every request) and
+    reported as a miss. I/O errors return None and leave the file alone.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except ValueError as exc:  # JSONDecodeError / UnicodeDecodeError
+        logger.warning("fetch_cache: corrupt entry %s (%s) — deleting", path.name, exc)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    except OSError:
+        return None
+
+
+def _write_entry(path: Path, entry: dict) -> None:
+    """Write an entry atomically (unique tmp file + ``os.replace``).
+
+    The tmp name carries the pid so concurrent writers of the same key from
+    different processes never share a tmp file; ``os.replace`` is atomic, so
+    readers never see a half-written entry and the last writer wins.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    data = json.dumps(entry, ensure_ascii=False).encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _touch_entry(path: Path) -> None:
+    """Refresh ``lastAccessed`` (the file mtime) when it is old enough.
+
+    Throttled to one update per entry per ``CACHE_TOUCH_INTERVAL_SEC`` — a
+    hit is a read, not a rewrite.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return
+    if _cache_now() - st.st_mtime >= CACHE_TOUCH_INTERVAL_SEC:
+        try:
+            os.utime(path, None)
+        except OSError:
+            pass
+
+
+def _delete_entry(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _list_entries(root: Path) -> list:
+    """Entry files (not tmp files) in the cache directory."""
+    try:
+        return [
+            p for p in root.iterdir()
+            if p.is_file() and p.suffix == _CACHE_ENTRY_SUFFIX
+        ]
+    except OSError:
+        return []
+
+
+def _entry_is_fresh(entry: dict, freshness: float, now: float) -> bool:
+    """True when the entry is within the freshness window.
+
+    An entry without ``createdAt`` is treated as stale (it will be
+    refetched and rewritten).
+    """
+    created = entry.get("createdAt")
+    return isinstance(created, (int, float)) and (now - created) <= freshness
+
+
+async def _cache_store(key: str, root: Path, entry: dict) -> None:
+    """Persist an entry (awaited form; I/O off the event loop)."""
+    await asyncio.to_thread(_write_entry, _entry_path(root, key), entry)
+
+
+async def _cache_read_fresh(key: str, root: Path, freshness: float) -> Optional[dict]:
+    """Return the entry when it exists and is fresh; else None.
+
+    Stale and missing collapse to None — the caller refetches and
+    overwrites either way.
+    """
+    path = _entry_path(root, key)
+    entry = await asyncio.to_thread(_read_entry, path)
+    if entry is None:
+        return None
+    if not _entry_is_fresh(entry, freshness, _cache_now()):
+        return None
+    return entry
+
+
+async def _cache_touch(key: str, root: Path) -> None:
+    """Refresh ``lastAccessed`` of an entry that was just served."""
+    await asyncio.to_thread(_touch_entry, _entry_path(root, key))
+
+
+# Fire-and-forget writes: kept referenced so the GC does not reap the task
+# mid-write; dropped on completion. A lost write at process exit is
+# acceptable for a best-effort cache (CACHE.md §D7).
+_PENDING_WRITES: set = set()
+
+
+async def _drain_pending_writes() -> None:
+    """Wait for all fire-and-forget writes (tests / teardown)."""
+    while _PENDING_WRITES:
+        await asyncio.gather(*list(_PENDING_WRITES), return_exceptions=True)
+
+
+def _spawn_cache_write(key: str, root: Path, entry: dict) -> None:
+    """Persist in the background; the caller returns its result immediately."""
+    async def _bg():
+        try:
+            await _cache_store(key, root, entry)
+        except Exception:
+            logger.warning(
+                "fetch_cache: background write failed for key %s…", key[:12],
+                exc_info=True,
+            )
+    task = asyncio.get_running_loop().create_task(_bg())
+    _PENDING_WRITES.add(task)
+    task.add_done_callback(_PENDING_WRITES.discard)

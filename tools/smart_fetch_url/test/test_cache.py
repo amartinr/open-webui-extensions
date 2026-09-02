@@ -1,11 +1,18 @@
-"""Config-surface tests for the on-disk fetch cache (see CACHE.md).
+"""Tests for the on-disk fetch cache (see CACHE.md).
 
-Step-1 scope: the constants and valve defaults exist and have the agreed
-values. The cache is not wired to the fetch path yet, so there is no
-behavioural change to test here — those come with the insertion step.
+Coverage by step:
+- config surface: valve/constant defaults and schema constraints;
+- key derivation (D4): URL normalization, accept groups, sha256 filename;
+- directory resolution + file primitives (D2, D5–D7): atomic write/read,
+  corrupt-entry handling, freshness predicate, throttled touch, background
+  writes. The cache is not wired to the fetch path yet — the wiring tests
+  come with the insertion step.
 """
 
+import asyncio
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -13,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import smart_fetch_url as sf
 from smart_fetch_url import Tools
 
+
+# ── config surface (step 1) ─────────────────────────────────────────────
 
 def test_admin_valve_defaults():
     v = Tools.Valves()
@@ -59,7 +68,7 @@ def test_freshness_zero_is_valid_config():
             raise AssertionError(f"expected ValidationError for {kwargs}")
 
 
-# ── key derivation (CACHE.md §D4) ────────────────────────────────────────
+# ── key derivation (step 2, CACHE.md §D4) ───────────────────────────────
 
 def test_accept_group():
     assert sf._accept_group("json") == "json"
@@ -105,3 +114,130 @@ def test_cache_key_deterministic_and_sensitive():
     # the plaintext URL never appears in the key
     assert url not in k(url, "firefox")
     assert "Example.com" not in k(url, "firefox")
+
+
+# ── directory resolution + file primitives (step 3, CACHE.md §D2–D7) ───
+
+def _entry(created: float | None = None) -> dict:
+    return {
+        "createdAt": created if created is not None else sf._cache_now(),
+        "raw_html": "<html><body><p>hello</p></body></html>",
+        "final_url": "https://example.com/final",
+        "status_code": 200,
+        "content_type": "text/html; charset=utf-8",
+        "resp_headers": {},
+    }
+
+
+def _tmp_root() -> Path:
+    return Path(tempfile.mkdtemp()) / "cache"
+
+
+def test_cache_root_standalone_fallback():
+    """Without open_webui importable, the root is a per-tool dir under TMPDIR.
+
+    (In-process, _cache_root imports open_webui.config.CACHE_DIR and appends
+    /tools/<tool_id>/fetch_cache — not exercised here, where open_webui is
+    not installed; the path-based primitives below are directory-agnostic.)
+    """
+    root = sf._cache_root(None)
+    assert root.name == "smart_fetch_url"
+    assert root.parent.name == "smart_fetch_url_cache"
+    assert sf._cache_root("my_tool").name == "my_tool"
+
+
+def test_write_read_roundtrip_and_permissions():
+    async def scenario():
+        root = _tmp_root()
+        key = "k" * 64
+        entry = _entry()
+        await sf._cache_store(key, root, entry)
+        path = sf._entry_path(root, key)
+        assert path.exists()
+        assert (path.stat().st_mode & 0o777) == 0o600
+        assert await asyncio.to_thread(sf._read_entry, path) == entry
+
+    asyncio.run(scenario())
+
+
+def test_no_tmp_leftover_after_write():
+    async def scenario():
+        root = _tmp_root()
+        key = "k" * 64
+        await sf._cache_store(key, root, _entry())
+        assert [p for p in root.iterdir() if p.suffix == ".tmp"] == []
+
+    asyncio.run(scenario())
+
+
+def test_corrupt_entry_is_deleted():
+    root = _tmp_root()
+    root.mkdir(parents=True)
+    path = sf._entry_path(root, "k" * 64)
+    path.write_text("{not json", encoding="utf-8")
+    assert sf._read_entry(path) is None
+    assert not path.exists(), "corrupt entry must be deleted"
+
+
+def test_read_io_error_returns_none_keeps_file():
+    root = Path("/nonexistent-dir-xyz") / "cache"
+    assert sf._read_entry(sf._entry_path(root, "k" * 64)) is None
+
+
+def test_entry_is_fresh():
+    now = 1_000_000.0
+    assert sf._entry_is_fresh(_entry(created=now - 100), 300, now)
+    assert not sf._entry_is_fresh(_entry(created=now - 301), 300, now)
+    assert not sf._entry_is_fresh({"raw_html": "x"}, 300, now), "no createdAt => stale"
+
+
+def test_async_read_fresh_and_stale():
+    async def scenario():
+        root = _tmp_root()
+        key = "k" * 64
+        await sf._cache_store(key, root, _entry(created=sf._cache_now()))
+        assert await sf._cache_read_fresh(key, root, 300) is not None
+        # backdate createdAt beyond the window → treated as a miss
+        await sf._cache_store(key, root, _entry(created=sf._cache_now() - 999))
+        assert await sf._cache_read_fresh(key, root, 300) is None
+        # missing key
+        assert await sf._cache_read_fresh("x" * 64, root, 300) is None
+
+    asyncio.run(scenario())
+
+
+def test_touch_throttled():
+    root = _tmp_root()
+    root.mkdir(parents=True)
+    key = "k" * 64
+    path = sf._entry_path(root, key)
+    path.write_text("x", encoding="utf-8")
+    old = sf._cache_now() - 120
+    os.utime(path, (old, old))
+    sf._touch_entry(path)
+    assert path.stat().st_mtime >= sf._cache_now() - 2, "old entry must be touched"
+    mtime_after_first = path.stat().st_mtime
+    sf._touch_entry(path)  # fresh (< 60 s) → skipped
+    assert path.stat().st_mtime == mtime_after_first, "touch must be throttled"
+
+
+def test_spawn_write_persists():
+    async def scenario():
+        root = _tmp_root()
+        key = "k" * 64
+        sf._spawn_cache_write(key, root, _entry())
+        await sf._drain_pending_writes()
+        assert sf._entry_path(root, key).exists()
+
+    asyncio.run(scenario())
+
+
+def test_list_entries():
+    root = _tmp_root()
+    root.mkdir(parents=True)
+    a, b = "a" * 64, "b" * 64
+    sf._write_entry(sf._entry_path(root, a), _entry())
+    sf._write_entry(sf._entry_path(root, b), _entry())
+    (root / "junk.tmp").write_text("x")
+    names = {p.name for p in sf._list_entries(root)}
+    assert names == {a + ".json", b + ".json"}
