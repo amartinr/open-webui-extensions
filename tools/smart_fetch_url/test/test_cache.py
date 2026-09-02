@@ -241,3 +241,104 @@ def test_list_entries():
     (root / "junk.tmp").write_text("x")
     names = {p.name for p in sf._list_entries(root)}
     assert names == {a + ".json", b + ".json"}
+
+
+# ── periodic sweep (step 4, CACHE.md §D8) ───────────────────────────────
+
+def _backdate(path: Path, seconds: float) -> None:
+    t = sf._cache_now() - seconds
+    os.utime(path, (t, t))
+
+
+def test_sweep_removes_expired_keeps_fresh():
+    root = _tmp_root()
+    root.mkdir(parents=True)
+    old, fresh = "a" * 64, "b" * 64
+    p_old, p_fresh = sf._entry_path(root, old), sf._entry_path(root, fresh)
+    sf._write_entry(p_old, _entry())
+    sf._write_entry(p_fresh, _entry())
+    _backdate(p_old, 7200)  # unused > 1 h retention
+    removed_orphans, removed_expired, evicted = sf._sweep_once(
+        root, 3600, 100, sf._cache_now()
+    )
+    assert (removed_orphans, removed_expired, evicted) == (0, 1, 0)
+    assert not p_old.exists()
+    assert p_fresh.exists()
+
+
+def test_sweep_keeps_stale_but_accessed():
+    """Freshness is not the sweep's job: an entry whose content is old but
+    that was accessed recently (mtime fresh) survives."""
+    root = _tmp_root()
+    root.mkdir(parents=True)
+    path = sf._entry_path(root, "k" * 64)
+    sf._write_entry(path, _entry(created=sf._cache_now() - 9999))
+    # mtime (lastAccessed) is now → within retention
+    assert sf._sweep_once(root, 3600, 100, sf._cache_now()) == (0, 0, 0)
+    assert path.exists()
+
+
+def test_sweep_evicts_lru_beyond_cap():
+    root = _tmp_root()
+    root.mkdir(parents=True)
+    paths = []
+    for i, ch in enumerate("abc"):
+        p = sf._entry_path(root, ch * 64)
+        sf._write_entry(p, _entry())
+        _backdate(p, (2 - i) * 3600)  # a oldest (2 h), c newest
+        paths.append(p)
+    _, _, evicted = sf._sweep_once(root, 999999, 2, sf._cache_now())
+    assert evicted == 1
+    assert not paths[0].exists(), "oldest lastAccessed must be evicted first"
+    assert paths[1].exists() and paths[2].exists()
+
+
+def test_sweep_cleans_orphan_tmp_keeps_fresh_tmp():
+    root = _tmp_root()
+    root.mkdir(parents=True)
+    old_tmp, fresh_tmp = root / "old.123.tmp", root / "fresh.456.tmp"
+    old_tmp.write_text("x")
+    fresh_tmp.write_text("x")
+    _backdate(old_tmp, 300)
+    removed_orphans, _, _ = sf._sweep_once(root, 3600, 100, sf._cache_now())
+    assert removed_orphans == 1
+    assert not old_tmp.exists()
+    assert fresh_tmp.exists(), "fresh tmp may belong to a concurrent writer"
+
+
+def test_sweep_missing_dir_never_raises():
+    assert sf._sweep_once(_tmp_root(), 3600, 100, sf._cache_now()) == (0, 0, 0)
+
+
+def test_sweep_loop_integration():
+    """The singleton loop enforces retention on its own cadence."""
+    async def scenario():
+        root = _tmp_root()
+        root.mkdir(parents=True)
+        path = sf._entry_path(root, "k" * 64)
+        sf._write_entry(path, _entry())
+        _backdate(path, 7200)
+        sf._cache_sweep_start(root, retention_seconds=3600, interval_sec=0.05)
+        try:
+            deadline = asyncio.get_running_loop().time() + 1.5
+            while path.exists() and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.05)
+            assert not path.exists(), "loop must reap the expired entry"
+        finally:
+            await sf._cache_sweep_stop()
+
+    asyncio.run(scenario())
+
+
+def test_sweep_start_is_singleton():
+    async def scenario():
+        root = _tmp_root()
+        try:
+            sf._cache_sweep_start(root, interval_sec=3600)
+            first = sf._SWEEP_TASK
+            sf._cache_sweep_start(root, interval_sec=3600)
+            assert sf._SWEEP_TASK is first, "second start must not spawn a new task"
+        finally:
+            await sf._cache_sweep_stop()
+
+    asyncio.run(scenario())

@@ -2775,3 +2775,139 @@ def _spawn_cache_write(key: str, root: Path, entry: dict) -> None:
     task = asyncio.get_running_loop().create_task(_bg())
     _PENDING_WRITES.add(task)
     task.add_done_callback(_PENDING_WRITES.discard)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fetch cache — periodic sweep (design in CACHE.md §D8)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The sweep enforces retention only: entries unused (lastAccessed = mtime)
+# for longer than cache_retention_seconds are deleted, and when the entry
+# count exceeds cache_max_entries the least-recently-used entries are
+# evicted. Freshness is NOT the sweep's job — a stale-but-accessed entry is
+# kept (it is refetched on demand). Stat-only: never reads payloads.
+
+_SWEEP_STATE: dict = {
+    "root": None,
+    "retention_seconds": DEFAULT_CACHE_RETENTION_SEC,
+    "max_entries": DEFAULT_CACHE_MAX_ENTRIES,
+    "interval_sec": SWEEP_INTERVAL_SEC,
+}
+_SWEEP_TASK = None  # module-level singleton (asyncio.Task or None)
+
+
+def _sweep_once(
+    root: Path,
+    retention_seconds: float,
+    max_entries: int,
+    now: float,
+) -> tuple:
+    """One retention + LRU + orphan-cleanup pass. Stat-only; never raises.
+
+    Returns ``(removed_orphans, removed_expired, evicted)``.
+    """
+    removed_orphans = removed_expired = evicted = 0
+    try:
+        entries: list = []  # (path, mtime) survivors
+        for p in root.iterdir():
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if p.name.endswith(".tmp"):
+                # Orphaned tmp from an interrupted atomic write. Never delete
+                # a fresh one: a concurrent writer may be mid-write.
+                if now - st.st_mtime > SWEEP_ORPHAN_AGE_SEC:
+                    try:
+                        p.unlink()
+                        removed_orphans += 1
+                    except OSError:
+                        pass
+            elif p.suffix == _CACHE_ENTRY_SUFFIX:
+                if now - st.st_mtime > retention_seconds:
+                    try:
+                        p.unlink()
+                        removed_expired += 1
+                    except OSError:
+                        pass
+                else:
+                    entries.append((p, st.st_mtime))
+        if max_entries > 0 and len(entries) > max_entries:
+            entries.sort(key=lambda t: t[1])  # oldest lastAccessed first
+            for p, _ in entries[: len(entries) - max_entries]:
+                try:
+                    p.unlink()
+                    evicted += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass  # missing / unreadable directory → nothing to do
+    except Exception as exc:
+        logger.warning("fetch_cache: sweep pass failed: %s", exc)
+    return removed_orphans, removed_expired, evicted
+
+
+async def _cache_sweep_once_async() -> tuple:
+    """Run one sweep pass off the event loop (chunk boundary: two yields)."""
+    root = _SWEEP_STATE.get("root")
+    if root is None:
+        return 0, 0, 0
+    retention = float(_SWEEP_STATE.get("retention_seconds", DEFAULT_CACHE_RETENTION_SEC))
+    max_entries = int(_SWEEP_STATE.get("max_entries", DEFAULT_CACHE_MAX_ENTRIES))
+    await asyncio.sleep(0)
+    result = await asyncio.to_thread(
+        _sweep_once, root, retention, max_entries, _cache_now()
+    )
+    await asyncio.sleep(0)
+    return result
+
+
+async def _cache_sweep_loop() -> None:
+    """Periodic sweep singleton body. Runs even when the cache is disabled so
+    leftovers from a previously-enabled configuration are reaped."""
+    while True:
+        await asyncio.sleep(float(_SWEEP_STATE.get("interval_sec", SWEEP_INTERVAL_SEC)))
+        try:
+            await _cache_sweep_once_async()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("fetch_cache: sweep iteration failed", exc_info=True)
+
+
+def _cache_sweep_start(
+    root: Path,
+    *,
+    retention_seconds: Optional[float] = None,
+    max_entries: Optional[int] = None,
+    interval_sec: Optional[float] = None,
+) -> None:
+    """Register the singleton sweep loop (idempotent, lazy).
+
+    Must be called from a running event loop (e.g. the first cache
+    operation). Content edits replace the module, which resets the
+    singleton — an old task may overlap briefly; the pass is idempotent,
+    so this is benign (CACHE.md §D8).
+    """
+    global _SWEEP_TASK
+    _SWEEP_STATE["root"] = root
+    if retention_seconds is not None:
+        _SWEEP_STATE["retention_seconds"] = retention_seconds
+    if max_entries is not None:
+        _SWEEP_STATE["max_entries"] = max_entries
+    if interval_sec is not None:
+        _SWEEP_STATE["interval_sec"] = interval_sec
+    if _SWEEP_TASK is None or _SWEEP_TASK.done():
+        _SWEEP_TASK = asyncio.get_running_loop().create_task(_cache_sweep_loop())
+
+
+async def _cache_sweep_stop() -> None:
+    """Cancel the singleton sweep (tests / teardown)."""
+    global _SWEEP_TASK
+    task, _SWEEP_TASK = _SWEEP_TASK, None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
