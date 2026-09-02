@@ -69,6 +69,9 @@ def test_real_fetch_reuses_session_and_aclose_closes_it():
     """End-to-end via the public API: session reused, then closed by _aclose()."""
     async def scenario():
         tools = Tools()
+        # Real-network lifecycle test: it must observe an actual fetch and its
+        # curl session, so the on-disk cache is disabled for it.
+        tools.valves.cache_enabled = False
         try:
             out = await tools.smart_fetch_url(
                 ["https://example.com"],

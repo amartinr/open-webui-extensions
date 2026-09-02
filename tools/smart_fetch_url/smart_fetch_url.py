@@ -104,6 +104,18 @@ class FetchResult(NamedTuple):
     raw_bytes: Optional[bytes]
 
 
+class _CacheConfig(NamedTuple):
+    """Per-request fetch-cache settings (resolved in ``smart_fetch_url``).
+
+    ``None`` — not a ``_CacheConfig`` — means the cache is off for this
+    request: either the direct-call path (no config passed down) or the
+    resolution layer disabled it (admin master switch off, user toggle off,
+    or ``cache_freshness_seconds <= 0``; CACHE.md §6).
+    """
+    freshness_seconds: float
+    root: Path
+
+
 class _RateLimiter:
     """Sliding-window rate limiter for batch fetches."""
     def __init__(self, rate: float):
@@ -408,6 +420,7 @@ class Tools:
         include_replies: bool = False,
         __event_emitter__: Optional[Any] = None,
         __user__: Optional[Any] = None,
+        __id__: Optional[Any] = None,
     ) -> str:
         """
         Fetch one or more URLs with browser-grade TLS fingerprinting and clean content extraction.
@@ -422,10 +435,34 @@ class Tools:
         :param include_replies: Include replies/comments from feed/forum sites
         :param __event_emitter__: Internal — for UI progress updates
         :param __user__: Internal — for user-specific valve overrides
+        :param __id__: Internal — the Open WebUI tool id (injected when
+            declared), used to resolve the per-tool cache directory
         :returns: Extracted content with metadata header (single URL) or labeled results separated by --- lines (batch)
         """
 
         uv = self._get_user_valves(__user__)
+
+        # ── Fetch cache resolution (CACHE.md §6): user > admin > default,   ──
+        #    admin master switch wins; freshness <= 0 means "don't trust the  ──
+        #    cache" ⇒ disabled (no reads, no writes).                       ──
+        cache_cfg = None
+        if (
+            self.valves.cache_enabled
+            and (uv is None or uv.cache_enabled)
+            and self.valves.cache_freshness_seconds > 0
+        ):
+            cache_cfg = _CacheConfig(
+                freshness_seconds=float(self.valves.cache_freshness_seconds),
+                root=_cache_root(__id__),
+            )
+        # The periodic sweep runs regardless of the enabled state so leftovers
+        # from a previously-enabled configuration are reaped (CACHE.md §D8).
+        _cache_sweep_start(
+            _cache_root(__id__),
+            retention_seconds=self.valves.cache_retention_seconds,
+            max_entries=self.valves.cache_max_entries,
+        )
+
         max_chars = max_chars or (uv.max_chars if uv else None) or self.valves.max_chars
         timeout_ms = (uv.timeout_ms if uv else None) or self.valves.timeout_ms
         uv_browser = uv.default_browser if uv else "inherit"
@@ -503,8 +540,7 @@ class Tools:
                     hostname = urlparse(single_url).hostname or ""
                     if self._is_domain_blocked(hostname, blocked_patterns):
                         await self._emit_status(__event_emitter__, f"[{index + 1}/{len(urls)}] 🚫 {single_url} (blocked)", done=False)
-                        err_result = self._format_output(
-                            url=single_url, final_url=single_url, title="", author="",
+                        err_result = self._format_output(                            url=single_url, final_url=single_url, title="", author="",
                             site="", language="", published="", content="",
                             format=format, status_code=0,
                             error={"error_type": "forbidden", "message": f"Domain blocked by policy: {hostname}"},
@@ -526,6 +562,7 @@ class Tools:
                                 verbose=verbose,
                                 __event_emitter__=None,  # suppress per-item events
                                 _start_time=_start,
+                                cache_cfg=cache_cfg,
                             ),
                             timeout=GLOBAL_OPERATION_TIMEOUT_SEC,
                         )
@@ -628,6 +665,7 @@ class Tools:
                     verbose=verbose,
                     __event_emitter__=__event_emitter__,
                     _start_time=_start_time,
+                    cache_cfg=cache_cfg,
                 ),
                 timeout=GLOBAL_OPERATION_TIMEOUT_SEC,
             )
@@ -677,6 +715,7 @@ class Tools:
         verbose: bool,
         __event_emitter__: Optional[Any],
         _start_time: float,
+        cache_cfg: Optional[_CacheConfig] = None,
     ) -> str:
         """Execute the full fetch, extract, and format pipeline.
 
@@ -691,6 +730,7 @@ class Tools:
                 timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
                 format=format,
+                cache_cfg=cache_cfg,
             ),
             timeout=_defense_timeout,
         )
@@ -842,6 +882,7 @@ class Tools:
                 timeout_ms=timeout_ms,
                 proxy=self.valves.proxy,
                 format=format,
+                cache_cfg=cache_cfg,
             )
             alternate_urls = alternates_used or []
 
@@ -888,6 +929,7 @@ class Tools:
         timeout_ms: int,
         proxy: Optional[str] = None,
         format: str = "markdown",
+        cache_cfg: Optional[_CacheConfig] = None,
     ) -> FetchResult:
         """
         Perform the actual HTTP request with TLS fingerprinting.
@@ -920,9 +962,26 @@ class Tools:
         # curl_cffi sets its own User-Agent matching the impersonate profile.
         # Only override if the caller explicitly provided one.
 
+        # ── Fetch cache: a fresh hit is served without touching the network ──
+        if cache_cfg is not None:
+            key = _cache_key(url, resolved_browser, format)
+            entry = await _cache_read_fresh(
+                key, cache_cfg.root, cache_cfg.freshness_seconds
+            )
+            if entry is not None:
+                await _cache_touch(key, cache_cfg.root)
+                return FetchResult(
+                    raw_html=entry.get("raw_html", ""),
+                    final_url=entry.get("final_url", url),
+                    status_code=int(entry.get("status_code", 0) or 0),
+                    content_type=entry.get("content_type", "") or "",
+                    resp_headers=dict(entry.get("resp_headers") or {}),
+                    raw_bytes=None,
+                )
+
         # Try curl_cffi first (async), fall back to httpx
         try:
-            return await self._fetch_with_curl_cffi(
+            result = await self._fetch_with_curl_cffi(
                 url=url,
                 browser=resolved_browser,
                 headers=request_headers,
@@ -934,12 +993,18 @@ class Tools:
                 "curl_cffi not installed — falling back to httpx (no TLS fingerprinting)"
             )
             self._fallback_note = "⚠️ Fetched via httpx fallback (curl_cffi not installed, no TLS fingerprinting)"
-            return await self._fetch_with_httpx(
+            result = await self._fetch_with_httpx(
                 url=url,
                 headers=request_headers,
                 timeout_ms=timeout_ms,
                 proxy=proxy,
             )
+
+        # ── Fetch cache: persist the fresh result in the background when the
+        #    write rule passes (2xx, text body, size cap — CACHE.md §D6).   ──
+        if cache_cfg is not None:
+            _cache_store_result(cache_cfg, url, resolved_browser, format, result)
+        return result
 
     async def _fetch_with_curl_cffi(
         self,
@@ -1441,6 +1506,7 @@ class Tools:
         timeout_ms: int,
         proxy: Optional[str],
         format: str,
+        cache_cfg: Optional[_CacheConfig] = None,
     ) -> tuple[dict, list[str]]:
         """
         When the extracted content is too thin, look for <link rel="alternate">
@@ -1494,6 +1560,7 @@ class Tools:
                         timeout_ms=timeout_ms,
                         proxy=proxy,
                         format=format,
+                        cache_cfg=cache_cfg,
                     )
                     alt_extracted = await self._extract_content(
                         raw_html=alt_result.raw_html,
@@ -2748,6 +2815,36 @@ async def _cache_read_fresh(key: str, root: Path, freshness: float) -> Optional[
 async def _cache_touch(key: str, root: Path) -> None:
     """Refresh ``lastAccessed`` of an entry that was just served."""
     await asyncio.to_thread(_touch_entry, _entry_path(root, key))
+
+
+def _cache_store_result(
+    cache_cfg: _CacheConfig,
+    url: str,
+    browser: str,
+    format: str,
+    result: FetchResult,
+) -> None:
+    """Fire-and-forget persist when the write rule passes (CACHE.md §D6).
+
+    Only successful text responses are stored: status 200–299 (curl_cffi
+    does not raise on 4xx/5xx), a decoded text body (``raw_html`` non-empty
+    — binary/document responses never reach here with text), and within the
+    per-entry size cap.
+    """
+    if not (200 <= result.status_code <= 299):
+        return
+    raw = result.raw_html
+    if not raw or len(raw) > CACHE_MAX_RAW_HTML_BYTES:
+        return
+    entry = {
+        "createdAt": _cache_now(),
+        "raw_html": raw,
+        "final_url": result.final_url,
+        "status_code": result.status_code,
+        "content_type": result.content_type,
+        "resp_headers": dict(result.resp_headers),
+    }
+    _spawn_cache_write(_cache_key(url, browser, format), cache_cfg.root, entry)
 
 
 # Fire-and-forget writes: kept referenced so the GC does not reap the task

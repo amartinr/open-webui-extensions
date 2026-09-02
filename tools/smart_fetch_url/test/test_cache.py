@@ -342,3 +342,309 @@ def test_sweep_start_is_singleton():
             await sf._cache_sweep_stop()
 
     asyncio.run(scenario())
+
+
+# ── wiring into the fetch path (step 5, CACHE.md §5) ────────────────────
+
+class _Resp:
+    """Stand-in for a curl_cffi response (mirrors helpers.FakeResponse)."""
+
+    headers = {"content-type": "text/html; charset=utf-8"}
+    url = "https://example.com/final"
+    status_code = 200
+    content = b"<html><body><p>hello world</p></body></html>"
+    text = "<html><body><p>hello world</p></body></html>"
+
+
+class _CountingSession:
+    """Recording fake: counts AsyncSession creations and get() calls."""
+
+    created: list = []
+    calls = 0
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.closed = False
+        _CountingSession.created.append(self)
+
+    async def get(self, *args, **kwargs):
+        _CountingSession.calls += 1
+        return _Resp()
+
+    async def close(self):
+        self.closed = True
+
+
+class _Resp404:
+    headers = {"content-type": "text/html; charset=utf-8"}
+    url = "https://example.com/404"
+    status_code = 404
+    content = b"<html><body>not found</body></html>"
+    text = "<html><body>not found</body></html>"
+
+
+class _Resp404Session(_CountingSession):
+    async def get(self, *args, **kwargs):
+        _CountingSession.calls += 1
+        return _Resp404()
+
+
+_LONG_TEXT = (
+    "<html><body><p>"
+    + "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod "
+    * 4
+    + "</p></body></html>"
+)
+
+
+class _LongResp:
+    headers = {"content-type": "text/html; charset=utf-8"}
+    url = "https://example.com/final"
+    status_code = 200
+    content = _LONG_TEXT.encode()
+    text = _LONG_TEXT
+
+
+class _LongSession(_CountingSession):
+    async def get(self, *args, **kwargs):
+        _CountingSession.calls += 1
+        return _LongResp()
+
+
+class _RespPdf:
+    headers = {"content-type": "application/pdf"}
+    url = "https://example.com/doc.pdf"
+    status_code = 200
+    content = b"%PDF-1.4 fake"
+    text = "%PDF-1.4 fake"
+
+
+class _RespPdfSession(_CountingSession):
+    async def get(self, *args, **kwargs):
+        _CountingSession.calls += 1
+        return _RespPdf()
+
+
+def _patch_curl(session_cls):
+    import curl_cffi.requests as ccr
+
+    original = ccr.AsyncSession
+    ccr.AsyncSession = session_cls
+    _CountingSession.created = []
+    _CountingSession.calls = 0
+    return ccr, original
+
+
+def _cfg(root: Path, freshness: float = 300.0) -> sf._CacheConfig:
+    return sf._CacheConfig(freshness_seconds=freshness, root=root)
+
+
+def test_wiring_miss_then_cross_format_hit():
+    """First fetch stores; a second fetch in another html-family format is a
+    hit (shared accept group); json is a separate entry (network again)."""
+    async def scenario():
+        ccr, original = _patch_curl(_CountingSession)
+        try:
+            tools = Tools()
+            root = _tmp_root()
+            cfg = _cfg(root)
+            r1 = await tools._fetch_with_fingerprint(
+                "https://example.com", "firefox", 5000, format="markdown", cache_cfg=cfg
+            )
+            await sf._drain_pending_writes()
+            assert _CountingSession.calls == 1
+            key = sf._cache_key("https://example.com", "firefox", "markdown")
+            assert sf._entry_path(root, key).exists()
+
+            # same URL, skimmd format → same key → served from cache
+            r2 = await tools._fetch_with_fingerprint(
+                "https://example.com", "firefox", 5000, format="skimmd", cache_cfg=cfg
+            )
+            assert _CountingSession.calls == 1, "cross-format hit must not fetch"
+            assert r2.raw_html == r1.raw_html
+            assert r2.final_url == "https://example.com/final"
+            assert r2.raw_bytes is None, "cache hits carry no raw bytes"
+
+            # json → distinct accept group → fresh fetch
+            await tools._fetch_with_fingerprint(
+                "https://example.com", "firefox", 5000, format="json", cache_cfg=cfg
+            )
+            await sf._drain_pending_writes()
+            assert _CountingSession.calls == 2
+        finally:
+            import curl_cffi.requests as ccr
+
+            ccr.AsyncSession = original
+            await tools._aclose()
+
+    asyncio.run(scenario())
+
+
+def test_wiring_stale_entry_refetches_and_rewrites():
+    async def scenario():
+        ccr, original = _patch_curl(_CountingSession)
+        try:
+            tools = Tools()
+            root = _tmp_root()
+            cfg = _cfg(root)
+            key = sf._cache_key("https://example.com", "firefox", "markdown")
+            # pre-seed a stale entry (createdAt far in the past)
+            await sf._cache_store(
+                key, root, _entry(created=sf._cache_now() - 9999)
+            )
+            await tools._fetch_with_fingerprint(
+                "https://example.com", "firefox", 5000, format="markdown", cache_cfg=cfg
+            )
+            await sf._drain_pending_writes()
+            assert _CountingSession.calls == 1, "stale entry must refetch"
+            entry = await asyncio.to_thread(
+                sf._read_entry, sf._entry_path(root, key)
+            )
+            assert entry is not None
+            assert entry["createdAt"] > sf._cache_now() - 5, "createdAt must reset"
+        finally:
+            import curl_cffi.requests as ccr
+
+            ccr.AsyncSession = original
+            await tools._aclose()
+
+    asyncio.run(scenario())
+
+
+def test_wiring_write_rule_skips_errors_and_binary():
+    """404 and binary responses are never written (CACHE.md §D6)."""
+    async def scenario():
+        for session_cls in (_Resp404Session, _RespPdfSession):
+            ccr, original = _patch_curl(session_cls)
+            try:
+                tools = Tools()
+                root = _tmp_root()
+                cfg = _cfg(root)
+                await tools._fetch_with_fingerprint(
+                    "https://example.com", "firefox", 5000, format="markdown", cache_cfg=cfg
+                )
+                await sf._drain_pending_writes()
+                assert list(sf._list_entries(root)) == [], "nothing may be cached"
+            finally:
+                import curl_cffi.requests as ccr
+
+                ccr.AsyncSession = original
+                await tools._aclose()
+
+    asyncio.run(scenario())
+
+
+def test_wiring_no_cfg_never_touches_cache():
+    async def scenario():
+        ccr, original = _patch_curl(_CountingSession)
+        try:
+            tools = Tools()
+            root = _tmp_root()
+            await tools._fetch_with_fingerprint(
+                "https://example.com", "firefox", 5000, format="markdown"
+            )
+            await sf._drain_pending_writes()
+            assert _CountingSession.calls == 1
+            assert list(sf._list_entries(root)) == []
+        finally:
+            import curl_cffi.requests as ccr
+
+            ccr.AsyncSession = original
+            await tools._aclose()
+
+    asyncio.run(scenario())
+
+
+def test_wiring_end_to_end_reformat_without_refetch():
+    """Full pipeline: skimmd then markdown on the same URL → one network call.
+
+    Uses a long body: short (< 30 extracted words) pages are emptied by the
+    pre-existing alternate-fallback step regardless of the cache.
+    """
+    async def scenario():
+        ccr, original = _patch_curl(_LongSession)
+        real_root = sf._cache_root
+        root = _tmp_root()
+        sf._cache_root = lambda tool_id=None: root
+        try:
+            tools = Tools()
+            try:
+                out1 = await tools.smart_fetch_url(
+                    ["https://example.com"], format="skimmd"
+                )
+                await sf._drain_pending_writes()  # background write lands
+                out2 = await tools.smart_fetch_url(
+                    ["https://example.com"], format="markdown"
+                )
+                await sf._drain_pending_writes()
+                assert _CountingSession.calls == 1, "second format must not refetch"
+                assert "lorem ipsum" in out1 and "lorem ipsum" in out2
+                assert len(sf._list_entries(root)) == 1, "one shared entry"
+            finally:
+                await tools._aclose()
+                await sf._cache_sweep_stop()
+        finally:
+            import curl_cffi.requests as ccr
+
+            ccr.AsyncSession = original
+            sf._cache_root = real_root
+
+    asyncio.run(scenario())
+
+
+def test_wiring_user_toggle_off_disables_cache():
+    async def scenario():
+        ccr, original = _patch_curl(_CountingSession)
+        real_root = sf._cache_root
+        root = _tmp_root()
+        sf._cache_root = lambda tool_id=None: root
+        try:
+            tools = Tools()
+            uv = Tools.UserValves(cache_enabled=False)
+            try:
+                for _ in range(2):
+                    await tools.smart_fetch_url(
+                        ["https://example.com"],
+                        format="skimmd",
+                        __user__={"valves": uv},
+                    )
+                await sf._drain_pending_writes()
+                assert _CountingSession.calls == 2, "user toggle off ⇒ every call fetches"
+                assert list(sf._list_entries(root)) == []
+            finally:
+                await tools._aclose()
+                await sf._cache_sweep_stop()
+        finally:
+            import curl_cffi.requests as ccr
+
+            ccr.AsyncSession = original
+            sf._cache_root = real_root
+
+    asyncio.run(scenario())
+
+
+def test_wiring_freshness_zero_disables_cache():
+    async def scenario():
+        ccr, original = _patch_curl(_CountingSession)
+        real_root = sf._cache_root
+        root = _tmp_root()
+        sf._cache_root = lambda tool_id=None: root
+        try:
+            tools = Tools()
+            tools.valves.cache_freshness_seconds = 0
+            try:
+                for _ in range(2):
+                    await tools.smart_fetch_url(["https://example.com"], format="skimmd")
+                await sf._drain_pending_writes()
+                assert _CountingSession.calls == 2, "freshness <= 0 ⇒ cache off"
+                assert list(sf._list_entries(root)) == []
+            finally:
+                await tools._aclose()
+                await sf._cache_sweep_stop()
+        finally:
+            import curl_cffi.requests as ccr
+
+            ccr.AsyncSession = original
+            sf._cache_root = real_root
+
+    asyncio.run(scenario())
