@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Repeated fetches of the same URL are served from an ephemeral on-disk cache.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.11.0
+version: 0.11.1
 licence: MIT
 """
 
@@ -872,14 +872,17 @@ class Tools:
             include_replies=include_replies,
         )
 
-        # Step 5: Alternate content fallback for thin/no content
+        # Step 5: Alternate content fallback for thin/no content. The
+        # fallback reports "nothing better found" with an empty dict — only
+        # take its result when it actually improved on the extraction
+        # (ISSUES.md #1).
         alternate_urls = []
         if (
             format != "json"
             and extracted.get("word_count", 0)
             < MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK
         ):
-            extracted, alternates_used = await self._try_alternate_fallback(
+            alt_extracted, alternates_used = await self._try_alternate_fallback(
                 raw_html=raw_html,
                 url=final_url,
                 browser=browser,
@@ -888,7 +891,9 @@ class Tools:
                 format=format,
                 cache_cfg=cache_cfg,
             )
-            alternate_urls = alternates_used or []
+            if alt_extracted.get("word_count", 0) > extracted.get("word_count", 0):
+                extracted = alt_extracted
+                alternate_urls = alternates_used or []
 
         # E: raw_html no longer needed after extraction + fallback
         del raw_html

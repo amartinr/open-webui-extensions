@@ -724,3 +724,34 @@ def test_debug_logging_write_skip_reasons(caplog):
     assert any(
         "write-skip reason=http_404 example.com/404" in l for l in lines
     )
+
+
+def test_regression_short_page_markdown_keeps_content():
+    """ISSUES.md #1: thin (< 30 extracted words) pages keep their content.
+
+    Pre-fix, the alternate fallback overwrote the good extraction with an
+    empty dict when the page had no usable <link rel=\"alternate\">, so
+    markdown/html/txt output was metadata only. The cache is disabled here —
+    this regression is about the extraction pipeline, not the cache.
+    """
+    async def scenario():
+        ccr, original = _patch_curl(_CountingSession)
+        try:
+            tools = Tools()
+            tools.valves.cache_enabled = False
+            try:
+                out = await tools.smart_fetch_url(
+                    ["https://example.com"], format="markdown"
+                )
+                assert _CountingSession.calls == 1
+                assert "hello world" in out, "short-page content must survive"
+                assert "> URL: https://example.com/final" in out
+            finally:
+                await tools._aclose()
+                await sf._cache_sweep_stop()
+        finally:
+            import curl_cffi.requests as ccr
+
+            ccr.AsyncSession = original
+
+    asyncio.run(scenario())

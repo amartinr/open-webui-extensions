@@ -4,7 +4,7 @@ Known bugs and open problems, tracked per component (monorepo convention).
 
 | # | Component | Severity | Status | Opened |
 |---|-----------|----------|--------|--------|
-| 1 | `tools/smart_fetch_url` | Medium | Open | 2026-09-02 |
+| 1 | `tools/smart_fetch_url` | Medium | Closed (v0.11.1) | 2026-09-02 |
 
 ---
 
@@ -13,7 +13,7 @@ Known bugs and open problems, tracked per component (monorepo convention).
 **Component:** `tools/smart_fetch_url` (master `v0.10.0`; also present in
 `v0.11.0` on `feat/smart_fetch_url_cache`)
 **Severity:** Medium — silent content loss for short pages
-**Status:** Open
+**Status:** Closed — fixed in v0.11.1
 
 ### Symptom
 
@@ -53,7 +53,18 @@ Discovered while testing the on-disk fetch cache
 (`feat/smart_fetch_url_cache`) with a synthetic short page — the behaviour
 is pre-existing on `master` and unrelated to the cache.
 
-### Suggested fix
+### Resolution (v0.11.1)
+
+`_execute_fetch` now only replaces `extracted` when the fallback actually
+improved on it (`word_count` of the alternate result greater than the
+original's). The fallback keeps returning an empty dict for "nothing
+better found"; the caller no longer lets that empty dict discard the good
+extraction (content and metadata). Behaviour for pages above the threshold,
+for `skimmd`/`raw`/documents, and for successful alternates is unchanged.
+Regression test: `test/test_cache.py::
+test_regression_short_page_markdown_keeps_content`.
+
+### Suggested fix (historical)
 
 Only take the fallback result when it actually improved on the original
 extraction — e.g. when the returned `word_count` is greater than the
