@@ -57,3 +57,52 @@ def test_freshness_zero_is_valid_config():
             pass
         else:
             raise AssertionError(f"expected ValidationError for {kwargs}")
+
+
+# ── key derivation (CACHE.md §D4) ────────────────────────────────────────
+
+def test_accept_group():
+    assert sf._accept_group("json") == "json"
+    assert sf._accept_group("raw") == "raw"
+    for fmt in ("skimmd", "markdown", "html", "txt"):
+        assert sf._accept_group(fmt) == "html"
+
+
+def test_normalize_url():
+    n = sf._normalize_url
+    # scheme + host lowercased
+    assert n("HTTP://Example.COM/a") == "http://example.com/a"
+    # default ports dropped, non-default kept
+    assert n("https://example.com:443/a") == "https://example.com/a"
+    assert n("http://example.com:80/a") == "http://example.com/a"
+    assert n("https://example.com:8443/a") == "https://example.com:8443/a"
+    # fragment removed, query preserved as-is
+    assert n("https://example.com/p?q=1&x=2#frag") == "https://example.com/p?q=1&x=2"
+    assert n("https://example.com/p#frag") == "https://example.com/p"
+    # userinfo preserved
+    assert n("https://user:pass@Example.com/p") == "https://user:pass@example.com/p"
+    # empty path becomes "/"
+    assert n("https://example.com") == "https://example.com/"
+    # unparseable input is left untouched
+    assert n("not a url") == "not a url"
+
+
+def test_cache_key_deterministic_and_sensitive():
+    k = sf._cache_key
+    url = "https://Example.com/path?q=1"
+    # deterministic
+    assert k(url, "firefox", None, "markdown") == k(url, "firefox", None, "markdown")
+    # sha256 hex, 64 chars
+    assert len(k(url, "firefox", None)) == 64
+    # URL case-insensitivity via normalization
+    assert k("https://EXAMPLE.com/path?q=1", "firefox", None) == k(url, "firefox", None)
+    # sensitive to browser, proxy, accept group
+    assert k(url, "chrome", None) != k(url, "firefox", None)
+    assert k(url, "firefox", "http://p:1") != k(url, "firefox", None)
+    assert k(url, "firefox", None, "json") != k(url, "firefox", None, "markdown")
+    assert k(url, "firefox", None, "raw") != k(url, "firefox", None, "markdown")
+    # html-family formats share the entry
+    assert k(url, "firefox", None, "skimmd") == k(url, "firefox", None, "markdown")
+    # the plaintext URL never appears in the key
+    assert url not in k(url, "firefox", None)
+    assert "Example.com" not in k(url, "firefox", None)

@@ -12,6 +12,7 @@ licence: MIT
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ import time
 import weakref
 from pathlib import Path
 from typing import Any, Literal, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunsplit
 
 from typing import NamedTuple
 
@@ -2517,3 +2518,71 @@ def _skimmd_parse(html: str, base_url: str | None = None, *, strip_external: boo
     parser = _SkimmdParser(base_url=base_url, strip_external=strip_external)
     parser.feed(html)
     return parser.get_result()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fetch cache — pure key derivation (design in CACHE.md, §D4)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# The cache key is a SHA-256 hash of whatever shapes the upstream request:
+# accept group (format family), browser fingerprint profile, proxy, and the
+# normalized URL. Formatting/truncation knobs (format family aside),
+# max_chars, include_replies and the fetcher identity are deliberately NOT in
+# the key — see CACHE.md §D4.
+
+
+def _accept_group(format: str) -> str:
+    """Map an output format to its upstream Accept-header group.
+
+    ``json`` and ``raw`` send distinct Accept headers; everything else
+    (``skimmd``, ``markdown``, ``html``, ``txt``) shares one — so those
+    formats share cache entries.
+    """
+    if format == "json":
+        return "json"
+    if format == "raw":
+        return "raw"
+    return "html"
+
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for cache-key purposes.
+
+    - scheme and host lowercased;
+    - default port (80 for http, 443 for https) dropped;
+    - fragment removed (never sent upstream);
+    - query string preserved as-is;
+    - userinfo preserved if present (it may affect the response).
+    """
+    p = urlparse(url)
+    scheme = (p.scheme or "http").lower()
+    host = (p.hostname or "").lower()
+    if not host:
+        return url  # not a parseable URL — leave untouched
+    try:
+        port = p.port
+    except ValueError:
+        port = None
+    if port is not None and (
+        (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    ):
+        port = None
+    netloc = host
+    if p.username:
+        user = p.username
+        if p.password:
+            user = f"{user}:{p.password}"
+        netloc = f"{user}@{host}"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urlunsplit((scheme, netloc, p.path or "/", p.query, ""))
+
+
+def _cache_key(
+    url: str, browser: str, proxy: Optional[str], format: str = "markdown"
+) -> str:
+    """Derive the on-disk cache filename (sha256 hex) for a fetch."""
+    material = "\n".join(
+        (_accept_group(format), browser, proxy or "", _normalize_url(url))
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
