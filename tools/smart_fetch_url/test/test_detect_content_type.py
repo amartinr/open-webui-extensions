@@ -35,8 +35,15 @@ def repeat(tag: str, n: int, attrs: str = "", text: str = "x") -> str:
 
 
 async def detect(html: str) -> str:
+    """Return just the detected category.
+
+    ``_detect_content_type`` returns ``(category, tree)`` — the tree is
+    reused by ``_basic_extract`` to avoid a second parse — so the
+    comparisons below only look at ``category``.
+    """
     tools = Tools()
-    return await tools._detect_content_type(html)
+    category, _ = await tools._detect_content_type(html)
+    return category
 
 
 def check(name: str, result: str, expected: str) -> bool:
