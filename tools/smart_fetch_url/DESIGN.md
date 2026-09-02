@@ -192,3 +192,12 @@ Tracked suite in `test/` (39 tests, `pytest test/`):
 
 Historical analysis of the pool-management fixes (hypotheses H1–H6 and the
 implementation plan) is preserved in `dist/owx-tests/{RESULTS,ACTION_PLAN}.md`.
+
+## 6. Related documents
+
+- **`CACHE.md`** — the on-disk fetch cache (v0.11.0): design decisions
+  (freshness vs retention clocks, key derivation, sweep) and the
+  implementation plan. The cache lives outside this pool contract: it is
+  plain disk I/O offloaded to the default executor, deliberately not routed
+  through the 4-slot `_run_in_thread` pool above.
+- **`ISSUES.md`** — known bugs and open problems.

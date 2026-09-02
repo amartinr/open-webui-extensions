@@ -3,7 +3,7 @@ title: Smart Fetch URL
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata.
+description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Repeated fetches of the same URL are served from an ephemeral on-disk cache.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
 version: 0.11.0
@@ -114,6 +114,9 @@ class _CacheConfig(NamedTuple):
     """
     freshness_seconds: float
     root: Path
+    # Gates the per-decision info logs (admin valve debug_logging): off by
+    # default — the cache itself only logs at warning and above (CACHE.md §7).
+    debug: bool = False
 
 
 class _RateLimiter:
@@ -454,6 +457,7 @@ class Tools:
             cache_cfg = _CacheConfig(
                 freshness_seconds=float(self.valves.cache_freshness_seconds),
                 root=_cache_root(__id__),
+                debug=bool(self.valves.debug_logging),
             )
         # The periodic sweep runs regardless of the enabled state so leftovers
         # from a previously-enabled configuration are reaped (CACHE.md §D8).
@@ -965,11 +969,12 @@ class Tools:
         # ── Fetch cache: a fresh hit is served without touching the network ──
         if cache_cfg is not None:
             key = _cache_key(url, resolved_browser, format)
-            entry = await _cache_read_fresh(
+            entry, existed = await _cache_lookup(
                 key, cache_cfg.root, cache_cfg.freshness_seconds
             )
             if entry is not None:
                 await _cache_touch(key, cache_cfg.root)
+                _cache_log(cache_cfg, "hit %s", _cache_safe_url(url))
                 return FetchResult(
                     raw_html=entry.get("raw_html", ""),
                     final_url=entry.get("final_url", url),
@@ -978,6 +983,11 @@ class Tools:
                     resp_headers=dict(entry.get("resp_headers") or {}),
                     raw_bytes=None,
                 )
+            _cache_log(
+                cache_cfg,
+                "stale-refetch %s" if existed else "miss %s",
+                _cache_safe_url(url),
+            )
 
         # Try curl_cffi first (async), fall back to httpx
         try:
@@ -2797,19 +2807,45 @@ async def _cache_store(key: str, root: Path, entry: dict) -> None:
     await asyncio.to_thread(_write_entry, _entry_path(root, key), entry)
 
 
-async def _cache_read_fresh(key: str, root: Path, freshness: float) -> Optional[dict]:
-    """Return the entry when it exists and is fresh; else None.
+def _cache_safe_url(url: str) -> str:
+    """Host + path only for log lines — never query strings or credentials."""
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return ""
+    host = p.hostname or ""
+    return f"{host}{p.path}" if host else ""
 
-    Stale and missing collapse to None — the caller refetches and
-    overwrites either way.
+
+def _cache_log(cfg: Optional[_CacheConfig], msg: str, *args) -> None:
+    """Per-decision log line, emitted only when ``debug_logging`` is on.
+
+    Off by default: the cache only logs at warning and above unless the
+    admin valve is enabled (CACHE.md §7 — deployment runs
+    ``GLOBAL_LOG_LEVEL=INFO``, so these go through ``logger.info`` gated by
+    the valve, not ``logger.debug`` which the root level would filter).
+    """
+    if cfg is not None and cfg.debug:
+        logger.info("fetch_cache: " + msg, *args)
+
+
+async def _cache_lookup(
+    key: str, root: Path, freshness: float
+) -> tuple:
+    """Read an entry and classify it.
+
+    Returns ``(entry, existed)``:
+    - fresh entry → ``(entry, True)``;
+    - stale entry → ``(None, True)`` (caller refetches and overwrites);
+    - missing or corrupt → ``(None, False)``.
     """
     path = _entry_path(root, key)
     entry = await asyncio.to_thread(_read_entry, path)
     if entry is None:
-        return None
+        return None, False
     if not _entry_is_fresh(entry, freshness, _cache_now()):
-        return None
-    return entry
+        return None, True
+    return entry, True
 
 
 async def _cache_touch(key: str, root: Path) -> None:
@@ -2831,10 +2867,18 @@ def _cache_store_result(
     — binary/document responses never reach here with text), and within the
     per-entry size cap.
     """
+    safe = _cache_safe_url(url)
     if not (200 <= result.status_code <= 299):
+        _cache_log(
+            cache_cfg, "write-skip reason=http_%s %s", result.status_code, safe
+        )
         return
     raw = result.raw_html
-    if not raw or len(raw) > CACHE_MAX_RAW_HTML_BYTES:
+    if not raw:
+        _cache_log(cache_cfg, "write-skip reason=empty-body %s", safe)
+        return
+    if len(raw) > CACHE_MAX_RAW_HTML_BYTES:
+        _cache_log(cache_cfg, "write-skip reason=oversize %s", safe)
         return
     entry = {
         "createdAt": _cache_now(),

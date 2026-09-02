@@ -10,6 +10,7 @@ Coverage by step:
 """
 
 import asyncio
+import logging
 import os
 import sys
 import tempfile
@@ -191,17 +192,20 @@ def test_entry_is_fresh():
     assert not sf._entry_is_fresh({"raw_html": "x"}, 300, now), "no createdAt => stale"
 
 
-def test_async_read_fresh_and_stale():
+def test_async_lookup_fresh_stale_missing():
     async def scenario():
         root = _tmp_root()
         key = "k" * 64
         await sf._cache_store(key, root, _entry(created=sf._cache_now()))
-        assert await sf._cache_read_fresh(key, root, 300) is not None
-        # backdate createdAt beyond the window → treated as a miss
+        entry, existed = await sf._cache_lookup(key, root, 300)
+        assert entry is not None and existed
+        # backdate createdAt beyond the window → stale, still "existed"
         await sf._cache_store(key, root, _entry(created=sf._cache_now() - 999))
-        assert await sf._cache_read_fresh(key, root, 300) is None
+        entry, existed = await sf._cache_lookup(key, root, 300)
+        assert entry is None and existed is True
         # missing key
-        assert await sf._cache_read_fresh("x" * 64, root, 300) is None
+        entry, existed = await sf._cache_lookup("x" * 64, root, 300)
+        assert entry is None and existed is False
 
     asyncio.run(scenario())
 
@@ -648,3 +652,75 @@ def test_wiring_freshness_zero_disables_cache():
             sf._cache_root = real_root
 
     asyncio.run(scenario())
+
+
+# ── gated per-decision logging (step 6, CACHE.md §7) ────────────────────
+
+def test_debug_logging_gated_and_token_free(caplog):
+    """Off by default (nothing below warning); with cfg.debug on, one info
+    line per decision — and never the query string."""
+    async def scenario():
+        ccr, original = _patch_curl(_CountingSession)
+        try:
+            tools = Tools()
+            root = _tmp_root()
+            url_hit = "https://example.com/path?secret=1&token=abc"
+            url_miss = "https://example.com/other?secret=2"
+            # warm the cache for url_hit with logging off (silent store)
+            await tools._fetch_with_fingerprint(
+                url_hit, "firefox", 5000, format="markdown", cache_cfg=_cfg(root)
+            )
+            await sf._drain_pending_writes()
+            # debug on: url_hit is fresh → hit; url_miss → miss
+            cfg_on = sf._CacheConfig(freshness_seconds=300.0, root=root, debug=True)
+            await tools._fetch_with_fingerprint(
+                url_hit, "firefox", 5000, format="markdown", cache_cfg=cfg_on
+            )
+            await tools._fetch_with_fingerprint(
+                url_miss, "firefox", 5000, format="markdown", cache_cfg=cfg_on
+            )
+            await sf._drain_pending_writes()
+        finally:
+            import curl_cffi.requests as ccr
+
+            ccr.AsyncSession = original
+            await tools._aclose()
+
+    with caplog.at_level(logging.INFO, logger="smart_fetch_url"):
+        asyncio.run(scenario())
+    lines = [r.getMessage() for r in caplog.records]
+    cache_lines = [l for l in lines if l.startswith("fetch_cache:")]
+    assert len(cache_lines) == 2, f"exactly miss+hit, got: {cache_lines}"
+    assert any("hit example.com/path" in l for l in cache_lines)
+    assert any("miss example.com/other" in l for l in cache_lines)
+    assert all("secret" not in l and "token" not in l for l in cache_lines), (
+        "query strings must never reach the logs"
+    )
+
+
+def test_debug_logging_write_skip_reasons(caplog):
+    async def scenario():
+        for session_cls in (_Resp404Session,):
+            ccr, original = _patch_curl(session_cls)
+            try:
+                tools = Tools()
+                cfg_on = sf._CacheConfig(
+                    freshness_seconds=300.0, root=_tmp_root(), debug=True
+                )
+                await tools._fetch_with_fingerprint(
+                    "https://example.com/404", "firefox", 5000,
+                    format="markdown", cache_cfg=cfg_on,
+                )
+                await sf._drain_pending_writes()
+            finally:
+                import curl_cffi.requests as ccr
+
+                ccr.AsyncSession = original
+                await tools._aclose()
+
+    with caplog.at_level(logging.INFO, logger="smart_fetch_url"):
+        asyncio.run(scenario())
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        "write-skip reason=http_404 example.com/404" in l for l in lines
+    )
