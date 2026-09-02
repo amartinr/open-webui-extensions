@@ -30,15 +30,30 @@ Import into Open WebUI at **Workspace → Tools → +** and attach to a model.
 ### `smart_fetch_url`
 
 ```
-smart_fetch_url(urls, format?, max_chars?, browser?, timeout_ms?,
-                remove_images?, include_replies?, concurrency?)
+smart_fetch_url(urls, format="skimmd", max_chars=None, include_replies=False)
 ```
 
-Configuration values are resolved with the following precedence:
-**method argument > UserValve (chat) > admin Valve > global default**.
+- ``urls`` — http(s) URL(s) to fetch. One URL = full pipeline; several =
+  concurrent batch.
+- ``format`` — ``skimmd`` (default), ``markdown``, ``html``, ``txt``,
+  ``json`` or ``raw``.
+- ``max_chars`` — per-result output cap; falls back to the ``max_chars``
+  valve when omitted.
+- ``include_replies`` — include comments/replies when the extractor
+  supports them.
+- ``__event_emitter__`` / ``__user__`` — injected by the Open WebUI
+  harness for progress events and per-user valve overrides.
+
+Transport settings (``browser``, ``timeout_ms``, ``proxy``,
+``concurrency``, …) are **not method arguments** — they are configured
+through valves. Configuration is resolved with the following precedence:
+**method argument > UserValve (chat) > admin Valve > global default**;
+settings that have no method argument resolve as
+**UserValve > admin Valve > default**.
 
 Pass a single-element list for a single fetch, or multiple URLs for
-concurrent batch fetching (up to 50, bounded by ``concurrency``).
+concurrent batch fetching — batches are truncated at 10 URLs (with a
+warning note), fetched with at most ``batch_concurrency`` in flight.
 
 ## Output Formats
 
@@ -72,6 +87,7 @@ galleries, or any page where trafilatura's article extraction is too aggressive.
 | `timeout_ms` | `int` | Request timeout in milliseconds |
 | `default_browser` | `str` | Browser fingerprint profile |
 | `batch_concurrency` | `int` | Concurrency for batch fetches |
+| `blocked_domains` | `str` | Extra domains to block (added to the admin list) |
 | `verbose` | `bool` | Emit detailed status events |
 
 ## Resource Lifecycle
