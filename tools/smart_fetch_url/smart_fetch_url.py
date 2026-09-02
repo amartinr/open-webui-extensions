@@ -41,6 +41,13 @@ DEFAULT_TIMEOUT_MS = 15_000
 DEFAULT_BATCH_CONCURRENCY = 8
 DEFAULT_BATCH_REQUESTS_PER_SEC = 10
 
+# ── Fetch cache (ephemeral on-disk; design in CACHE.md) ────────
+DEFAULT_CACHE_ENABLED = True
+DEFAULT_CACHE_FRESHNESS_SEC = 300
+DEFAULT_CACHE_RETENTION_SEC = 3600
+DEFAULT_CACHE_MAX_ENTRIES = 100
+DEFAULT_DEBUG_LOGGING = False
+
 # ── Valve descriptions (defined once for consistency) ─────────────────
 _DESC_BROWSER = "Browser fingerprint profile"
 _DESC_PROXY = "Proxy URL (http://user:pass@host:port or socks5://host:port)."
@@ -51,6 +58,12 @@ _DESC_REQS_PER_SEC = f"Max requests per second in batch fetches (default: {DEFAU
 _DESC_BLOCKED_DOMAINS = "Domains to block, comma or newline separated. Blocks the domain and all its subdomains."
 _DESC_BLOCKED_DOMAINS_USER = "Additional domains to block, comma or newline separated (added to admin list)."
 _DESC_VERBOSE = "Emit detailed status events during fetch"
+_DESC_CACHE_ENABLED = "Master switch: serve repeated fetches of the same URL from the on-disk cache."
+_DESC_CACHE_ENABLED_USER = "Use the fetch cache for my requests (system default unless the admin disabled it)."
+_DESC_CACHE_FRESHNESS = f"How long cached content is trusted before refetching, in seconds (default: {DEFAULT_CACHE_FRESHNESS_SEC}). 0 or less = cache disabled."
+_DESC_CACHE_RETENTION = f"Delete cache entries unused for this many seconds (default: {DEFAULT_CACHE_RETENTION_SEC})."
+_DESC_CACHE_MAX_ENTRIES = f"Maximum cache entries on disk; least-recently-used entries are evicted beyond this (default: {DEFAULT_CACHE_MAX_ENTRIES})."
+_DESC_DEBUG_LOGGING = "Log detailed fetch-cache decisions (hit / stale / miss) at info level."
 MAX_BATCH_CHARS = 65_535
 _DESC_BATCH_CHARS = f"Maximum total characters for the entire batch output (default: {MAX_BATCH_CHARS})"
 MAX_BATCH_LENGTH = 10
@@ -64,6 +77,11 @@ THREAD_TIMEOUT_SEC = 5
 MAX_CACHED_SESSIONS = 8
 MIN_EXTRACTED_WORDS_BEFORE_ALTERNATE_FALLBACK = 30
 GLOBAL_OPERATION_TIMEOUT_SEC = 30
+# On-disk fetch cache bounds (see CACHE.md)
+CACHE_MAX_RAW_HTML_BYTES = 2_000_000
+CACHE_TOUCH_INTERVAL_SEC = 60
+SWEEP_INTERVAL_SEC = 300
+SWEEP_ORPHAN_AGE_SEC = 60
 DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 DEFAULT_ACCEPT_LANGUAGE = "en-US,en;q=0.9"
 DEFAULT_RAW_ACCEPT = "text/html,application/xhtml+xml,application/json,application/xml;q=0.9,text/markdown;q=0.8,text/plain;q=0.8,*/*;q=0.7"
@@ -168,6 +186,29 @@ class Tools:
             True,
             description=_DESC_VERBOSE,
         )
+        cache_enabled: bool = Field(
+            DEFAULT_CACHE_ENABLED,
+            description=_DESC_CACHE_ENABLED,
+        )
+        cache_freshness_seconds: int = Field(
+            DEFAULT_CACHE_FRESHNESS_SEC,
+            description=_DESC_CACHE_FRESHNESS,
+            ge=0,
+        )
+        cache_retention_seconds: int = Field(
+            DEFAULT_CACHE_RETENTION_SEC,
+            description=_DESC_CACHE_RETENTION,
+            ge=1,
+        )
+        cache_max_entries: int = Field(
+            DEFAULT_CACHE_MAX_ENTRIES,
+            description=_DESC_CACHE_MAX_ENTRIES,
+            ge=1,
+        )
+        debug_logging: bool = Field(
+            DEFAULT_DEBUG_LOGGING,
+            description=_DESC_DEBUG_LOGGING,
+        )
 
     class UserValves(BaseModel):
         """Per-user overrides for fetch settings. Configured from the chat session."""
@@ -207,6 +248,10 @@ class Tools:
         verbose: bool = Field(
             True,
             description=_DESC_VERBOSE,
+        )
+        cache_enabled: bool = Field(
+            DEFAULT_CACHE_ENABLED,
+            description=_DESC_CACHE_ENABLED_USER,
         )
 
     def __init__(self):

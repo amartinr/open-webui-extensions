@@ -171,7 +171,10 @@ affects only formatting/truncation *after* the fetch does not. Therefore
 `format` (except for its Accept group), `max_chars` and `include_replies`
 are **not** in the key — they act on the cached `raw_html`, after the fetch.
 (Note: `include_replies` changes trafilatura's `include_comments`, which is a
-post-fetch extraction parameter — correct to exclude.)
+post-fetch extraction parameter — correct to exclude.) The fetcher identity
+(curl_cffi vs the httpx fallback) is also excluded: it is constant per
+deployment (curl_cffi is always installed in production, so the fallback
+never fires there), so its content never mixes within one cache.
 
 ### D5. Entry payload
 
@@ -300,9 +303,10 @@ Admin `Valves` (new):
 | Valve | Default | Purpose |
 |---|---|---|
 | `cache_enabled` | `true` | Master switch: serve repeated fetches from disk. When `false`, the cache is off for everyone. |
-| `cache_freshness_seconds` | `300` | Reuse fetched content for this many seconds before refetching. |
+| `cache_freshness_seconds` | `300` | How long cached content is trusted before refetching. `0` or less disables the cache (semantically: "don't trust the cache"). |
 | `cache_retention_seconds` | `3600` | Delete entries unused for this long (enforced by the sweep). |
 | `cache_max_entries` | `100` | Max entries on disk; LRU eviction beyond this. |
+| `debug_logging` | `false` | Log fetch-cache decisions (hit / stale / miss / write-skip) at info level. Off by default — the cache itself only logs at warning and above. |
 
 `UserValves` (new, per-user override from the chat session):
 
@@ -314,7 +318,10 @@ Admin `Valves` (new):
 valve):** no method argument exists for the cache, so precedence is
 **UserValve > admin Valve > default** — with the admin as the master switch:
 
-- effective enabled = `admin.cache_enabled` **AND** `user.cache_enabled`;
+- effective enabled = `admin.cache_enabled` **AND** `user.cache_enabled` **AND**
+  `cache_freshness_seconds > 0` (freshness `<= 0` means "don't trust the
+  cache" — treated as disabled, no reads and no writes, so a literal
+  freshness of 0 can never cause a read-stale-refetch-rewrite churn);
 - a user cannot turn the cache on when the admin disabled it (`false`
   anywhere wins);
 - turning the toggle off only stops *that user's requests* from reading and
@@ -366,10 +373,14 @@ Env override: `SMART_FETCH_CACHE_DIR` (D2). No new dependencies — stdlib only
    the first cache operation; implements D8; cancellable; `_cache_shutdown()`
    helper for tests and for hosts that manage the instance directly (same
    convention as `_aclose()`).
-8. **Logging.** One line per cache decision, URL-safe (host + path only, no
-   query/tokens): `logger.info("fetch_cache: hit host=%s")` /
-   `"stale-refetch"` / `"miss"` / `"write-skip reason=%s"` — this is what the
-   acceptance criteria (A1) are verified with.
+8. **Logging.** Minimal by default: the cache emits nothing below
+   **warning** unless the admin valve `debug_logging` is on. With the valve
+   on, one info line per cache decision, URL-safe (host + path only, no
+   query/tokens): `fetch_cache: hit host=%s` / `stale-refetch` / `miss` /
+   `write-skip reason=%s` — this is what the acceptance criteria (A1) are
+   verified with. (Lines go through `logger.info` gated by the valve, not
+   `logger.debug`: the deployment runs `GLOBAL_LOG_LEVEL=INFO`, which would
+   filter debug out at the root regardless of the valve.)
 9. **Tests** (Section 8).
 10. **Docs.** Update `README.md` (valves table, a "Fetch cache" paragraph in
     Resource Lifecycle) and cross-link from `DESIGN.md`. Note in the tool
@@ -418,7 +429,8 @@ directly (below the cache) or `_fetch_with_fingerprint` with
 
 - **A1 — Reformat without refetch:** same URL in `skimmd`, then in
   `markdown`, within the freshness window → no second network request
-  (log line `fetch_cache: hit`; upstream access log shows one request).
+  (with the `debug_logging` valve on: `fetch_cache: hit`; upstream access
+  log shows one request).
 - **A2 — Re-truncation by length:** small `max_chars`, then larger, within
   the window → more content returned, no refetch.
 - **A3 — Freshness:** once `createdAt` exceeds the window, the next request
