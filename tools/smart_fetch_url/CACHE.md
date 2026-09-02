@@ -153,7 +153,7 @@ Key material is a compound string, hashed with SHA-256 for the filename
 tokens out of file names):
 
 ```
-accept_group \n browser \n proxy-or-empty \n normalized_url
+accept_group \n browser \n normalized_url
 ```
 
 - `accept_group` — derived from `format`: `json` (uses `DEFAULT_JSON_ACCEPT`),
@@ -161,10 +161,18 @@ accept_group \n browser \n proxy-or-empty \n normalized_url
   `markdown`, `html`, `txt` all share `DEFAULT_ACCEPT`, so they share cache
   entries; see `smart_fetch_url.py:861–868`).
 - `browser` — the TLS fingerprint profile changes the response of some
-  anti-bot sites.
-- `proxy` — proxy changes can change content/region.
+  anti-bot sites. Kept in the key: it also exists as a UserValve, so it can
+  vary per request.
 - `normalized_url` — lowercase scheme and host, default port dropped,
   fragment removed, **query preserved as-is**, userinfo preserved if present.
+
+**Deliberately excluded — the proxy.** It is an admin-only valve, effectively
+constant per deployment (every request in this instance goes through the same
+proxy), so it does not fragment the cache in practice; a rare runtime change
+of the valve is assumed not to change the content within the freshness
+window, so a proxy switch does not invalidate entries. (This mirrors the
+"cost of a constant in the key is zero" argument in reverse: excluding it
+only costs correctness in a case that does not occur here.)
 
 **Rule:** whatever affects the upstream *request* goes in the key; whatever
 affects only formatting/truncation *after* the fetch does not. Therefore
@@ -399,7 +407,7 @@ offline, using the existing fakes (`FakeAsyncSession`) and pointing
 
 - **Key derivation:** normalization (case, default port, fragment, query
   preservation), accept-group sharing (`skimmd/markdown/html/txt` same key;
-  `json` and `raw` separate), browser/proxy in key.
+  `json` and `raw` separate), browser in key, proxy deliberately out of it.
 - **Hit/stale/miss:** fresh hit serves payload and performs no fetch (fake
   session records call count); stale entry triggers exactly one refetch and
   rewrites `createdAt`; miss fetches and (after awaiting the pending-write
@@ -474,6 +482,7 @@ directly (below the cache) or `_fetch_with_fingerprint` with
 | 6 | Acceptance criterion about "streaming pipeline / `reasoning_content`" | Removed (pipe-specific, not applicable to this tool); criteria now log-verifiable (A1) |
 | 7 | Implicit single/multi-worker neutrality | Single worker confirmed for the target deployment; multi-worker noted as safe but out of scope (§2) |
 | 8 | Disable only via `cache_freshness_seconds = 0` (admin-only) | Requirement review: per-user on/off. Admin `cache_enabled` master switch (`bool`) + plain per-user toggle `cache_enabled: bool` (default `true` = follow the system) — freshness is now a pure duration (§6) |
+| 9 | Proxy in the key material | Review: proxy dropped from the key — admin-only and effectively constant per deployment; a runtime valve change is assumed not to alter content within the freshness window. Browser stays (also a UserValve) (D4) |
 
 ## References
 

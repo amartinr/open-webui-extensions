@@ -2525,10 +2525,11 @@ def _skimmd_parse(html: str, base_url: str | None = None, *, strip_external: boo
 # ═════════════════════════════════════════════════════════════════════════════
 #
 # The cache key is a SHA-256 hash of whatever shapes the upstream request:
-# accept group (format family), browser fingerprint profile, proxy, and the
-# normalized URL. Formatting/truncation knobs (format family aside),
-# max_chars, include_replies and the fetcher identity are deliberately NOT in
-# the key — see CACHE.md §D4.
+# accept group (format family), browser fingerprint profile, and the
+# normalized URL. The proxy is deliberately NOT in the key (admin-only valve,
+# effectively constant; see CACHE.md §D4). Formatting/truncation knobs
+# (format family aside), max_chars, include_replies and the fetcher identity
+# are also out — see CACHE.md §D4.
 
 
 def _accept_group(format: str) -> str:
@@ -2578,11 +2579,14 @@ def _normalize_url(url: str) -> str:
     return urlunsplit((scheme, netloc, p.path or "/", p.query, ""))
 
 
-def _cache_key(
-    url: str, browser: str, proxy: Optional[str], format: str = "markdown"
-) -> str:
-    """Derive the on-disk cache filename (sha256 hex) for a fetch."""
+def _cache_key(url: str, browser: str, format: str = "markdown") -> str:
+    """Derive the on-disk cache filename (sha256 hex) for a fetch.
+
+    Proxy is deliberately not part of the key: it is an admin-only valve
+    that is effectively constant, and a runtime change of it is assumed not
+    to change the content within the freshness window (see CACHE.md §D4).
+    """
     material = "\n".join(
-        (_accept_group(format), browser, proxy or "", _normalize_url(url))
+        (_accept_group(format), browser, _normalize_url(url))
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()

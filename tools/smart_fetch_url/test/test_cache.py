@@ -91,18 +91,17 @@ def test_cache_key_deterministic_and_sensitive():
     k = sf._cache_key
     url = "https://Example.com/path?q=1"
     # deterministic
-    assert k(url, "firefox", None, "markdown") == k(url, "firefox", None, "markdown")
+    assert k(url, "firefox", "markdown") == k(url, "firefox", "markdown")
     # sha256 hex, 64 chars
-    assert len(k(url, "firefox", None)) == 64
+    assert len(k(url, "firefox")) == 64
     # URL case-insensitivity via normalization
-    assert k("https://EXAMPLE.com/path?q=1", "firefox", None) == k(url, "firefox", None)
-    # sensitive to browser, proxy, accept group
-    assert k(url, "chrome", None) != k(url, "firefox", None)
-    assert k(url, "firefox", "http://p:1") != k(url, "firefox", None)
-    assert k(url, "firefox", None, "json") != k(url, "firefox", None, "markdown")
-    assert k(url, "firefox", None, "raw") != k(url, "firefox", None, "markdown")
+    assert k("https://EXAMPLE.com/path?q=1", "firefox") == k(url, "firefox")
+    # sensitive to browser and accept group
+    assert k(url, "chrome") != k(url, "firefox")
+    assert k(url, "firefox", "json") != k(url, "firefox", "markdown")
+    assert k(url, "firefox", "raw") != k(url, "firefox", "markdown")
     # html-family formats share the entry
-    assert k(url, "firefox", None, "skimmd") == k(url, "firefox", None, "markdown")
+    assert k(url, "firefox", "skimmd") == k(url, "firefox", "markdown")
     # the plaintext URL never appears in the key
-    assert url not in k(url, "firefox", None)
-    assert "Example.com" not in k(url, "firefox", None)
+    assert url not in k(url, "firefox")
+    assert "Example.com" not in k(url, "firefox")
