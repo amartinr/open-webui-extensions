@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Repeated fetches of the same URL are served from an ephemeral on-disk cache.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.11.1
+version: 0.11.2
 licence: MIT
 """
 
@@ -48,6 +48,13 @@ DEFAULT_CACHE_FRESHNESS_SEC = 300
 DEFAULT_CACHE_RETENTION_SEC = 3600
 DEFAULT_CACHE_MAX_ENTRIES = 100
 DEFAULT_DEBUG_LOGGING = False
+
+# ── Citation sources (Open WebUI native fetch parity) ──────────
+# Core's get_citation_source_from_tool_result() truncates the native
+# fetch_url citation document to 500 chars; mirror that so citation
+# modals / source-context injection carry readable content instead of
+# an empty string (the "sources have ids but no content" failure).
+SOURCE_DOCUMENT_SNIPPET_CHARS = 500
 
 # ── Valve descriptions (defined once for consistency) ─────────────────
 _DESC_BROWSER = "Browser fingerprint profile"
@@ -621,14 +628,12 @@ class Tools:
                 await self._emit_status(__event_emitter__, f"❌ Batch cancelled", done=True)
                 return _truncation_note + "> Batch cancelled by user.\n"
 
-            await self._emit_sources(__event_emitter__, urls)
-            await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
-
             # Truncate batch output by dropping entire results beyond limit
             joined_parts: list[str] = []
+            citation_items: list[tuple[str, str]] = []  # (url, content) kept & citeable
             total = 0
             dropped = 0
-            for r in results:
+            for i, r in enumerate(results):
                 # Each result starts with "## [N/M] url\n\n" — extract header
                 header_end = r.find("\n\n")
                 if header_end == -1:
@@ -644,11 +649,26 @@ class Tools:
                 else:
                     total += len(body)
                     joined_parts.append(r)
+                    content = self._batch_result_content(body)
+                    if content:
+                        citation_items.append((urls[i], content))
 
             if dropped:
                 trunc_msg = f"> Warning: {dropped} result(s) omitted — total batch output exceeded {max_batch_chars:,} characters.\n\n"
                 _truncation_note = _truncation_note + trunc_msg if _truncation_note else trunc_msg
             joined = "".join(joined_parts)
+
+            # Emit one citation per KEPT result carrying its real content
+            # (native fetch_url parity). Results omitted by truncation, and
+            # error/empty results, get no citation — a chip without
+            # content is the "sources have ids but no content" failure mode.
+            if citation_items:
+                await self._emit_sources(
+                    __event_emitter__,
+                    [u for u, _ in citation_items],
+                    [c for _, c in citation_items],
+                )
+            await self._emit_status(__event_emitter__, f"✅ Fetched {len(urls)} URLs", done=True)
             return _truncation_note + joined
 
         # ── Single URL path ─────────────────────────────────────────
@@ -787,11 +807,18 @@ class Tools:
             )
             _elapsed = time.monotonic() - _start_time
             _desc = f"✅ {url}" if not verbose else f"✅ {url} ({_elapsed:.1f}s)"
-            await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_sources(__event_emitter__, [final_url], [content])
             await self._emit_status(__event_emitter__, _desc, done=True)
             return result
 
         if not self._is_text_content(content_type):
+            # Keep the explainer text for the citation document too — a source
+            # must not carry an empty document, but binary responses have no
+            # extractable content to cite.
+            non_text_note = (
+                f"[Non-text content ({content_type}). "
+                "Content not displayed to avoid context pollution.]"
+            )
             result = self._format_output(
                 url=url,
                 final_url=final_url,
@@ -800,13 +827,13 @@ class Tools:
                 site=urlparse(final_url).hostname or "",
                 language="",
                 published="",
-                content=f"[Non-text content ({content_type}). Content not displayed to avoid context pollution.]",
+                content=non_text_note,
                 format=format,
                                 status_code=status_code,
                 note=fallback_note,
             )
             _elapsed = time.monotonic() - _start_time
-            await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_sources(__event_emitter__, [final_url], [non_text_note])
             await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             return result
 
@@ -823,9 +850,9 @@ class Tools:
                 status_code=status_code,
                 content_type=content_type,
             )
-            del raw_html  # E: free raw HTML after building response
             _elapsed = time.monotonic() - _start_time
-            await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_sources(__event_emitter__, [final_url], [raw_html])
+            del raw_html  # E: free raw HTML after building response
             await self._emit_status(__event_emitter__, f"✅ {url}", done=True)
             return result
 
@@ -860,7 +887,7 @@ class Tools:
             del raw_html  # E: free raw HTML after skimmd parse + metadata extraction
             _elapsed = time.monotonic() - _start_time
             _desc = f"✅ {url}" if not verbose else f"✅ {url} ({_elapsed:.1f}s)"
-            await self._emit_sources(__event_emitter__, [final_url])
+            await self._emit_sources(__event_emitter__, [final_url], [content])
             await self._emit_status(__event_emitter__, _desc, done=True)
             return result
 
@@ -922,7 +949,9 @@ class Tools:
         visited_urls = self._collect_visited_urls(url, final_url, alternate_urls)
         _elapsed = time.monotonic() - _start_time
         _desc = f"✅ {url}" if not verbose else f"✅ {url} ({_elapsed:.1f}s)"
-        await self._emit_sources(__event_emitter__, visited_urls)
+        await self._emit_sources(
+            __event_emitter__, visited_urls, [content] * len(visited_urls)
+        )
         await self._emit_status(__event_emitter__, _desc, done=True)
 
         return result
@@ -2021,10 +2050,42 @@ class Tools:
                 result.append(u)
         return result
 
+    @staticmethod
+    def _source_document(content: str) -> list[str]:
+        """Build the ``document`` array of a citation source (native parity).
+
+        Open WebUI core truncates native ``fetch_url`` citations to the
+        first ``SOURCE_DOCUMENT_SNIPPET_CHARS`` characters
+        (``content[:500] + '...'``, ``get_citation_source_from_tool_result``).
+        Mirror that so citation modals and any source-context injection see
+        readable content instead of an empty document. Empty content yields
+        ``[""]`` so the event stays well-formed (callers skip it anyway).
+        """
+        content = content or ""
+        snippet = content[:SOURCE_DOCUMENT_SNIPPET_CHARS]
+        if len(content) > SOURCE_DOCUMENT_SNIPPET_CHARS:
+            snippet += "..."
+        return [snippet]
+
+    @staticmethod
+    def _batch_result_content(body: str) -> str:
+        """Extract citeable content from one batch result body (no header).
+
+        Text-format results open with a ``> key: value`` metadata block
+        followed by a blank line; the content starts after it. JSON results
+        (no ``>`` prefix) are returned whole. Error/empty results yield
+        ``""`` — they must not produce a citation chip without content.
+        """
+        if body.startswith(">"):
+            idx = body.find("\n\n")
+            return body[idx + 2 :] if idx != -1 else ""
+        return body
+
     async def _emit_sources(
         self,
         emitter: Optional[Any],
         urls: list[str],
+        documents: Optional[list[str]] = None,
     ):
         """
         Emit source events that Open WebUI appends to message.sources.
@@ -2032,28 +2093,47 @@ class Tools:
         The frontend Citations.svelte renders these at the bottom of the message
         with favicons (fetched from google's favicon service).
 
-        Emits all URLs concurrently via ``asyncio.gather`` instead of
-        sequentially, so N URLs cost one ``await`` cycle (the slowest)
-        instead of N sequential ``await emitter()`` calls that could
-        delay LLM streaming.
+        Each source carries its fetched content in ``document`` — the same
+        convention Open WebUI core uses for the native ``fetch_url`` tool
+        (see :meth:`_source_document`). URLs whose content is empty or
+        whitespace (errors, empty extractions, dropped batch results) emit
+        NO source: a citation chip without content is exactly the broken
+        state reported as "sources have ids but no content".
+
+        ``documents`` is parallel to ``urls``; missing entries are treated
+        as empty content. Emits all sources concurrently via
+        ``asyncio.gather`` instead of sequentially, so N URLs cost one
+        ``await`` cycle (the slowest) instead of N sequential
+        ``await emitter()`` calls that could delay LLM streaming.
         """
         if emitter is None or not urls:
             return
 
-        async def _emit_one(u: str):
+        items: list[tuple[str, str]] = []
+        for i, u in enumerate(urls):
+            doc = (
+                documents[i] if documents is not None and i < len(documents) else ""
+            ) or ""
+            if doc.strip():
+                items.append((u, doc))
+
+        if not items:
+            return
+
+        async def _emit_one(u: str, doc: str):
             await emitter(
                 {
                     "type": "source",
                     "data": {
                         "source": {"name": u, "id": u},
-                        "document": [""],
+                        "document": self._source_document(doc),
                         "metadata": [{"source": u, "name": u, "url": u}],
                     },
                 }
             )
 
         try:
-            await asyncio.gather(*(_emit_one(u) for u in urls))
+            await asyncio.gather(*(_emit_one(u, doc) for u, doc in items))
         except asyncio.CancelledError:
             raise  # never swallow cancellation
         except Exception:

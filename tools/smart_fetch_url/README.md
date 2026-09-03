@@ -110,6 +110,22 @@ galleries, or any page where trafilatura's article extraction is too aggressive.
 - **Inline in `smart_fetch_url.py`** — no separate import needed when pasted into
   Open WebUI
 
+## Citations / Sources
+
+Each fetch emits Open WebUI **citation source events** (the chips below the
+reply). They follow the same convention as the core's native `fetch_url` tool
+(`get_citation_source_from_tool_result` in the open-webui middleware): the
+`document` array holds a snippet of the fetched content (first 500 characters,
+`...` suffix when truncated).
+
+- A source is emitted **only when there is readable content to cite** — errors,
+  empty extractions, and batch results dropped by the character cap emit no
+  source, so citations never appear as "ids without content".
+- Single fetches emit one source per visited URL (original, final URL after
+  redirects, and any alternate-fallback URLs), sharing the fetched content.
+- Batch fetches emit one source per **kept** result, each carrying its own
+  content (metadata block stripped).
+
 ### UserValves (per-user, configurable from chat)
 
 | Field | Type | Description |
