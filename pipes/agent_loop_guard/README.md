@@ -146,6 +146,69 @@ Template variables resolve at runtime with the current user's data. Unlike
 Open WebUI's global `ENABLE_FORWARD_USER_INFO_HEADERS` (native OpenAI/Ollama
 routing only), this works inside the pipe for any gateway destination.
 
+## Tool budget in the system prompt
+
+By default the model only discovers the tool-call budget **reactively**: it
+keeps calling tools until the guard fires with
+`[Tool call budget exhausted]`. To let the model self-regulate **before**
+exhausting the budget, the pipe can substitute the effective limits into
+the workspace model's system prompt — no new valves, the admin valves stay
+the single source of truth.
+
+### Usage
+
+1. In **Workspace → Models**, edit the model's **System Prompt** and write
+the budget tokens where you want the numbers to appear:
+
+   ```
+   You operate under a tool-call budget:
+   - At most {{MAX_TOOL_CALLS_PER_TURN}} tool calls per turn.
+   - At most {{MAX_CONSECUTIVE_TOOL_CALLS}} consecutive identical calls.
+   Plan your tool usage so you do not exhaust this budget.
+   ```
+
+2. Save. On every request through the pipe — including every tool-call
+iteration — the tokens are replaced with the **effective** limits before
+the payload reaches the gateway:
+
+   | Token | Replaced with |
+   |-------|---------------|
+   | `{{MAX_TOOL_CALLS_PER_TURN}}` | Effective runaway limit (per-user override when set, else the admin valve) |
+   | `{{MAX_CONSECUTIVE_TOOL_CALLS}}` | Effective loop threshold (per-user override when set, else the admin valve) |
+   | either token, effective limit `0` (runaway disabled) | `unlimited` |
+
+### Semantics and guarantees
+
+- **Same source as the guard**: the substituted numbers come from the same
+  `_effective_limits()` resolution the guard enforces, so the prompt can
+  never tell the model a budget different from the one applied.
+- **Per-user aware**: the admin valve is the base; a user's
+  `Pipe.UserValves` override (`> 0`) is substituted for that user's requests.
+- **Backwards compatible**: no tokens in the system prompt → no-op, payload
+  unchanged.
+- **Cache-safe**: substitution is deterministic per valve state; between
+  requests with unchanged valves the outgoing system prompt is
+  byte-identical, so the provider prefix cache is not invalidated. Only an
+  admin/per-user valve change alters the output — which is exactly when the
+  model should see a new budget.
+- **Fail-open**: any unexpected condition logs a warning and forwards the
+  payload unchanged.
+
+> The tokens are NOT Open WebUI variables. Open WebUI resolves only its own
+> template families (`{{CURRENT_DATE}}`, `{{USER_NAME}}`, `{{USER_GROUPS}}`,
+> `{{chat.variables.*}}`, `{{user.variables.*}}`, `{{prompt}}`) and leaves
+> any other `{{...}}` token as literal text, so the tokens arrive intact at
+> the pipe (verified in `backend/open_webui/utils/payload.py`,
+> `resolve_system_prompt`).
+
+### Debugging
+
+Enable `DEBUG_LOG` and each substituted request logs:
+
+```
+agent-loop-guard: system-prompt budget tokens replaced=2 (max_calls=15, max_consecutive=4)
+```
+
 ## Attached-Files Cleanup
 
 Open WebUI injects `<attached_files>` blocks in two places: the

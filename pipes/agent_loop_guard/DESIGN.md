@@ -650,3 +650,63 @@ file ref(s)` + `reused this-turn upload 7f1d4ae9... (content hash match)`
 `dropping duplicate tag id:7f1d4ae9...` + `kept 1 (1 dropped as
 duplicates)`. Model sees one image; the tool-iteration turn keeps the
 single absolute-URL tag.
+
+---
+
+## 19. System-Prompt Budget Templating
+
+### 19.1 Problem
+
+The model discovers the tool-call budget only **reactively**: it calls tools
+until the guard fires with `[Tool call budget exhausted]`. The guard message
+is intentionally transient (context drift erases it — the model should not
+be permanently limited by one past loop), but the *standing* budget should be
+declarative: the model should know the limits up front and self-regulate
+before exhausting them.
+
+### 19.2 Why tokens survive to the pipe
+
+Open WebUI resolves only its own variable families in a model's system
+prompt (`resolve_system_prompt()` in `backend/open_webui/utils/payload.py`):
+
+- `render_chat_variables` — regex-scoped to `{{chat.variables.X}}`;
+- `render_user_variables` — regex-scoped to `{{user.variables.X}}`;
+- `prompt_variables_template` — replaces only the exact pairs supplied in
+  `metadata["variables"]`;
+- `prompt_template` — exact `.replace()` of `{{CURRENT_DATE}}`,
+  `{{USER_NAME}}`, `{{USER_GROUPS}}`, … plus the `{{prompt}}` family.
+
+None is a catch-all, so any other `{{...}}` token survives byte-identical
+into `body["messages"]` as a `role:"system"` message with string content.
+`apply_system_prompt_to_body` runs again on every tool-call iteration
+(messages are rebuilt per request), so the token reappears every time and
+the pipe substitution must be idempotent and cheap.
+
+### 19.3 Design
+
+- Admin writes `{{MAX_TOOL_CALLS_PER_TURN}}` / `{{MAX_CONSECUTIVE_TOOL_CALLS}}`
+  in the model's system prompt.
+- `Pipe._effective_limits(user_valves)` resolves the effective pair — the
+  SAME single source of truth `_analyse()` uses for the guard thresholds —
+  so prompt numbers and enforcement can never disagree. Per-user overrides
+  (`Pipe.UserValves`, `> 0` wins, `0` defers) apply per request.
+- Module-level `_resolve_budget_tokens_in_system_prompt(messages, max_calls,
+  max_consecutive)` replaces the tokens in `role:"system"` string messages
+  only (multimodal list content skipped defensively). Effective limit `0`
+  (runaway disabled) renders as `"unlimited"` — never tell the model to make
+  zero calls.
+- `pipe()` runs it after `_analyse()` and the reasoning forcing, right
+  before `payload = {**body, ...}`, in a fail-open try/except; `DEBUG_LOG`
+  reports `replaced=N (max_calls=…, max_consecutive=…)`.
+
+### 19.4 Properties
+
+- **Deterministic per valve state** → between requests with unchanged
+  valves the outgoing system prompt is byte-identical; provider prefix
+  cache is not churned. Only an admin/per-user valve change alters the
+  output — exactly when the model should see a new budget.
+- **Backwards compatible**: no token → no-op, payload untouched.
+- **Fail-open**: errors log `budget templating failed (fail-open)` and the
+  payload is forwarded unchanged.
+- **Scope**: system messages only — user/assistant/tool messages are never
+  modified (no exposure of the budget to user content).

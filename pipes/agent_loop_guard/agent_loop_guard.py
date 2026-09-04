@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.7
+version: 2.17.8
 licence: MIT
 """
 
@@ -263,6 +263,68 @@ def _force_reasoning_on_gateway_payload(body: dict) -> int:
     if not (has_tools or _history_has_tool_calls(messages)):
         return 0
     return _force_reasoning_content_on_assistant(messages)
+
+
+# --------------------------------------------------------------------------
+# System-prompt budget templating (effective valves -> system prompt)
+# --------------------------------------------------------------------------
+#
+# Open WebUI resolves only its OWN variables in a model's system prompt
+# ({{CURRENT_DATE}}, {{USER_NAME}}, {{chat.variables.*}}, {{user.variables.*}},
+# {{prompt}}...) — verified in backend/open_webui/utils/payload.py
+# resolve_system_prompt(): render_chat_variables / render_user_variables /
+# prompt_variables_template / prompt_template are all scoped to their own
+# token families, none is a catch-all, so ANY other {{...}} token survives
+# byte-identical and arrives in body["messages"] as a role:"system" message
+# with string content.
+#
+# The pipe substitutes the EFFECTIVE guard limits here, at the last hop, so
+# the model sees the same numbers the guard enforces (both derive from the
+# same valves via Pipe._effective_limits). Deterministic per valve state →
+# the provider prefix cache is not churned between requests (only an admin
+# or per-user valve change alters the output — exactly when the model
+# SHOULD see a new budget). Fail-open: no system message or no token →
+# payload untouched.
+
+_SYSTEM_TOKEN_MAX_CALLS = "{{MAX_TOOL_CALLS_PER_TURN}}"
+_SYSTEM_TOKEN_MAX_CONSECUTIVE = "{{MAX_CONSECUTIVE_TOOL_CALLS}}"
+
+
+def _resolve_budget_tokens_in_system_prompt(
+    messages: list,
+    max_calls: int,
+    max_consecutive: int,
+) -> int:
+    """Replace budget tokens in the system prompt with effective values.
+
+    `max_calls` / `max_consecutive` are the EFFECTIVE limits (user override
+    already applied by the caller via _effective_limits). A limit of 0
+    (disabled) renders as the word "unlimited" so the model is never told to
+    make zero calls. Only role:"system" messages with string content are
+    touched (multimodal list content is skipped defensively); user/assistant/
+    tool messages are never modified.
+
+    Returns the number of (message, token) pairs replaced (diagnostics).
+    """
+    replacements = {
+        _SYSTEM_TOKEN_MAX_CALLS: "unlimited" if max_calls <= 0 else str(max_calls),
+        _SYSTEM_TOKEN_MAX_CONSECUTIVE: (
+            "unlimited" if max_consecutive <= 0 else str(max_consecutive)
+        ),
+    }
+    replaced = 0
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "system":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue  # defensive: list/multimodal content is never touched
+        for token, value in replacements.items():
+            if token in content:
+                content = content.replace(token, value)
+                replaced += 1
+        msg["content"] = content
+    return replaced
 
 
 # --------------------------------------------------------------------------
@@ -986,6 +1048,29 @@ class Pipe:
         """
         return user_val if user_val > 0 else admin_val
 
+    def _effective_limits(self, user_valves=None) -> tuple[int, int]:
+        """(max_calls, max_consecutive) EFFECTIVE limits — single source of truth.
+
+        Admin values come from self.valves (the function's stored admin
+        config); a non-zero per-user override (Pipe.UserValves, 0 = defer)
+        replaces the admin value. Used by BOTH _analyse() (the thresholds the
+        guard enforces) and the system-prompt budget templating, so the
+        numbers substituted into the prompt can never disagree with the
+        guard.
+        """
+        user_max = (
+            user_valves.MAX_TOOL_CALLS_PER_TURN if user_valves is not None else 0
+        )
+        user_loop = (
+            user_valves.MAX_CONSECUTIVE_TOOL_CALLS
+            if user_valves is not None
+            else 0
+        )
+        return (
+            self._resolve_limit(user_max, self.valves.MAX_TOOL_CALLS_PER_TURN),
+            self._resolve_limit(user_loop, self.valves.MAX_CONSECUTIVE_TOOL_CALLS),
+        )
+
     # ------------------------------------------------------------------
     # Tool-call analysis
     # ------------------------------------------------------------------
@@ -1004,16 +1089,7 @@ class Pipe:
         the other return values are meaningless.
         """
         messages = body.get("messages", [])
-        user_max = user_valves.MAX_TOOL_CALLS_PER_TURN if user_valves is not None else 0
-        user_loop = user_valves.MAX_CONSECUTIVE_TOOL_CALLS if user_valves is not None else 0
-        max_calls = self._resolve_limit(
-            user_max,
-            self.valves.MAX_TOOL_CALLS_PER_TURN,
-        )
-        max_consecutive = self._resolve_limit(
-            user_loop,
-            self.valves.MAX_CONSECUTIVE_TOOL_CALLS,
-        )
+        max_calls, max_consecutive = self._effective_limits(user_valves)
 
         # Extract real tool calls (skip those whose result was replaced by the guard)
         history: list[dict] = []
@@ -1393,6 +1469,31 @@ class Pipe:
                 "DEBUG_LOG to inspect. Degrading to placeholder forcing.",
                 forced,
             )
+
+        # --- System-prompt budget templating (fail-open) ---------------------
+        # Substitutes {{MAX_TOOL_CALLS_PER_TURN}} / {{MAX_CONSECUTIVE_TOOL_CALLS}}
+        # in the model's system prompt with the EFFECTIVE limits, so the model
+        # knows the budget up front instead of discovering it reactively when
+        # the guard fires. Runs after _analyse (limits resolved from the same
+        # _effective_limits source) and before the payload is built; it re-runs
+        # on every tool-call iteration because Open WebUI rebuilds messages per
+        # iteration (the token reappears — substitution is idempotent).
+        # Fail-open: any error forwards the payload unchanged.
+        try:
+            max_calls_eff, max_consecutive_eff = self._effective_limits(user_valves)
+            replaced = _resolve_budget_tokens_in_system_prompt(
+                messages, max_calls_eff, max_consecutive_eff
+            )
+            if getattr(self.valves, "DEBUG_LOG", False):
+                log.info(
+                    "agent-loop-guard: system-prompt budget tokens replaced=%d "
+                    "(max_calls=%s, max_consecutive=%s)",
+                    replaced,
+                    max_calls_eff,
+                    max_consecutive_eff,
+                )
+        except Exception as exc:
+            log.warning("budget templating failed (fail-open): %s", exc)
 
         payload = {**body, "model": real_model, "messages": messages}
 
