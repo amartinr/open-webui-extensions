@@ -4,7 +4,7 @@ id: payload_inspector
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Debug-only filter that dumps the raw gateway request payload as pretty JSON to the server console and posts a truncated copy to the chat. System messages are always printed in full; user/assistant/tool contents are truncated to preview_chars. The outlet is a passthrough, so the request is never modified.
+description: Debug-only filter that dumps the raw gateway request payload as pretty JSON to the server console and posts a truncated copy to the chat. System messages are always printed in full; user/assistant/tool contents are truncated to preview_chars. The outlet is a passthrough, so the request is never modified. Logs go through the standard stdlib logger, so they follow Open WebUI's GLOBAL_LOG_LEVEL (INFO or DEBUG required).
 required_open_webui_version: 0.5.0
 version: 0.1.0
 licence: MIT
@@ -16,13 +16,11 @@ import logging
 
 from pydantic import BaseModel, Field
 
-logger = logging.getLogger("payload_inspector")
-logger.setLevel(logging.DEBUG)
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(handler)
+log = logging.getLogger(__name__)
+
+# Cap for the JSON preview posted to the chat status event. The full
+# payload is always available in the console log.
+MAX_CHAT_STATUS_CHARS = 4000
 
 
 class Filter:
@@ -38,7 +36,6 @@ class Filter:
 
     def __init__(self):
         self.valves = self.Valves()
-        logger.info("=== PAYLOAD INSPECTOR LOADED ===")
 
     def _truncate_body(self, body: dict, preview_len: int) -> dict:
         """Return a copy of the body with long contents truncated; system messages untouched."""
@@ -66,14 +63,12 @@ class Filter:
         payload_json = json.dumps(body_light, indent=2, default=str, ensure_ascii=False)
 
         # 3. Dump to the log (console)
-        logger.info("")
-        logger.info(payload_json)
-        logger.info("")
+        log.info(payload_json)
 
         # 4. Post to the chat (truncated if too large)
         if __event_emitter__:
-            display = payload_json[:4000]
-            if len(payload_json) > 4000:
+            display = payload_json[:MAX_CHAT_STATUS_CHARS]
+            if len(payload_json) > MAX_CHAT_STATUS_CHARS:
                 display += "\n\n... (truncated, see the console for the full JSON)"
             await __event_emitter__(
                 {
