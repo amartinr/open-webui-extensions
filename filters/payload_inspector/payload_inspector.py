@@ -6,7 +6,7 @@ author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Debug-only filter that dumps the gateway request payload as pretty JSON to the server console and posts a truncated copy to the chat. The tap_point valve chooses where the wire is tapped: 'inlet' dumps the request as it arrives (before memory/RAG/tools injection); 'request' dumps closer to the wire, after tools/files/RAG have been merged (best for inspecting the final tools list). System messages are always printed in full; user/assistant/tool contents are truncated to preview_chars. The outlet is a passthrough, so the request is never modified. Logs go through the standard stdlib logger, so they follow Open WebUI's GLOBAL_LOG_LEVEL (INFO or DEBUG required).
 required_open_webui_version: 0.11.2
-version: 0.2.0
+version: 0.2.1
 licence: MIT
 """
 
