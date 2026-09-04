@@ -4,9 +4,9 @@ id: payload_inspector
 author: A. Martin
 author_url: https://github.com/amartinr
 git_url: https://github.com/amartinr/open-webui-extensions.git
-description: Debug-only filter that dumps the raw gateway request payload as pretty JSON to the server console and posts a truncated copy to the chat. System messages are always printed in full; user/assistant/tool contents are truncated to preview_chars. The outlet is a passthrough, so the request is never modified. Logs go through the standard stdlib logger, so they follow Open WebUI's GLOBAL_LOG_LEVEL (INFO or DEBUG required).
-required_open_webui_version: 0.5.0
-version: 0.1.0
+description: Debug-only filter that dumps the gateway request payload as pretty JSON to the server console and posts a truncated copy to the chat. The tap_point valve chooses where the wire is tapped: 'inlet' dumps the request as it arrives (before memory/RAG/tools injection); 'request' dumps closer to the wire, after tools/files/RAG have been merged (best for inspecting the final tools list). System messages are always printed in full; user/assistant/tool contents are truncated to preview_chars. The outlet is a passthrough, so the request is never modified. Logs go through the standard stdlib logger, so they follow Open WebUI's GLOBAL_LOG_LEVEL (INFO or DEBUG required).
+required_open_webui_version: 0.11.2
+version: 0.2.0
 licence: MIT
 """
 
@@ -26,6 +26,28 @@ MAX_CHAT_STATUS_CHARS = 4000
 class Filter:
     class Valves(BaseModel):
         priority: int = Field(default=999)
+        tap_point: str = Field(
+            default="inlet",
+            description=(
+                "Tap point: 'inlet' dumps the payload as it arrives, before "
+                "Open WebUI injects memory, file contents or tools; 'request' "
+                "dumps after tools/files/RAG have been merged, right before "
+                "the payload is normalized and sent to the model (closest to "
+                "the wire, shows the final tools list)."
+            ),
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "inlet", "label": "inlet - early, before injections"},
+                        {
+                            "value": "request",
+                            "label": "request - close to the wire (final tools/RAG)",
+                        },
+                    ],
+                }
+            },
+        )
         preview_chars: int = Field(
             default=80,
             description=(
@@ -55,7 +77,8 @@ class Filter:
 
         return b
 
-    async def inlet(self, body: dict, __event_emitter__=None, __user__=None) -> dict:
+    async def _dump(self, body: dict, __event_emitter__=None) -> None:
+        """Truncate, serialize and log the payload; post a preview to the chat."""
         # 1. Copy with long contents truncated
         body_light = self._truncate_body(body, self.valves.preview_chars)
 
@@ -77,6 +100,14 @@ class Filter:
                 }
             )
 
+    async def inlet(self, body: dict, __event_emitter__=None, __user__=None) -> dict:
+        if self.valves.tap_point == "inlet":
+            await self._dump(body, __event_emitter__)
+        return body
+
+    async def request(self, body: dict, __event_emitter__=None, __user__=None) -> dict:
+        if self.valves.tap_point == "request":
+            await self._dump(body, __event_emitter__)
         return body
 
     async def outlet(self, body: dict, *args, **kwargs) -> dict:
