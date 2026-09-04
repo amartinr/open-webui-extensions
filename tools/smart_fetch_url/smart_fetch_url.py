@@ -6,7 +6,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Fetches URLs with TLS fingerprinting to avoid blocks, returns clean content with metadata. Repeated fetches of the same URL are served from an ephemeral on-disk cache.
 required_open_webui_version: 0.9.0
 requirements: curl_cffi>=0.7.0, trafilatura, selectolax
-version: 0.11.2
+version: 0.11.3
 licence: MIT
 """
 
@@ -976,8 +976,9 @@ class Tools:
         ``status_code``, ``content_type``, ``resp_headers`` and
         ``raw_bytes`` fields.
 
-        ``raw_bytes`` is the undecoded response body — needed for binary
-        document extraction (PDF, DOCX, etc.).
+        ``raw_bytes`` is the undecoded response body — present only for
+        non-text bodies (document/binary extraction, PDF, DOCX, …) and
+        ``None`` for text responses.
         """
         resolved_browser = browser
 
@@ -1108,19 +1109,23 @@ class Tools:
         final_url = str(resp.url)
         status_code = resp.status_code
 
-        # Always grab raw bytes (needed for document extraction).
-        raw_bytes: Optional[bytes] = resp.content
-
-        # Only decode to text when the Content-Type warrants it.
-        # For PDFs / images / other binary, ``resp.text`` produces
-        # garbage that doubles memory for zero value.
+        # Keep raw bytes only for non-text bodies.  Text responses carry
+        # the decoded string alone, so the raw body is not held twice
+        # (bytes + str) through the result and pipeline.
         ct_mime = content_type.split(";", 1)[0].strip().lower()
+        raw_bytes: Optional[bytes] = None
         if ct_mime.startswith("text/") or ct_mime in Tools._TEXT_LIKE_APPLICATION_TYPES:
             raw_html = resp.text
         elif ct_mime in Tools._EXTRACTABLE_DOCUMENT_TYPES:
+            # Full raw body needed for format-specific parsers (PDF, …).
             raw_html = ""
+            raw_bytes = resp.content
         else:
-            raw_html = ""  # true binary (image, video, …)
+            # True binary (image, video, …): keep the body available but
+            # never decode it to text (``resp.text`` on binary data is
+            # garbage that doubles memory for zero value).
+            raw_html = ""
+            raw_bytes = resp.content
 
         return FetchResult(
             raw_html=raw_html,
@@ -1161,17 +1166,19 @@ class Tools:
             final_url = str(resp.url)
             status_code = resp.status_code
 
-            # Always grab raw bytes (needed for document extraction).
-            raw_bytes: Optional[bytes] = resp.content
-
-            # Only decode to text when the Content-Type warrants it.
+            # Keep raw bytes only for non-text bodies (see curl_cffi path).
             ct_mime = content_type.split(";", 1)[0].strip().lower()
+            raw_bytes: Optional[bytes] = None
             if ct_mime.startswith("text/") or ct_mime in Tools._TEXT_LIKE_APPLICATION_TYPES:
                 raw_html = resp.text
             elif ct_mime in Tools._EXTRACTABLE_DOCUMENT_TYPES:
+                # Full raw body needed for format-specific parsers (PDF, …).
                 raw_html = ""
+                raw_bytes = resp.content
             else:
-                raw_html = ""  # true binary (image, video, …)
+                # True binary (image, video, …): never decode to text.
+                raw_html = ""
+                raw_bytes = resp.content
 
             return FetchResult(
                 raw_html=raw_html,

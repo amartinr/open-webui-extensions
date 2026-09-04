@@ -22,7 +22,7 @@ Collection of filters, pipes, tools, and adapters for [Open WebUI](https://docs.
 
 | Component | Version | Purpose |
 |---|---|---|
-| [Smart Fetch URL](tools/smart_fetch_url/) | 0.11.2 | Fetches URLs with TLS fingerprinting and content extraction. |
+| [Smart Fetch URL](tools/smart_fetch_url/) | 0.11.3 | Fetches URLs with TLS fingerprinting and content extraction. |
 | [YouTube Search](tools/youtube_search/) | 1.2.0 | Searches videos, channels, and playlists via the YouTube API. |
 
 ### Adapters
