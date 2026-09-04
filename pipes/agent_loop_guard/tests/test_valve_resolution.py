@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agent_loop_guard import Pipe  # noqa: E402
 
+import pytest  # noqa: E402
+
 
 def _pipe(admin_max: int = 15, admin_loop: int = 4) -> Pipe:
     """Fresh Pipe whose admin valves are (admin_max, admin_loop).
@@ -63,6 +65,51 @@ def _turn(n_calls: int, identical: bool = True) -> dict:
             {"role": "tool", "tool_call_id": cid, "content": f"result {i}"}
         )
     return {"model": "pipe.deepseek/deepseek-v4-flash", "messages": msgs}
+
+
+# --- Admin configuration validation (discrepancy 2 semantics) ----------------
+#
+# MAX_TOOL_CALLS_PER_TURN=0 must be an ACCEPTED admin configuration that
+# disables ONLY the runaway guard (the loop guard stays independent); non-zero
+# admin values must be respected as-is; and a config with both enabled must
+# satisfy runaway > loop or be rejected at configuration time.
+
+
+def test_admin_zero_runaway_is_valid_config():
+    # The documented "0 = disabled" must survive Pydantic validation.
+    v = Pipe.Valves(MAX_TOOL_CALLS_PER_TURN=0, MAX_CONSECUTIVE_TOOL_CALLS=4)
+    assert v.MAX_TOOL_CALLS_PER_TURN == 0
+
+
+def test_admin_nonzero_config_respected():
+    v = Pipe.Valves(MAX_TOOL_CALLS_PER_TURN=8, MAX_CONSECUTIVE_TOOL_CALLS=4)
+    assert v.MAX_TOOL_CALLS_PER_TURN == 8
+
+
+def test_admin_config_rejects_runaway_le_loop():
+    with pytest.raises(Exception):  # pydantic ValidationError
+        Pipe.Valves(MAX_TOOL_CALLS_PER_TURN=4, MAX_CONSECUTIVE_TOOL_CALLS=6)
+
+
+def test_admin_disabled_runaway_still_allows_loop_guard():
+    # 0 disables ONLY runaway: an identical-call loop must still be caught.
+    p = _pipe(admin_max=0)
+    body = _turn(n_calls=4, identical=True)
+    should_block, _, kind, _, _ = p._analyse(body)
+    assert should_block is True
+    assert kind == "loop"
+
+
+def test_admin_nonzero_runaway_fires_at_admin_value_not_default():
+    # Regression for the old bug: admin 8 must fire at 8, never at the
+    # class default of 15.
+    p = _pipe(admin_max=8)
+    body = _turn(n_calls=8, identical=False)
+    should_block, _, kind, total, max_calls = p._analyse(body)
+    assert should_block is True
+    assert kind == "runaway"
+    assert total == 8
+    assert max_calls == 8
 
 
 # --- _extract_user_valves ---------------------------------------------------
