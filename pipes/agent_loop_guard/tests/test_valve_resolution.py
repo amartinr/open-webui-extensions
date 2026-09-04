@@ -14,14 +14,23 @@ instantiated directly; admin "config" is simulated by overwriting
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import agent_loop_guard as alg  # noqa: E402
 from agent_loop_guard import Pipe  # noqa: E402
 
 import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_slots():
+    """Each test starts with a clean rate-limit throttle table."""
+    alg._RATE_LIMITED_WARN_LAST.clear()
+    yield
 
 
 def _pipe(admin_max: int = 15, admin_loop: int = 4) -> Pipe:
@@ -233,3 +242,83 @@ def test_full_request_shape_end_to_end():
     should_block, _, kind, _, _ = p._analyse(body, uv)
     assert should_block is True
     assert kind == "runaway"
+
+
+# --- Constraint watchdog (discrepancy 3) ------------------------------------
+#
+# Per-user overrides are not pre-validated, so the EFFECTIVE pair (admin +
+# user mixed per field) can violate the admin-side rule "runaway > loop".
+# _analyse must log a RATE-LIMITED warning (once per 5 min per user slot)
+# and continue — the request keeps working, blocking as runaway only.
+
+
+def _constraint_records(caplog):
+    return [
+        r for r in caplog.records if "runaway > loop constraint" in r.getMessage()
+    ]
+
+
+def test_constraint_violation_warns_and_blocks_as_runaway(caplog):
+    caplog.set_level(logging.WARNING)
+    # Admin (15, 4) + user runaway=3 → effective (3, 4): loop >= runaway.
+    p = _pipe(admin_max=15)
+    uv = p.UserValves(MAX_TOOL_CALLS_PER_TURN=3)
+    body = _turn(n_calls=3, identical=False)
+    should_block, _, kind, total, max_calls = p._analyse(body, uv, user_id="u1")
+    assert should_block is True
+    assert kind == "runaway"  # loop can never fire with loop >= runaway
+    assert total == 3
+    assert max_calls == 3
+    records = _constraint_records(caplog)
+    assert len(records) == 1
+    assert "user=u1" in records[0].getMessage()
+    assert "runaway=3" in records[0].getMessage()
+    assert "loop=4" in records[0].getMessage()
+
+
+def test_constraint_warning_is_rate_limited_per_user(caplog):
+    caplog.set_level(logging.WARNING)
+    p = _pipe(admin_max=15)
+    uv = p.UserValves(MAX_TOOL_CALLS_PER_TURN=3)
+    body = _turn(n_calls=3, identical=False)
+    # First call emits; the second within the 5-minute window must stay silent.
+    p._analyse(body, uv, user_id="u1")
+    p._analyse(body, uv, user_id="u1")
+    assert len(_constraint_records(caplog)) == 1
+    # A DIFFERENT user slot still gets its own warning.
+    p._analyse(body, uv, user_id="u2")
+    assert len(_constraint_records(caplog)) == 2
+
+
+def test_valid_effective_limits_no_warning(caplog):
+    caplog.set_level(logging.WARNING)
+    p = _pipe(admin_max=15, admin_loop=4)
+    body = _turn(n_calls=2, identical=True)
+    p._analyse(body)
+    assert _constraint_records(caplog) == []
+
+
+def test_constraint_skipped_when_runaway_disabled(caplog):
+    caplog.set_level(logging.WARNING)
+    # Runaway off (admin 0): the constraint only applies when both are
+    # enabled — loop alone can be anything.
+    p = _pipe(admin_max=0)
+    uv = p.UserValves(MAX_CONSECUTIVE_TOOL_CALLS=9)
+    body = _turn(n_calls=2, identical=False)
+    p._analyse(body, uv, user_id="u1")
+    assert _constraint_records(caplog) == []
+
+
+def test_constraint_silent_without_tool_traffic(caplog):
+    caplog.set_level(logging.WARNING)
+    p = _pipe(admin_max=15)
+    uv = p.UserValves(MAX_TOOL_CALLS_PER_TURN=3)  # broken pair (3, 4)
+    plain = {
+        "model": "pipe.deepseek/deepseek-v4-flash",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ],
+    }
+    p._analyse(plain, uv, user_id="u1")
+    assert _constraint_records(caplog) == []

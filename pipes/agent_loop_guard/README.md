@@ -119,9 +119,17 @@ Effective limit = user override when non-zero, otherwise the admin value.
 An admin `MAX_TOOL_CALLS_PER_TURN` of `0` disables the runaway guard; a
 non-zero per-user override re-enables it for that user only.
 
-If the effective limits violate the `runaway > loop` constraint, a warning
-is logged at runtime and the pipe continues (runaway may fire before loop
-detection).
+**Constraint watchdog.** The admin configuration is validated at save time
+(`runaway > loop` when both are enabled — rejected otherwise). Per-user
+overrides are **not** pre-validated: the effective pair (admin + user mixed
+per field) can violate the constraint at runtime — e.g. user
+`MAX_TOOL_CALLS_PER_TURN=3` over an admin `MAX_CONSECUTIVE_TOOL_CALLS=4`
+gives an effective `(3, 4)`. When that happens on a request with tool
+activity, a **rate-limited warning is logged** (once per 5 minutes per
+user, naming the user and the effective numbers) and the pipe continues:
+with `loop >= runaway` the loop guard can never fire (consecutive calls are
+bounded by the total, which reaches the runaway cap first), so every block
+is reported as `runaway`. Fix the admin or per-user configuration.
 
 ### Custom headers with templates
 

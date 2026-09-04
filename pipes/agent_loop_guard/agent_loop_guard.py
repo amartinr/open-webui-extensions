@@ -26,20 +26,26 @@ GUARD_MARKER = "[Tool call budget exhausted]"
 
 
 _REASONING_REPLAY_PATCHED = False
-_LAST_PATCH_WARN = 0.0
+# Per-slot throttle for _rate_limited_warning: {slot key: last emission}.
+_RATE_LIMITED_WARN_LAST: dict[str, float] = {}
+_RATE_LIMITED_WARN_INTERVAL = 300.0
 
 
-def _rate_limited_warning(level: str, msg: str, exc: str = "") -> bool:
-    """Emit a log line at most once per 5 minutes (module-wide).
+def _rate_limited_warning(key: str, level: str, msg: str, *args) -> bool:
+    """Emit a log line at most once per 5 minutes, PER WARNING SLOT.
+
+    `key` names the warning site (and, where useful, its subject — e.g. the
+    user id) so independent warnings never throttle each other: the first
+    emission arms the slot for _RATE_LIMITED_WARN_INTERVAL seconds.
 
     Returns True when the line was actually emitted.
     """
-    global _LAST_PATCH_WARN
     now = time.monotonic()
-    if now - _LAST_PATCH_WARN < 300.0:
+    last = _RATE_LIMITED_WARN_LAST.get(key, 0.0)
+    if now - last < _RATE_LIMITED_WARN_INTERVAL:
         return False
-    _LAST_PATCH_WARN = now
-    (log.warning if level == "warning" else log.info)(msg, exc)
+    _RATE_LIMITED_WARN_LAST[key] = now
+    (log.warning if level == "warning" else log.info)(msg, *args)
     return True
 
 
@@ -107,6 +113,7 @@ def _install_reasoning_replay_patch() -> bool:
         # Rate-limited: with the valve on and the failure persistent, this
         # would otherwise fire on every request.
         _rate_limited_warning(
+            "reasoning_replay_patch_install",
             "warning",
             "agent-loop-guard: could not install reasoning replay patch "
             "(falling back to placeholder forcing): %s",
@@ -983,12 +990,13 @@ class Pipe:
     # Tool-call analysis
     # ------------------------------------------------------------------
 
-    def _analyse(self, body: dict, user_valves=None) -> tuple[bool, str | None, str, int, int]:
+    def _analyse(self, body: dict, user_valves=None, user_id: Optional[str] = None) -> tuple[bool, str | None, str, int, int]:
         """Analyse tool calls and decide if the guard should fire.
 
         `user_valves` is the per-user Pipe.UserValves override (None when the
         request carries none): non-zero fields replace the admin values,
-        0 defers to the admin valves in self.valves.
+        0 defers to the admin valves in self.valves. `user_id` is only used
+        to tag the rate-limited constraint warning.
 
         Returns (should_block, tool_to_blame, block_kind, total, max_calls).
 
@@ -1036,6 +1044,38 @@ class Pipe:
         history.reverse()
 
         total = len(history)
+
+        # --- Constraint watchdog (rate-limited) -------------------------------
+        # Effective limits are resolved PER FIELD (user override > 0 else the
+        # admin value), so the pair can violate the admin-side rule
+        # "runaway > loop": UserValves has no validator of its own, and the
+        # admin model_validator only ever sees the admin scope. With
+        # loop >= runaway the loop guard can never fire — consecutive calls
+        # are bounded by total, which reaches the runaway cap first — so every
+        # block would be reported as 'runaway' only. Warn (once per 5 min per
+        # user slot, keyed by user id) and continue: requests keep working and
+        # the guard still caps the turn. Gated on actual tool traffic so plain
+        # chats from a misconfigured user stay silent.
+        has_tool_traffic = bool(history) or (
+            isinstance(body.get("tools"), list) and len(body["tools"]) > 0
+        )
+        if (
+            has_tool_traffic
+            and max_calls > 0
+            and max_consecutive >= max_calls
+        ):
+            _rate_limited_warning(
+                f"limits_constraint:{user_id or '-'}",
+                "warning",
+                "agent-loop-guard: effective limits violate the "
+                "runaway > loop constraint (user=%s, runaway=%d, loop=%d) — "
+                "with loop >= runaway the loop guard can never fire (the "
+                "runaway cap is reached first); requests will only block as "
+                "'runaway'. Fix the admin or per-user valves.",
+                user_id or "-",
+                max_calls,
+                max_consecutive,
+            )
 
         # Count consecutive identical calls
         consecutive = 0
@@ -1174,8 +1214,13 @@ class Pipe:
         # defer). Resolve them BEFORE analysing so the guard fires on the
         # effective limits — self.valves already holds the admin config here.
         user_valves = self._extract_user_valves(__user__)
+        user_id = (
+            str(__user__.get("id", ""))
+            if isinstance(__user__, dict) and __user__.get("id")
+            else None
+        )
         should_block, bad_tool, kind, total, max_calls = self._analyse(
-            body, user_valves
+            body, user_valves, user_id=user_id
         )
 
         log.info(
@@ -1339,13 +1384,14 @@ class Pipe:
             and _history_has_tool_calls(messages)
         ):
             _rate_limited_warning(
+                "replay_effectiveness_watchdog",
                 "warning",
                 "agent-loop-guard: REPLAY_REASONING_TEXT is on but assistant "
                 "messages still carry placeholder reasoning (forced=%d on a "
                 "tool-call history) — the get_reasoning_format patch appears "
                 "ineffective (Open WebUI internals may have changed); enable "
-                "DEBUG_LOG to inspect. Degrading to placeholder forcing: %s",
-                f"forced={forced}",
+                "DEBUG_LOG to inspect. Degrading to placeholder forcing.",
+                forced,
             )
 
         payload = {**body, "model": real_model, "messages": messages}

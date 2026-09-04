@@ -207,7 +207,7 @@ new list.
 ### 7.1 `_analyse()` — Single-pass analysis
 
 ```python
-def _analyse(self, body: dict) -> tuple[bool, str | None, str, int, int]:
+def _analyse(self, body: dict, user_valves=None, user_id=None) -> tuple[bool, str | None, str, int, int]:
 ```
 
 Returns `(should_block, tool_to_blame, block_kind, total, max_calls)`.
@@ -219,19 +219,26 @@ Returns `(should_block, tool_to_blame, block_kind, total, max_calls)`.
    `__user__["valves"]` (extracted by `_extract_user_valves()`; None when
    absent); the admin values from `self.valves` (the function's stored
    admin config). User value wins if > 0, otherwise the admin value.
-2. **Identify guarded results** — scan messages backwards from the end,
+2. **Constraint watchdog** — per-user overrides are not pre-validated, so
+   the resolved pair can violate `runaway > loop`. On a request with tool
+   traffic (tool history or `body["tools"]`), if the runaway is enabled and
+   `loop >= runaway`, log a rate-limited warning (once per 5 min per user
+   slot) and continue — with `loop >= runaway` the loop guard can never
+   fire: `consecutive <= total`, so the total always reaches the runaway
+   cap before the identical-call count reaches the loop threshold.
+3. **Identify guarded results** — scan messages backwards from the end,
    stopping at the last user message. Collect `tool_call_id` values of any
    tool result whose `content` contains `GUARD_MARKER`. These calls were
    already handled by the guard and should be excluded from the consecutive
    count.
-3. **Collect real tool calls** — scan backwards again, collecting every
+4. **Collect real tool calls** — scan backwards again, collecting every
    assistant `tool_call` whose `id` is NOT in the guarded set. Parse
    `function.arguments` as JSON. Reverse the list so it's in chronological
    order.
-4. **Count consecutive identical calls** — from the end of the history,
+5. **Count consecutive identical calls** — from the end of the history,
    count how many consecutive calls share the same `name` **AND** `args`
    (both must match). If at least 2, record the `bad_tool` name.
-5. **Decide**:
+6. **Decide**:
    - **Loop**: if `consecutive >= MAX_CONSECUTIVE_TOOL_CALLS > 0` and
      `bad_tool` is set → block with `kind="loop"`.
    - **Runaway**: if `total >= MAX_TOOL_CALLS_PER_TURN > 0` (and no loop
@@ -404,9 +411,15 @@ Effective limit = user override when non-zero, otherwise the admin value.
 An admin `MAX_TOOL_CALLS_PER_TURN` of `0` disables the runaway guard; a
 non-zero per-user override re-enables it for that user only.
 
-If the user's effective limits violate the `runaway > loop` constraint at
-runtime, a warning is logged and the pipe continues (runaway may fire before
-loop detection).
+**Constraint watchdog.** Per-user overrides are not pre-validated, so the
+effective pair (admin + user mixed per field) can violate the `runaway >
+loop` rule at runtime. On a request with tool activity the pipe logs a
+**rate-limited warning** (once per 5 minutes per user slot, with the user
+id and the effective numbers) and continues: with `loop >= runaway` the
+loop guard can never fire (the runaway cap is reached first), so every
+block is reported as `runaway`. The watchdog is deliberately a warning, not
+an error — the request keeps working while the admin fixes the
+configuration.
 
 ---
 
