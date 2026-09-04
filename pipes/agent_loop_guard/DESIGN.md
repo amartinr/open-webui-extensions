@@ -146,8 +146,10 @@ selector.
 
 ```python
 def __init__(self):
+    # self.valves is overwritten by Open WebUI with the stored admin
+    # configuration on every request; per-user overrides arrive in
+    # __user__["valves"] (no _admin_valves twin is kept).
     self.valves = self.Valves()
-    self._admin_valves = self.Valves()
     self._models_cache: list[dict] = []
 
 async def pipes(self):
@@ -213,7 +215,10 @@ Returns `(should_block, tool_to_blame, block_kind, total, max_calls)`.
 **Algorithm:**
 
 1. **Determine limits** — resolve user vs admin valve values using
-   `_resolve_limit()` (user value wins if > 0, otherwise admin default).
+   `_resolve_limit()`. The user values come from the per-user override in
+   `__user__["valves"]` (extracted by `_extract_user_valves()`; None when
+   absent); the admin values from `self.valves` (the function's stored
+   admin config). User value wins if > 0, otherwise the admin value.
 2. **Identify guarded results** — scan messages backwards from the end,
    stopping at the last user message. Collect `tool_call_id` values of any
    tool result whose `content` contains `GUARD_MARKER`. These calls were
@@ -363,8 +368,11 @@ counter so the user knows how many tool calls remain.
 
 ## 13. Valves
 
-> **Admin valves** are configured in the Function admin panel.
-> **User valves** (`UserValves`) can be overridden per workspace model.
+> **Admin valves** are configured in the Function admin panel. On every
+> request Open WebUI overwrites `self.valves` with the stored admin
+> configuration (`open_webui/functions.py`, `get_function_module_by_id`).
+> **User valves** (`UserValves`) are configured per user; Open WebUI
+> delivers them in `__user__["valves"]` on every request.
 > A user valve value of `0` means "use admin default".
 
 ### Admin valves (Pipe.Valves)
@@ -389,8 +397,12 @@ a clear error message.
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `MAX_TOOL_CALLS_PER_TURN` | `0` | Per-model override. `0` = use admin default. |
-| `MAX_CONSECUTIVE_TOOL_CALLS` | `0` | Per-model override. `0` = use admin default. |
+| `MAX_TOOL_CALLS_PER_TURN` | `0` | Per-user override of the runaway limit. `0` = use the admin value. |
+| `MAX_CONSECUTIVE_TOOL_CALLS` | `0` | Per-user override of the loop threshold. `0` = use the admin value. |
+
+Effective limit = user override when non-zero, otherwise the admin value.
+An admin `MAX_TOOL_CALLS_PER_TURN` of `0` disables the runaway guard; a
+non-zero per-user override re-enables it for that user only.
 
 If the user's effective limits violate the `runaway > loop` constraint at
 runtime, a warning is logged and the pipe continues (runaway may fire before

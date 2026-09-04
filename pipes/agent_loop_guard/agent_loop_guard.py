@@ -783,8 +783,14 @@ class Pipe:
         )
 
     def __init__(self):
+        # `self.valves` starts from the class defaults, but on EVERY request
+        # Open WebUI overwrites it with the function's stored ADMIN valve
+        # configuration (open_webui/functions.py — get_function_module_by_id).
+        # Per-user overrides are NOT merged in here: Open WebUI delivers them
+        # separately under `__user__["valves"]` as a Pipe.UserValves instance
+        # (see _extract_user_valves). No `_admin_valves` twin is kept —
+        # `self.valves` IS the admin configuration at request time.
         self.valves = self.Valves()
-        self._admin_valves = self.Valves()
         self._models_cache: list[dict] = []
         # Shared connection pool: reused across requests and tool-call
         # iterations (no fresh DNS+TLS handshake per call). httpx reuses
@@ -920,16 +926,69 @@ class Pipe:
     # ------------------------------------------------------------------
     # Valve resolution
     # ------------------------------------------------------------------
+    #
+    # Two valve scopes feed the guard limits:
+    #   - ADMIN: self.valves (Pipe.Valves) — the function's stored admin
+    #     configuration, which Open WebUI overwrites on every request. A
+    #     MAX_TOOL_CALLS_PER_TURN of 0 means "runaway guard disabled".
+    #   - USER:  Pipe.UserValves — per-user overrides delivered by Open
+    #     WebUI inside `__user__["valves"]` on every request. A value of
+    #     0 means "no override: use the admin value".
+    # Effective limit = user override when non-zero, else the admin value.
+
+    def _extract_user_valves(self, __user__: Optional[dict]):
+        """Return the request's Pipe.UserValves override, or None.
+
+        Open WebUI passes per-user pipe valves as an instance of this pipe's
+        `UserValves` under `__user__["valves"]` (verified in
+        open_webui/functions.py, v0.11.x and main). Requests that bypass the
+        normal pipe path carry no such key — None means "no user override",
+        so the admin values in self.valves apply as-is.
+
+        Defensive about shape (UserValves instance, plain dict, or any
+        BaseModel with model_dump()) and fail-open: unknown keys are dropped
+        and validation errors degrade to None — a malformed user valve must
+        never break the request.
+        """
+        if not isinstance(__user__, dict):
+            return None
+        raw = __user__.get("valves")
+        if raw is None:
+            return None
+        if isinstance(raw, self.UserValves):
+            return raw
+        if isinstance(raw, dict):
+            payload = {k: v for k, v in raw.items() if v is not None}
+        else:
+            dump = getattr(raw, "model_dump", None)
+            if not callable(dump):
+                return None
+            payload = {k: v for k, v in dump().items() if v is not None}
+        try:
+            return self.UserValves(**payload)
+        except Exception:
+            return None
 
     def _resolve_limit(self, user_val: int, admin_val: int) -> int:
+        """Effective limit: the user's non-zero override, else the admin value.
+
+        `user_val` comes from the per-user Pipe.UserValves (0 = defer);
+        `admin_val` from the function's admin valves in self.valves. An admin
+        MAX_TOOL_CALLS_PER_TURN of 0 (runaway disabled) is preserved when the
+        user defers, and replaced when the user sets a non-zero value.
+        """
         return user_val if user_val > 0 else admin_val
 
     # ------------------------------------------------------------------
     # Tool-call analysis
     # ------------------------------------------------------------------
 
-    def _analyse(self, body: dict) -> tuple[bool, str | None, str, int, int]:
+    def _analyse(self, body: dict, user_valves=None) -> tuple[bool, str | None, str, int, int]:
         """Analyse tool calls and decide if the guard should fire.
+
+        `user_valves` is the per-user Pipe.UserValves override (None when the
+        request carries none): non-zero fields replace the admin values,
+        0 defers to the admin valves in self.valves.
 
         Returns (should_block, tool_to_blame, block_kind, total, max_calls).
 
@@ -937,13 +996,15 @@ class Pipe:
         the other return values are meaningless.
         """
         messages = body.get("messages", [])
+        user_max = user_valves.MAX_TOOL_CALLS_PER_TURN if user_valves is not None else 0
+        user_loop = user_valves.MAX_CONSECUTIVE_TOOL_CALLS if user_valves is not None else 0
         max_calls = self._resolve_limit(
+            user_max,
             self.valves.MAX_TOOL_CALLS_PER_TURN,
-            self._admin_valves.MAX_TOOL_CALLS_PER_TURN,
         )
         max_consecutive = self._resolve_limit(
+            user_loop,
             self.valves.MAX_CONSECUTIVE_TOOL_CALLS,
-            self._admin_valves.MAX_CONSECUTIVE_TOOL_CALLS,
         )
 
         # Extract real tool calls (skip those whose result was replaced by the guard)
@@ -1108,7 +1169,14 @@ class Pipe:
         url = f"{self.valves.GATEWAY_BASE_URL.rstrip('/')}/chat/completions"
 
         # --- Analyse tool calls ---------------------------------------------
-        should_block, bad_tool, kind, total, max_calls = self._analyse(body)
+        # Per-user valve overrides arrive via __user__["valves"] (Open WebUI
+        # injects a Pipe.UserValves instance there on every request; 0 =
+        # defer). Resolve them BEFORE analysing so the guard fires on the
+        # effective limits — self.valves already holds the admin config here.
+        user_valves = self._extract_user_valves(__user__)
+        should_block, bad_tool, kind, total, max_calls = self._analyse(
+            body, user_valves
+        )
 
         log.info(
             "Agent Loop Guard → %s (block=%s, kind=%s, tool=%s, total=%s, max=%s)",

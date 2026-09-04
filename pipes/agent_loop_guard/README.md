@@ -104,12 +104,20 @@ User message → Open WebUI → Agent Loop Guard pipe()
 
 ### User valves (Pipe.UserValves)
 
-Configured per workspace model. A value of `0` defers to the admin default.
+Configured per **user** (Open WebUI `UserValves`): on every request Open
+WebUI delivers the user's override to the pipe inside `__user__["valves"]`
+(a `Pipe.UserValves` instance). A value of `0` defers to the function's
+admin valve (`self.valves`, which Open WebUI fills with the stored admin
+configuration on every request).
 
 | Valve | Default | Description |
 |-------|---------|-------------|
-| `MAX_TOOL_CALLS_PER_TURN` | `0` | Per-model override. `0` = use admin default. |
-| `MAX_CONSECUTIVE_TOOL_CALLS` | `0` | Per-model override. `0` = use admin default. |
+| `MAX_TOOL_CALLS_PER_TURN` | `0` | Per-user override of the runaway limit. `0` = use the admin value. |
+| `MAX_CONSECUTIVE_TOOL_CALLS` | `0` | Per-user override of the loop threshold. `0` = use the admin value. |
+
+Effective limit = user override when non-zero, otherwise the admin value.
+An admin `MAX_TOOL_CALLS_PER_TURN` of `0` disables the runaway guard; a
+non-zero per-user override re-enables it for that user only.
 
 If the effective limits violate the `runaway > loop` constraint, a warning
 is logged at runtime and the pipe continues (runaway may fire before loop
