@@ -241,8 +241,11 @@ Returns `(should_block, tool_to_blame, block_kind, total, max_calls)`.
 6. **Decide**:
    - **Loop**: if `consecutive >= MAX_CONSECUTIVE_TOOL_CALLS > 0` and
      `bad_tool` is set → block with `kind="loop"`.
-   - **Runaway**: if `total >= MAX_TOOL_CALLS_PER_TURN > 0` (and no loop
-     was detected) → block with `kind="runaway"`.
+   - **Runaway**: if `total > MAX_TOOL_CALLS_PER_TURN > 0` (and no loop
+     was detected) → block with `kind="runaway"`. The budget itself is
+     allowed — calls 1..max_calls return their real results and the model
+     may finish cleanly; the guard fires on the first call BEYOND the
+     limit, replacing that extra call's result.
    - Otherwise → no block (`should_block=False`).
 
 ### Why both name AND args must match?
@@ -390,7 +393,7 @@ counter so the user knows how many tool calls remain.
 | `GATEWAY_AUTH_HEADER` | `"Authorization"` | HTTP header name for the API key |
 | `GATEWAY_AUTH_VALUE` | `""` | Credential value (password field) |
 | `GATEWAY_CUSTOM_HEADERS` | `""` | JSON object of extra headers with template variable support |
-| `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before runaway guard fires. `0` = disabled |
+| `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls allowed per turn before the runaway guard fires on the next call (the call beyond the limit is blocked). `0` = disabled |
 | `MAX_CONSECUTIVE_TOOL_CALLS` | `4` | Consecutive identical calls before loop guard fires (min 3) |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to remove |
 | `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks **within each user message** (per-turn: the core's block and the image_filter's current-turn block for the same upload merge to one tag; re-uploads in later turns keep their own block). Cache-safe: historical messages stay byte-stable between turns. `False` = forward payloads unchanged |
@@ -416,8 +419,9 @@ effective pair (admin + user mixed per field) can violate the `runaway >
 loop` rule at runtime. On a request with tool activity the pipe logs a
 **rate-limited warning** (once per 5 minutes per user slot, with the user
 id and the effective numbers) and continues: with `loop >= runaway` the
-loop guard can never fire (the runaway cap is reached first), so every
-block is reported as `runaway`. The watchdog is deliberately a warning, not
+loop threshold is effectively unreachable (the runaway cap fires first; a
+loop can only trip on an all-identical history at the boundary), so blocks
+are reported as `runaway`. The watchdog is deliberately a warning, not
 an error — the request keeps working while the admin fixes the
 configuration.
 

@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.8
+version: 2.17.9
 licence: MIT
 """
 
@@ -787,7 +787,8 @@ class Pipe:
         )
         MAX_TOOL_CALLS_PER_TURN: int = Field(
             default=15,
-            description="Max tool calls in a turn before the guard fires. Set to 0 to disable.",
+            description="Max tool calls ALLOWED in a turn; the guard fires on "
+            "the first call beyond the limit. Set to 0 to disable.",
         )
         MAX_CONSECUTIVE_TOOL_CALLS: int = Field(
             default=4,
@@ -1126,12 +1127,13 @@ class Pipe:
         # admin value), so the pair can violate the admin-side rule
         # "runaway > loop": UserValves has no validator of its own, and the
         # admin model_validator only ever sees the admin scope. With
-        # loop >= runaway the loop guard can never fire — consecutive calls
-        # are bounded by total, which reaches the runaway cap first — so every
-        # block would be reported as 'runaway' only. Warn (once per 5 min per
-        # user slot, keyed by user id) and continue: requests keep working and
-        # the guard still caps the turn. Gated on actual tool traffic so plain
-        # chats from a misconfigured user stay silent.
+        # loop >= runaway the loop threshold is effectively unreachable — the
+        # runaway cap fires first (a loop can only trip on an all-identical
+        # history exactly at the cap boundary) — so blocks are reported as
+        # 'runaway'. Warn (once per 5 min per user slot, keyed by user id)
+        # and continue: requests keep working and the guard still caps the
+        # turn. Gated on actual tool traffic so plain chats from a
+        # misconfigured user stay silent.
         has_tool_traffic = bool(history) or (
             isinstance(body.get("tools"), list) and len(body["tools"]) > 0
         )
@@ -1145,9 +1147,10 @@ class Pipe:
                 "warning",
                 "agent-loop-guard: effective limits violate the "
                 "runaway > loop constraint (user=%s, runaway=%d, loop=%d) — "
-                "with loop >= runaway the loop guard can never fire (the "
-                "runaway cap is reached first); requests will only block as "
-                "'runaway'. Fix the admin or per-user valves.",
+                "with loop >= runaway the loop threshold is effectively "
+                "unreachable (the runaway cap fires first unless every call "
+                "is identical); requests will usually block as 'runaway'. "
+                "Fix the admin or per-user valves.",
                 user_id or "-",
                 max_calls,
                 max_consecutive,
@@ -1170,8 +1173,12 @@ class Pipe:
         if max_consecutive > 0 and consecutive >= max_consecutive and bad_tool:
             return True, bad_tool, "loop", total, max_calls
 
-        # Runaway: total >= max_calls (only if no loop)
-        if max_calls > 0 and total >= max_calls:
+        # Runaway: total > max_calls — the budget itself is ALLOWED: calls
+        # 1..max_calls return their real results and the model may finish
+        # cleanly within budget. The guard fires on the first call BEYOND the
+        # limit, replacing that extra call's result. Only checked if no loop
+        # fired first.
+        if max_calls > 0 and total > max_calls:
             return True, None, "runaway", total, max_calls
 
         return False, None, "", total, max_calls

@@ -51,7 +51,7 @@ User message → Open WebUI → Agent Loop Guard pipe()
                                │     └─ Replace last tool result with
                                │        "[Tool call budget exhausted] - loop detected"
                                │
-                               ├─ Runaway? (total ≥ MAX_TOOL_CALLS_PER_TURN)
+                               ├─ Runaway? (total > MAX_TOOL_CALLS_PER_TURN)
                                │     └─ Replace last tool result with
                                │        "[Tool call budget exhausted] - turn limit reached"
                                │
@@ -66,7 +66,7 @@ User message → Open WebUI → Agent Loop Guard pipe()
 | State | Condition | Action |
 |:-----:|:---------:|--------|
 | **Loop** | Consecutive identical tool calls (same name **and** same arguments) reach `MAX_CONSECUTIVE_TOOL_CALLS` | Tool result replaced with loop-specific message naming the tool |
-| **Runaway** | Total tool calls in the turn reach `MAX_TOOL_CALLS_PER_TURN` (only if no loop detected) | Tool result replaced with runaway message |
+| **Runaway** | Total tool calls in the turn **exceed** `MAX_TOOL_CALLS_PER_TURN` (the limit itself is allowed — only if no loop detected) | Result of the first call **beyond** the limit replaced with runaway message |
 
 - There is **no escalation ladder** — the guard fires at the configured
   threshold without intermediate warnings.
@@ -91,7 +91,7 @@ User message → Open WebUI → Agent Loop Guard pipe()
 | `GATEWAY_AUTH_HEADER` | `"Authorization"` | HTTP header name for the API key |
 | `GATEWAY_AUTH_VALUE` | `""` | API key/credential (password field) |
 | `GATEWAY_CUSTOM_HEADERS` | `""` | JSON object of extra headers. Supports `{{USER_NAME}}`, `{{USER_ID}}`, `{{USER_EMAIL}}`, `{{USER_ROLE}}`, `{{CHAT_ID}}`, `{{MESSAGE_ID}}` |
-| `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls before runaway guard fires. `0` = disabled |
+| `MAX_TOOL_CALLS_PER_TURN` | `15` | Max tool calls allowed per turn before the runaway guard fires on the next call (the call beyond the limit is blocked). `0` = disabled |
 | `MAX_CONSECUTIVE_TOOL_CALLS` | `4` | Consecutive identical calls before loop guard fires (min 3) |
 | `TOOL_BLOCKLIST` | `""` | Comma/newline-separated tool names to remove from the agent's tool list. Example: `"delete_file, terminal_execute"` |
 | `ATTACHED_FILES_CLEANUP` | `True` | Collapse and deduplicate `<attached_files>` blocks within each user message (see [Attached-Files Cleanup](#attached-files-cleanup)). `False` = forward payloads unchanged |
@@ -127,9 +127,10 @@ per field) can violate the constraint at runtime — e.g. user
 gives an effective `(3, 4)`. When that happens on a request with tool
 activity, a **rate-limited warning is logged** (once per 5 minutes per
 user, naming the user and the effective numbers) and the pipe continues:
-with `loop >= runaway` the loop guard can never fire (consecutive calls are
-bounded by the total, which reaches the runaway cap first), so every block
-is reported as `runaway`. Fix the admin or per-user configuration.
+with `loop >= runaway` the loop threshold is effectively unreachable (the
+runaway cap fires first; a loop can only trip on an all-identical history
+at the boundary), so blocks are reported as `runaway`. Fix the admin or
+per-user configuration.
 
 ### Custom headers with templates
 

@@ -109,15 +109,19 @@ def test_admin_disabled_runaway_still_allows_loop_guard():
     assert kind == "loop"
 
 
-def test_admin_nonzero_runaway_fires_at_admin_value_not_default():
-    # Regression for the old bug: admin 8 must fire at 8, never at the
-    # class default of 15.
+def test_admin_nonzero_runaway_fires_on_call_beyond_admin_value():
+    # Regression for the old bug: admin 8 must govern the fire point (the
+    # 9th call), never the class default of 15.
     p = _pipe(admin_max=8)
-    body = _turn(n_calls=8, identical=False)
-    should_block, _, kind, total, max_calls = p._analyse(body)
+    # 8 calls = exactly the budget: allowed, all results delivered.
+    body_at_limit = _turn(n_calls=8, identical=False)
+    assert p._analyse(body_at_limit)[0] is False
+    # The 9th call exceeds the budget: runaway fires on it.
+    body_over = _turn(n_calls=9, identical=False)
+    should_block, _, kind, total, max_calls = p._analyse(body_over)
     assert should_block is True
     assert kind == "runaway"
-    assert total == 8
+    assert total == 9
     assert max_calls == 8
 
 
@@ -174,26 +178,34 @@ def test_admin_defaults_loop_fires_at_four_identical():
     assert max_calls == 15  # the admin runaway value is reported
 
 
-def test_admin_defaults_runaway_fires_at_fifteen():
+def test_admin_defaults_runaway_allows_full_budget_then_fires():
     p = _pipe()
-    body = _turn(n_calls=15, identical=False)
-    should_block, _, kind, total, max_calls = p._analyse(body)
+    # Exactly 15 calls = the budget: no block, the model may finish cleanly.
+    body_at_limit = _turn(n_calls=15, identical=False)
+    assert p._analyse(body_at_limit)[0] is False
+    # The 16th call exceeds the budget: runaway fires on it.
+    body_over = _turn(n_calls=16, identical=False)
+    should_block, _, kind, total, max_calls = p._analyse(body_over)
     assert should_block is True
     assert kind == "runaway"
-    assert total == 15
+    assert total == 16
     assert max_calls == 15
 
 
 def test_user_override_lowers_runaway_threshold():
     p = _pipe(admin_max=15)
-    body = _turn(n_calls=2, identical=False)
     # Without an override: 2 calls are nowhere near the admin runaway (15).
+    body = _turn(n_calls=2, identical=False)
     assert p._analyse(body)[0] is False
-    # With a per-user override of 2 the same history trips runaway.
     uv = p.UserValves(MAX_TOOL_CALLS_PER_TURN=2)
-    should_block, _, kind, total, max_calls = p._analyse(body, uv)
+    # 2 calls = exactly the per-user budget: allowed.
+    assert p._analyse(body, uv)[0] is False
+    # The 3rd call exceeds the per-user budget: runaway fires on it.
+    body_over = _turn(n_calls=3, identical=False)
+    should_block, _, kind, total, max_calls = p._analyse(body_over, uv)
     assert should_block is True
     assert kind == "runaway"
+    assert total == 3
     assert max_calls == 2
 
 
@@ -212,11 +224,16 @@ def test_admin_disabled_runaway_does_not_fire():
 
 def test_admin_disabled_but_user_override_reenables():
     p = _pipe(admin_max=0)
-    body = _turn(n_calls=3, identical=False)
     uv = p.UserValves(MAX_TOOL_CALLS_PER_TURN=3)
-    should_block, _, kind, total, max_calls = p._analyse(body, uv)
+    # 3 calls = exactly the per-user budget: allowed.
+    body_at_limit = _turn(n_calls=3, identical=False)
+    assert p._analyse(body_at_limit, uv)[0] is False
+    # The 4th call exceeds it: runaway fires.
+    body_over = _turn(n_calls=4, identical=False)
+    should_block, _, kind, total, max_calls = p._analyse(body_over, uv)
     assert should_block is True
     assert kind == "runaway"
+    assert total == 4
     assert max_calls == 3
 
 
@@ -235,7 +252,7 @@ def test_user_loop_override_tightens_loop_threshold():
 def test_full_request_shape_end_to_end():
     """The shape Open WebUI really sends: __user__ dict with 'valves'."""
     p = _pipe(admin_max=15)
-    body = _turn(n_calls=2, identical=False)
+    body = _turn(n_calls=3, identical=False)
     __user__ = {"id": "u1", "name": "Ana", "valves": {"MAX_TOOL_CALLS_PER_TURN": 2}}
     uv = p._extract_user_valves(__user__)
     assert uv is not None
@@ -263,14 +280,20 @@ def test_constraint_violation_warns_and_blocks_as_runaway(caplog):
     # Admin (15, 4) + user runaway=3 → effective (3, 4): loop >= runaway.
     p = _pipe(admin_max=15)
     uv = p.UserValves(MAX_TOOL_CALLS_PER_TURN=3)
-    body = _turn(n_calls=3, identical=False)
-    should_block, _, kind, total, max_calls = p._analyse(body, uv, user_id="u1")
+    # 3 calls = exactly the (violating) budget: allowed, warning still logged.
+    body_at_limit = _turn(n_calls=3, identical=False)
+    should_block, *_ = p._analyse(body_at_limit, uv, user_id="u1")
+    assert should_block is False
+    # The 4th call exceeds it: runaway fires (loop threshold 4 needs 4
+    # IDENTICAL calls; these are distinct).
+    body_over = _turn(n_calls=4, identical=False)
+    should_block, _, kind, total, max_calls = p._analyse(body_over, uv, user_id="u1")
     assert should_block is True
-    assert kind == "runaway"  # loop can never fire with loop >= runaway
-    assert total == 3
+    assert kind == "runaway"
+    assert total == 4
     assert max_calls == 3
     records = _constraint_records(caplog)
-    assert len(records) == 1
+    assert len(records) == 1  # rate-limited per user: u1 warns once per 5 min
     assert "user=u1" in records[0].getMessage()
     assert "runaway=3" in records[0].getMessage()
     assert "loop=4" in records[0].getMessage()
