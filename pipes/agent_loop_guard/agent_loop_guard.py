@@ -7,7 +7,7 @@ git_url: https://github.com/amartinr/open-webui-extensions.git
 description: Pipe function that prevents AI agents from entering infinite tool-calling loops, without wasting tool results or burning LLM tokens. For DeepSeek-class models it also forces reasoning_content on assistant messages of tool-calling histories (required by the DeepSeek API contract, missing field silently degrades multi-turn reasoning). Opt-in per-request diagnostics behind the DEBUG_LOG valve.
 required_open_webui_version: 0.5.0
 requirements: httpx, pydantic
-version: 2.17.6
+version: 2.17.7
 licence: MIT
 """
 
