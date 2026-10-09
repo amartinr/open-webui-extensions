@@ -22,6 +22,7 @@ Collection of filters, pipes, tools, and adapters for [Open WebUI](https://docs.
 
 | Component | Version | Purpose |
 |---|---|---|
+| [Open WebUI Meta-Tool](tools/owui_meta/) | 0.25.0 | Queries Open WebUI's internal API for the requesting user's own data (chats, files, prompts, tools, models, knowledge); token-authenticated, allowlisted, read-only except user-authorized file deletion. |
 | [Smart Fetch URL](tools/smart_fetch_url/) | 0.11.3 | Fetches URLs with TLS fingerprinting and content extraction. |
 | [YouTube Search](tools/youtube_search/) | 1.2.0 | Searches videos, channels, and playlists via the YouTube API. |
 
